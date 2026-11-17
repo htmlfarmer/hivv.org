@@ -11153,6 +11153,7 @@ COMMANDS = {
     "partner":         cmd_partner,
     "local":           cmd_local,
     "capabilities":    cmd_capabilities,
+    "opencode":        cmd_opencode,
     "problems":        cmd_problems,
     "errors":          cmd_problems,
     "bug":             cmd_bug,
