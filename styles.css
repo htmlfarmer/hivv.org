@@ -5,6 +5,38 @@
 .skip-link { position: absolute; top: -40px; left: 0; background: #00ff88; color: #000; padding: 8px 16px; z-index: 1000; transition: top 0.2s; }
 .skip-link:focus { top: 0; }
 .visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); border: 0; }
+
+/* ── Global link colour + focus ring ────────────────────────────────────────
+   styles.css used to style ONLY `.site-nav .nav-links a`. Every other link on
+   every page inherited the browser default #0000EE, which measures 2.10:1 on
+   this background and fails WCAG AA (4.5:1) — measured 2026-11-17 by sampling
+   rendered pixels across 45 pages: 17 of 128 unique links failed AA, 13 of
+   them below 3.0 (fails even as large text).
+
+   #7dd3a7 was chosen by measurement, not taste — it clears 4.5:1 on all four
+   backgrounds actually in use here:
+       body #0a0a0f 11.05:1   nav   #0d1117 10.59:1
+       card #12141d 10.27:1   panel #1a1a24  9.65:1
+   (#0000ee on those same four: 2.10 / 2.01 / 1.95 / 1.84 — all fail.)
+
+   Specificity note: `.site-nav .nav-links a { color:#888 }` and
+   `.site-nav .brand` are more specific than a bare `a`, so nav styling is
+   untouched. Inline `style="color:…"` also still wins, as before.
+
+   Underline on prose links only: WCAG 1.4.1 says colour alone must not be the
+   thing that makes a link a link. Nav links set `text-decoration:none` and
+   carry their own background, so they are unaffected. */
+a { color: #7dd3a7; }
+p a, li a, td a { text-decoration: underline; text-underline-offset: 3px; }
+
+/* Keyboard users need to see where they are. There was no focus style at all
+   beyond .skip-link:focus, so tabbing through a page was invisible. */
+a:focus-visible, button:focus-visible, input:focus-visible,
+textarea:focus-visible, select:focus-visible, [tabindex]:focus-visible {
+  outline: 3px solid #00ff88;
+  outline-offset: 3px;
+  border-radius: 4px;
+}
 body {
   background: #0a0a0f;
   color: #e0e0e0;
@@ -273,6 +305,14 @@ tr:hover td { background: #1a1a24; }
 .grid-2 { grid-template-columns: repeat(2, 1fr); }
 .grid-3 { grid-template-columns: repeat(3, 1fr); }
 .grid-4 { grid-template-columns: repeat(4, 1fr); }
+/* Grid children default to `min-width: auto`, which means a track will NOT
+   shrink below its content's intrinsic width — so one unbreakable string
+   (a GitHub URL, a long token, an email) blows the whole row wider than the
+   viewport even though `grid-template-columns` already collapsed to 1fr.
+   Measured 2026-11-17: /about.html scrolled 607px inside a 390px phone.
+   `min-width: 0` is the standard fix; `overflow-wrap` handles the string. */
+.grid > * { min-width: 0; }
+.grid > * * { overflow-wrap: anywhere; }
 @media (max-width: 768px) {
   .grid-2, .grid-3, .grid-4 { grid-template-columns: 1fr; }
   .site-nav .nav-links { margin-left: 0; width: 100%; }

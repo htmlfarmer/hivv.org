@@ -1381,6 +1381,11 @@
 </head>
 <body>
 
+<!-- Keyboard users: one Tab should reach content, not the whole header nav.
+     .skip-link is defined in styles.css and was used by ZERO pages until now
+     (measured 2026-11-17). -->
+<a class="skip-link" href="#main">Skip to main content</a>
+
   <!-- COMMAND CENTER HEADER -->
   <header class="command-header">
     <div class="command-brand">
@@ -1414,16 +1419,73 @@
     <nav class="command-nav">
       <a href="/">Control Center</a>
       <a href="/chat/" class="active" style="color:var(--accent);background:rgba(0,255,136,0.1);border:1px solid rgba(0,255,136,0.2);">🗣️ Chat</a>
-      <a href="/dashboard">Governance</a>
+      <a href="/hivv-dashboard.html">Governance</a>
       <a href="/status">Status</a>
       <a href="/nodes.html" id="hivv-bee-pill" title="View all registered bees" style="display:inline-flex;align-items:center;gap:6px;color:#fef3c7;font-weight:600;border:1px solid #57534e;border-radius:999px;padding:4px 12px;background:rgba(254,243,199,.05);text-decoration:none"><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#22c55e;box-shadow:0 0 8px rgba(34,197,94,.6)"></span><span>🐝 <span id="hivv-bee-count">…</span> online</span></a>
       <a href="/cli.html" style="color:#fbbf24;font-weight:700;border:1px solid #d97706;border-radius:6px;padding:4px 10px;background:rgba(251,191,36,.08)">🐝 Install CLI</a>
       <a href="/docs">API Docs</a>
+      <a href="/about.html" style="color:#a855f7;font-weight:600;border:1px solid rgba(168,85,247,.35);border-radius:6px;padding:4px 10px;background:rgba(168,85,247,.08);text-decoration:none">💜 About &amp; Contact</a>
     </nav>
   </header>
 
   <!-- MAIN CONTROL LAYOUT -->
-  <main class="control-main">
+  <main id="main" class="control-main">
+
+    <!-- ── WHO WE ARE + WHAT TO DO FIRST ──────────────────────────────────
+         This page previously had NO level-one heading at all (measured
+         2026-11-17: axe flagged page-has-heading-one, and a screen reader had
+         no page identity to announce). It opened with a curl command instead,
+         which answered "what does this site do?" with a shell one-liner — fine
+         for an engineer, meaningless to a teacher, a nurse or a farmer.
+         (Wording note: this comment deliberately spells out "level-one heading"
+         rather than writing the tag name, because regex-based tooling that
+         scans this file would otherwise pick up the literal markup inside the
+         comment and count a phantom heading.)
+         Three doors, in the order a real person needs them. -->
+    <section style="margin:0 0 24px; padding:26px 26px 24px;
+                    background:linear-gradient(180deg, rgba(0,255,136,.07), rgba(168,85,247,.05));
+                    border:1px solid rgba(0,255,136,.24); border-radius:14px; position:relative; overflow:hidden;">
+      <h1 style="margin:0 0 8px; font-size:clamp(1.5rem,3.6vw,2.3rem); line-height:1.25;
+                 color:#fff; letter-spacing:-.01em;">
+        Talk to a free AI that runs on people's own computers.
+      </h1>
+      <p style="margin:0 0 20px; color:#b6c2d1; line-height:1.8; max-width:64ch; font-size:1.02em;">
+        HIVV is a distributed AI network — pronounced <strong style="color:var(--accent,#00ff88);">HIVE</strong>.
+        You ask something, one of thousands of ordinary machines answers it, and you
+        get a receipt saying exactly which one did and whether you allowed it.
+        No account needed to start. Nothing to install to talk.
+      </p>
+
+      <div style="display:flex; flex-wrap:wrap; gap:12px;">
+        <a href="/chat/"
+           style="display:inline-flex; align-items:center; min-height:52px; padding:.9rem 1.6rem;
+                  border-radius:12px; font-weight:700; font-size:1.02rem; text-decoration:none;
+                  background:linear-gradient(90deg,#00ff88,#00cc6a); color:#06130c;">
+          💬 Talk to AI
+        </a>
+        <a href="/hivv-dashboard.html"
+           style="display:inline-flex; align-items:center; min-height:52px; padding:.9rem 1.6rem;
+                  border-radius:12px; font-weight:700; font-size:1.02rem; text-decoration:none;
+                  background:transparent; color:#e6edf7; border:1px solid rgba(255,255,255,.22);">
+          🛡️ Control my AI
+        </a>
+        <a href="/cli.html"
+           style="display:inline-flex; align-items:center; min-height:52px; padding:.9rem 1.6rem;
+                  border-radius:12px; font-weight:700; font-size:1.02rem; text-decoration:none;
+                  background:transparent; color:#e6edf7; border:1px solid rgba(255,255,255,.22);">
+          🌐 Join the network
+        </a>
+      </div>
+
+      <p style="margin:16px 0 0; color:#8b98ab; line-height:1.8; font-size:.94em;">
+        <strong style="color:#b6c2d1;">Not sure where to begin?</strong>
+        The middle button is the one nobody else gives you: it shows what your AI is
+        allowed to do, and lets you take it back.
+        <a href="/purpose.html" style="color:var(--accent,#00ff88);">Why we built it →</a>
+        ·
+        <a href="/about.html" style="color:#c4a7ff;">Who's behind it →</a>
+      </p>
+    </section>
 
     <!-- 🔥 OBVIOUS CLI INSTALL BANNER -->
     <section style="background:linear-gradient(135deg,#1c1917 0%,#292524 100%);border:1px solid #d97706;border-radius:14px;padding:22px 26px;margin:0 0 24px;box-shadow:0 12px 40px -8px rgba(217,119,6,.35);position:relative;overflow:hidden;color:#fef3c7;display:flex;flex-wrap:wrap;align-items:center;gap:20px">
@@ -1439,7 +1501,7 @@
         <div style="font-size:.78rem;color:#a8a29e;margin-top:8px">macOS · Linux · WSL · Windows PowerShell · Auto-updates itself · Zero deps</div>
       </div>
       <div style="display:flex;gap:10px;flex-wrap:wrap">
-        <a href="/cli.html" style="display:inline-block;padding:11px 20px;background:#d97706;color:#fef3c7;border-radius:8px;font-weight:600;font-size:.92rem;text-decoration:none;transition:transform .15s" onmouseover="this.style.background='#fbbf24';this.style.color='#1c1917'" onmouseout="this.style.background='#d97706';this.style.color='#fef3c7'">View CLI guide →</a>
+        <a href="/cli.html" style="display:inline-block;padding:11px 20px;background:#d97706;color:#1c1917;border-radius:8px;font-weight:600;font-size:.92rem;text-decoration:none;transition:transform .15s" onmouseover="this.style.background='#fbbf24';this.style.color='#1c1917'" onmouseout="this.style.background='#d97706';this.style.color='#1c1917'">View CLI guide →</a>
         <a href="/openapi.yaml" download style="display:inline-block;padding:11px 20px;background:transparent;border:1px solid #d97706;color:#fbbf24;border-radius:8px;font-weight:600;font-size:.92rem;text-decoration:none" onmouseover="this.style.background='rgba(251,191,36,.1)'" onmouseout="this.style.background='transparent'">⬇ OpenAPI</a>
       </div>
     </section>
@@ -2192,7 +2254,15 @@ curl https://hivv.org/v1/chat/completions \
       <a href="/status">Live Status</a> ·
       <a href="/docs">API Docs</a> ·
       <a href="/terms.html">Terms</a> ·
-      <a href="/privacy.html">Privacy</a>
+      <a href="/privacy.html">Privacy</a> ·
+      <a href="/about.html">About &amp; Contact</a>
+    </p>
+    <p style="margin-top:8px;color:#8f9aa8;font-size:.82rem">
+      Reach a human: <a href="sms:+17733218181" style="color:#00ff88;text-decoration:none;font-weight:700">text +1 773-321-8181</a>
+      <span style="color:#6b7684">(fastest — email is old school)</span> ·
+      <a href="mailto:ashermartin@gmail.com" style="color:#74b9ff;text-decoration:none">ashermartin@gmail.com</a> ·
+      or just <a href="/about.html" style="color:#a855f7;text-decoration:none">stop over at the house</a> 🙂
+    </p>
     </p>
   </footer>
 

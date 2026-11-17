@@ -70,6 +70,35 @@
       <button class="btn btn-small" onclick="logout()">Logout</button>
     </div>
 
+    <!-- This page is "My Account" — profile, keys, usage. It is NOT the
+         governance UI, but nav labels pointing here used to say "Governance"
+         and "Control Center", and the actual permissions page
+         (/hivv-dashboard.html) had ZERO inbound links anywhere on the site.
+         Measured 2026-11-17 in the usability audit: a first-time visitor
+         looking for "what is my AI allowed to do?" could not find it. -->
+    <div style="display:flex; flex-wrap:wrap; gap:16px; align-items:center; justify-content:space-between;
+                background:linear-gradient(135deg, rgba(0,255,136,.08), rgba(168,85,247,.08));
+                border:1px solid rgba(0,255,136,.28); border-radius:12px;
+                padding:16px 20px; margin:0 0 26px;">
+      <div style="flex:1 1 340px;">
+        <div style="font-weight:700; color:#fff; margin-bottom:5px;">
+          Looking for what your AI is allowed to do?
+        </div>
+        <div style="color:#9aa4b2; line-height:1.7; font-size:.94rem;">
+          This page is your <strong style="color:#e0e0e0;">account</strong> — profile,
+          keys and usage. Permissions, approvals and agent activity live in the
+          <strong style="color:#00ff88;">Control Center</strong>:
+          <em>YES</em> may act · <em>MAYBE</em> must ask you first · <em>NO</em> never.
+        </div>
+      </div>
+      <a href="/hivv-dashboard.html"
+         style="display:inline-flex; align-items:center; min-height:48px; padding:.8rem 1.4rem;
+                border-radius:10px; font-weight:700; text-decoration:none; white-space:nowrap;
+                background:#00ff88; color:#06130c;">
+        🛡️ Open Control Center →
+      </a>
+    </div>
+
     <div class="stat-grid">
       <div class="stat-card">
         <div class="value" id="stat-requests-today">0</div>

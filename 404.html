@@ -4,7 +4,12 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>404 — Page Not Found — HIVV.org</title>
-  <link rel="stylesheet" href="/css/shared.css">
+  <!-- A 404 with a friendly body must still never be indexed. -->
+  <meta name="robots" content="noindex, follow">
+  <meta name="description" content="That page does not exist. Head back to HIVV — a distributed AI network, pronounced HIVE.">
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <link rel="icon" type="image/x-icon" href="/favicon.ico">
   <style>
     body {
       background: #0a0a0f;
@@ -15,46 +20,85 @@
       align-items: center;
       justify-content: center;
       margin: 0;
+      padding: 24px;
     }
-    .error-container {
-      text-align: center;
-      padding: 40px;
-    }
+    .error-container { text-align: center; padding: 40px; max-width: 640px; }
     .error-code {
-      font-size: 8em;
+      font-size: clamp(4rem, 16vw, 8em);
       font-weight: bold;
       background: linear-gradient(135deg, #a855f7, #00ff88);
       -webkit-background-clip: text;
-      -webkit-text-fill-color: transparent;
       background-clip: text;
+      color: transparent;
       margin: 0;
+      line-height: 1;
     }
-    .error-message {
-      font-size: 1.5em;
-      color: #888;
-      margin: 20px 0;
+    h2 { color: #fff; font-size: clamp(1.2rem, 4vw, 1.7rem); margin: .4rem 0 1rem; }
+    p { color: #9aa4b2; line-height: 1.8; }
+    .path {
+      display: inline-block; word-break: break-all;
+      background: #12141d; border: 1px solid #232838; border-radius: 8px;
+      padding: .55rem .9rem; color: #ff9ec4; font-size: .92rem; margin: .4rem 0 1.4rem;
     }
-    .back-link {
-      display: inline-block;
-      padding: 12px 30px;
-      background: linear-gradient(135deg, #00ff88, #00cc6a);
-      color: #000;
-      text-decoration: none;
-      border-radius: 10px;
-      font-weight: 600;
-      margin-top: 20px;
+    .actions { display: flex; gap: .7rem; flex-wrap: wrap; justify-content: center; margin: 1.4rem 0; }
+    .btn {
+      display: inline-flex; align-items: center; min-height: 48px;
+      padding: .85rem 1.4rem; border-radius: 10px; text-decoration: none;
+      font-weight: 700; font-size: 1rem;
     }
-    .back-link:hover {
-      transform: translateY(-2px);
-      box-shadow: 0 8px 25px rgba(0,255,136,0.3);
-    }
+    .btn-primary { background: linear-gradient(90deg, #00ff88, #00cc6a); color: #06130c; }
+    .btn-primary:hover, .btn-primary:focus-visible { filter: brightness(1.1); }
+    .btn-ghost { color: #c9d4e3; border: 1px solid #2a3145; background: transparent; }
+    .btn-ghost:hover, .btn-ghost:focus-visible { border-color: #00ff88; color: #fff; }
+    a:focus-visible { outline: 3px solid #00ff88; outline-offset: 3px; }
+    footer { margin-top: 1.6rem; color: #6f7d94; font-size: .9rem; line-height: 2.2; }
+    footer a { color: #9fb0c6; text-decoration: underline; padding: .6rem .8rem; display: inline-block; min-height: 44px; }
   </style>
 </head>
 <body>
-  <div class="error-container">
-    <h1 class="error-code">404</h1>
-    <p class="error-message">The page you're looking for doesn't exist</p>
-    <a href="/" class="back-link">Back to Home</a>
-  </div>
+<a class="skip-link" href="#main">Skip to main content</a>
+  <main id="main" class="error-container">
+    <p class="error-code">404</p>
+    <h1 style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);">Page not found</h1>
+    <h2>Nothing here. Not even a little bit.</h2>
+    <p>
+      That address does not exist on HIVV. Nothing crashed, nothing is hiding —
+      the page simply was never built. HIVV routes requests to real machines and
+      does not invent work to look busy, and neither does its error page.
+    </p>
+    <p class="path">requested: <span id="path">/</span></p>
+
+    <div class="actions">
+      <a class="btn btn-primary" href="/">← Back to home</a>
+      <a class="btn btn-ghost" href="/chat/">💬 Talk to the hive</a>
+      <a class="btn btn-ghost" href="/purpose.html">Why we exist</a>
+    </div>
+
+    <p style="font-size:.94rem;">
+      Came here from a broken link? That link is the bug — we would genuinely like
+      to know, so we can fix the link rather than blame you for following it.
+    </p>
+
+    <footer>
+      <a href="/">Home</a>
+      <a href="/chat/">Chat</a>
+      <a href="/purpose.html">Purpose</a>
+      <a href="/nodes.html">Nodes</a>
+      <a href="/privacy.html">Privacy</a>
+      <a href="/api.html">API</a>
+    </footer>
+  </main>
+
+  <script>
+    // Show the path they actually asked for, so the page feels generated for
+    // them rather than being a generic apology. Capped so a crafted long URL
+    // cannot blow out the layout.
+    (function () {
+      var el = document.getElementById('path');
+      if (!el) return;
+      var p = location.pathname || '/';
+      el.textContent = p.length > 120 ? p.slice(0, 117) + '…' : p;
+    })();
+  </script>
 </body>
 </html>
