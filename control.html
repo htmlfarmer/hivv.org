@@ -1,0 +1,924 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>HIVV.org — Distributed AI Control Panel</title>
+<style>
+:root{--bg:#0a0e14;--surface:#101620;--border:#1e2735;--text:#c9d1d9;--dim:#6b7280;--green:#00ff88;--purple:#c084fc;--blue:#74b9ff;--red:#ff4466;--orange:#ffa94d;--yellow:#ffd43b;--radius:8px;--font:'SF Mono',Monaco,'Cascadia Code','Fira Code',monospace}
+*{margin:0;padding:0;box-sizing:border-box}body{background:var(--bg);color:var(--text);font-family:var(--font);font-size:13px;line-height:1.5;overflow-x:hidden}
+/* Layout */
+#app{display:flex;height:100vh}
+#sidebar{width:220px;background:var(--surface);border-right:1px solid var(--border);padding:20px 0;flex-shrink:0;overflow-y:auto}
+#sidebar .logo{padding:0 20px 20px;font-size:16px;font-weight:bold;color:var(--green);letter-spacing:1px;border-bottom:1px solid var(--border);margin-bottom:10px}
+#sidebar .logo span{color:var(--text);font-weight:normal}
+.nav-group{padding:5px 0}
+.nav-group-title{padding:5px 20px;font-size:10px;text-transform:uppercase;color:var(--dim);letter-spacing:1.5px;margin-top:8px}
+.nav-item{padding:8px 20px;cursor:pointer;display:flex;align-items:center;gap:8px;color:var(--dim);transition:all .15s;border-left:3px solid transparent}
+.nav-item:hover{color:var(--text);background:rgba(255,255,255,.03)}
+.nav-item.active{color:var(--green);border-left-color:var(--green);background:rgba(0,255,136,.05)}
+.nav-item .dot{width:6px;height:6px;border-radius:50%;flex-shrink:0}
+.dot.green{background:var(--green)}.dot.orange{background:var(--orange)}.dot.red{background:var(--red)}.dot.blue{background:var(--blue)}.dot.purple{background:var(--purple)}.dot.dim{background:var(--dim)}
+#main{flex:1;overflow-y:auto;padding:24px 32px}
+#header{display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;padding-bottom:16px;border-bottom:1px solid var(--border)}
+#header h1{font-size:18px;font-weight:600;color:#fff}
+#header .meta{font-size:11px;color:var(--dim)}
+.tab{display:none}.tab.active{display:block}
+/* Cards */
+.card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:16px;margin-bottom:16px}
+.card h3{font-size:12px;text-transform:uppercase;color:var(--dim);letter-spacing:1px;margin-bottom:12px;display:flex;align-items:center;gap:8px}
+.card h3 .badge{font-size:10px;background:rgba(0,255,136,.1);color:var(--green);padding:2px 6px;border-radius:4px}
+/* Grid layouts */
+.grid-2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.grid-3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px}
+.grid-4{display:grid;grid-template-columns:repeat(4,1fr);gap:16px}
+.grid-5{display:grid;grid-template-columns:repeat(5,1fr);gap:12px}
+@media(max-width:1200px){.grid-4{grid-template-columns:1fr 1fr}.grid-5{grid-template-columns:1fr 1fr}}
+/* Stat boxes */
+.stat{text-align:center;padding:12px 8px}
+.stat .value{font-size:28px;font-weight:bold;color:#fff;line-height:1.2}
+.stat .label{font-size:10px;color:var(--dim);text-transform:uppercase;letter-spacing:.5px;margin-top:4px}
+.stat .change{font-size:11px;margin-top:4px}
+.change.up{color:var(--green)}.change.down{color:var(--red)}.change.neutral{color:var(--dim)}
+/* Node cards */
+.node-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:14px}
+.node-card-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}
+.node-name{font-size:13px;font-weight:600;color:#fff}
+.node-status{font-size:10px;padding:2px 8px;border-radius:10px;font-weight:600}
+.status-online{background:rgba(0,255,136,.15);color:var(--green)}
+.status-stressed{background:rgba(255,169,77,.15);color:var(--orange)}
+.status-offline{background:rgba(255,68,102,.15);color:var(--red)}
+.status-draining{background:rgba(192,132,252,.15);color:var(--purple)}
+.metric-bar{margin:6px 0}
+.metric-label{display:flex;justify-content:space-between;font-size:11px;margin-bottom:3px}
+.metric-bar-track{height:6px;background:#1a2030;border-radius:3px;overflow:hidden}
+.metric-bar-fill{height:100%;border-radius:3px;transition:width .5s ease}
+.fill-green{background:var(--green)}.fill-blue{background:var(--blue)}.fill-purple{background:var(--purple)}.fill-orange{background:var(--orange)}.fill-red{background:var(--red)}.fill-dim{background:var(--dim)}
+/* Tables */
+.table-wrap{overflow-x:auto}
+table{width:100%;border-collapse:collapse;font-size:12px}
+th{text-align:left;padding:8px 12px;background:rgba(255,255,255,.03);color:var(--dim);font-weight:500;font-size:11px;text-transform:uppercase;letter-spacing:.5px;border-bottom:1px solid var(--border)}
+td{padding:8px 12px;border-bottom:1px solid var(--border)}
+tr:hover td{background:rgba(255,255,255,.02)}
+.text-green{color:var(--green)}.text-red{color:var(--red)}.text-blue{color:var(--blue)}.text-purple{color:var(--purple)}.text-orange{color:var(--orange)}.text-dim{color:var(--dim)}
+/* Form controls */
+label{font-size:11px;color:var(--dim);text-transform:uppercase;letter-spacing:.5px;display:block;margin-bottom:4px}
+input,select,textarea{background:#0d1117;border:1px solid var(--border);color:var(--text);padding:8px 12px;border-radius:var(--radius);font-family:var(--font);font-size:12px;width:100%}
+input:focus,select:focus,textarea:focus{outline:none;border-color:var(--green);box-shadow:0 0 0 2px rgba(0,255,136,.15)}
+.btn{padding:8px 16px;border:1px solid var(--border);border-radius:var(--radius);background:var(--surface);color:var(--text);font-family:var(--font);font-size:12px;cursor:pointer;transition:all .15s}
+.btn:hover{border-color:var(--green);color:var(--green)}
+.btn-primary{background:var(--green);color:#000;border-color:var(--green);font-weight:600}
+.btn-primary:hover{opacity:.85}
+.btn-danger{border-color:var(--red);color:var(--red)}
+.btn-danger:hover{background:rgba(255,68,102,.1)}
+.btn-sm{padding:4px 10px;font-size:11px}
+.form-row{margin-bottom:12px}
+.form-inline{display:flex;gap:8px;align-items:flex-end}
+.form-inline > div{flex:1}
+/* Alerts */
+.alert-item{padding:10px 12px;border-left:3px solid;margin-bottom:8px;background:var(--surface);border-radius:0 var(--radius) var(--radius) 0;display:flex;justify-content:space-between;align-items:center}
+.alert-critical{border-color:var(--red)}.alert-warning{border-color:var(--orange)}.alert-info{border-color:var(--blue)}
+.alert-type{font-weight:600;font-size:12px}.alert-data{font-size:11px;color:var(--dim)}.alert-time{font-size:10px;color:var(--dim)}
+/* Gauge */
+.gauge{position:relative;width:100%;height:40px;background:#0d1117;border-radius:var(--radius);overflow:hidden;border:1px solid var(--border)}
+.gauge-fill{position:absolute;top:0;left:0;height:100%;border-radius:var(--radius);transition:width .5s ease}
+.gauge-text{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);font-size:14px;font-weight:bold;color:#fff;z-index:1}
+/* Tabs within panels */
+.sub-tabs{display:flex;gap:4px;margin-bottom:16px;border-bottom:1px solid var(--border);padding-bottom:0}
+.sub-tab{padding:8px 16px;cursor:pointer;color:var(--dim);font-size:12px;border-bottom:2px solid transparent;transition:all .15s}
+.sub-tab:hover{color:var(--text)}.sub-tab.active{color:var(--green);border-bottom-color:var(--green)}
+/* Live indicator */
+.live-dot{width:8px;height:8px;border-radius:50%;background:var(--green);animation:pulse 2s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+/* Modal overlay */
+.modal-overlay{display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.6);z-index:1000;align-items:center;justify-content:center}
+.modal-overlay.show{display:flex}
+.modal{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px;width:500px;max-width:90vw;max-height:80vh;overflow-y:auto}
+.modal h2{font-size:16px;margin-bottom:16px;color:#fff}
+.modal-actions{display:flex;gap:8px;justify-content:flex-end;margin-top:20px}
+/* Scrollbar */
+::-webkit-scrollbar{width:8px;height:8px}
+::-webkit-scrollbar-track{background:var(--bg)}
+::-webkit-scrollbar-thumb{background:var(--border);border-radius:4px}
+::-webkit-scrollbar-thumb:hover{background:var(--dim)}
+</style>
+</head>
+<body>
+<div id="app">
+  <!-- Sidebar -->
+  <div id="sidebar">
+    <div class="logo">HIVV<span>/CONTROL</span></div>
+    <div class="nav-group">
+      <div class="nav-group-title">Overview</div>
+      <div class="nav-item active" data-tab="dashboard"><span class="dot green"></span>Dashboard</div>
+      <div class="nav-item" data-tab="nodes"><span class="dot blue"></span>Nodes</div>
+      <div class="nav-item" data-tab="monitoring"><span class="dot purple"></span>Monitoring</div>
+    </div>
+    <div class="nav-group">
+      <div class="nav-group-title">Configuration</div>
+      <div class="nav-item" data-tab="load-balancing"><span class="dot green"></span>Load Balancing</div>
+      <div class="nav-item" data-tab="rate-limits"><span class="dot orange"></span>Rate Limits & Quotas</div>
+      <div class="nav-item" data-tab="models"><span class="dot blue"></span>Models & Context</div>
+      <div class="nav-item" data-tab="streaming"><span class="dot purple"></span>Streaming</div>
+      <div class="nav-item" data-tab="costs"><span class="dot green"></span>Cost Tracking</div>
+      <div class="nav-item" data-tab="circuit-breakers"><span class="dot red"></span>Circuit Breakers</div>
+    </div>
+    <div class="nav-group">
+      <div class="nav-group-title">Observability</div>
+      <div class="nav-item" data-tab="logs"><span class="dot dim"></span>Request Logs</div>
+      <div class="nav-item" data-tab="alerts"><span class="dot red"></span>Alerts</div>
+      <div class="nav-item" data-tab="system"><span class="dot dim"></span>System</div>
+    </div>
+  </div>
+
+  <!-- Main Content -->
+  <div id="main">
+    <div id="header">
+      <h1>Distributed AI Control Panel</h1>
+      <div class="meta"><span class="live-dot"></span>&nbsp;<span id="clock">--:--:--</span>&nbsp;·&nbsp;Auto-refresh: 5s</div>
+    </div>
+
+    <!-- ==================== DASHBOARD TAB ==================== -->
+    <div class="tab active" id="tab-dashboard">
+      <div class="grid-5" id="dash-stats"></div>
+      <div class="grid-2" style="margin-top:16px">
+        <div class="card">
+          <h3>Cluster Nodes <span class="badge" id="dash-node-count">0 online</span></h3>
+          <div id="dash-nodes-list"></div>
+        </div>
+        <div class="card">
+          <h3>Recent Activity <span class="badge">Live</span></h3>
+          <div id="dash-recent-tasks"></div>
+        </div>
+      </div>
+      <div class="grid-2" style="margin-top:16px">
+        <div class="card">
+          <h3>Circuit Breakers</h3>
+          <div id="dash-circuits"></div>
+        </div>
+        <div class="card">
+          <h3>Active Alerts <span class="badge" id="dash-alert-count">0</span></h3>
+          <div id="dash-alerts-list"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ==================== NODES TAB ==================== -->
+    <div class="tab" id="tab-nodes">
+      <div class="grid-4" id="node-stats-row"></div>
+      <div id="node-detail-container"></div>
+      <div class="card" style="margin-top:16px">
+        <h3>All Nodes</h3>
+        <div id="node-list"></div>
+      </div>
+    </div>
+
+    <!-- ==================== MONITORING TAB ==================== -->
+    <div class="tab" id="tab-monitoring">
+      <div class="grid-3" id="monitor-stats"></div>
+      <div class="card" style="margin-top:16px">
+        <h3>Per-Model Performance</h3>
+        <div id="model-perf-table"></div>
+      </div>
+      <div class="card" style="margin-top:16px">
+        <h3>Error Summary</h3>
+        <div id="error-summary"></div>
+      </div>
+    </div>
+
+    <!-- ==================== LOAD BALANCING TAB ==================== -->
+    <div class="tab" id="tab-load-balancing">
+      <div class="card">
+        <h3>Routing Strategy</h3>
+        <div class="form-row">
+          <label>Strategy</label>
+          <select id="lb-strategy">
+            <option value="least-load">Least Load (Recommended)</option>
+            <option value="weighted">Weighted (by capacity)</option>
+            <option value="round-robin">Round Robin</option>
+            <option value="capacity-aware">Capacity Aware (CPU+MEM+Workers)</option>
+            <option value="latency-affected">Latency Affected (fastest node)</option>
+          </select>
+        </div>
+        <div class="grid-3">
+          <div class="form-row">
+            <label>Canary Traffic (%)</label>
+            <input type="number" id="lb-canary" min="0" max="100" value="0">
+          </div>
+          <div class="form-row">
+            <label>Failover Enabled</label>
+            <select id="lb-failover"><option value="true">Yes</option><option value="false">No</option></select>
+          </div>
+          <div class="form-row">
+            <label>Cascade Protection</label>
+            <select id="lb-cascade"><option value="true">Yes</option><option value="false">No</option></select>
+          </div>
+        </div>
+        <button class="btn btn-primary" onclick="saveLBConfig()">Save Load Balancer</button>
+      </div>
+      <div class="grid-2" style="margin-top:16px">
+        <div class="card">
+          <h3>Model Affinity Rules</h3>
+          <div id="affinity-rules"></div>
+          <div class="form-row" style="margin-top:12px">
+            <label>Add affinity rule</label>
+            <div class="form-inline">
+              <input type="text" id="aff-model" placeholder="Model name">
+              <input type="text" id="aff-nodes" placeholder="Node IDs (comma-sep)">
+              <button class="btn" onclick="addAffinityRule()">Add</button>
+            </div>
+          </div>
+        </div>
+        <div class="card">
+          <h3>Available Models</h3>
+          <div id="available-models"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ==================== RATE LIMITS TAB ==================== -->
+    <div class="tab" id="tab-rate-limits">
+      <div class="card">
+        <h3>Global Rate Limits</h3>
+        <div class="grid-4">
+          <div class="form-row"><label>Requests / Minute</label><input type="number" id="gl-rpm" value="0"></div>
+          <div class="form-row"><label>Requests / Day</label><input type="number" id="gl-rpd" value="0"></div>
+          <div class="form-row"><label>Requests / Month</label><input type="number" id="gl-rm" value="0"></div>
+          <div class="form-row"><label>Burst Multiplier</label><input type="number" id="gl-burst" value="1" step="0.1"></div>
+        </div>
+        <button class="btn btn-primary" style="margin-top:8px" onclick="saveGlobalRL()">Save Global Limits</button>
+      </div>
+      <div class="grid-2" style="margin-top:16px">
+        <div class="card">
+          <h3>Per-Node Rate Limits</h3>
+          <div id="node-rl-list"></div>
+        </div>
+        <div class="card">
+          <h3>Per-User Rate Limits</h3>
+          <div id="user-rl-list">
+            <div class="form-row"><input type="text" id="new-user-id" placeholder="User ID"></div>
+            <div class="grid-3">
+              <div class="form-row"><label>RPM</label><input type="number" id="ul-rpm" value="60"></div>
+              <div class="form-row"><label>RPD</label><input type="number" id="ul-rpd" value="1000"></div>
+              <div class="form-row"><label>RPM_</label><input type="number" id="ul-rmonth" value="30000"></div>
+            </div>
+            <button class="btn btn-primary btn-sm" onclick="setUserRL()">Set User Limit</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ==================== MODELS TAB ==================== -->
+    <div class="tab" id="tab-models">
+      <div class="grid-4" id="model-stats-row"></div>
+      <div class="card" style="margin-top:16px">
+        <h3>Model Registry</h3>
+        <div id="model-registry"></div>
+      </div>
+    </div>
+
+    <!-- ==================== STREAMING TAB ==================== -->
+    <div class="tab" id="tab-streaming">
+      <div class="card">
+        <h3>Streaming Configuration</h3>
+        <div class="grid-3">
+          <div class="form-row"><label>Streaming Enabled</label><select id="st-enabled"><option value="true">Yes</option><option value="false">No</option></select></div>
+          <div class="form-row"><label>Fan-Out Count</label><input type="number" id="st-fanout" value="1" min="1" max="10"></div>
+          <div class="form-row"><label>Max Consumers / Stream</label><input type="number" id="st-max-consumers" value="100" min="1"></div>
+        </div>
+        <button class="btn btn-primary" style="margin-top:8px" onclick="saveStreamingConfig()">Save Streaming Config</button>
+      </div>
+      <div class="card" style="margin-top:16px">
+        <h3>Active Streams</h3>
+        <div id="active-streams-list"><p class="text-dim">No active streams</p></div>
+      </div>
+    </div>
+
+    <!-- ==================== COSTS TAB ==================== -->
+    <div class="tab" id="tab-costs">
+      <div class="grid-4" id="cost-stats-row"></div>
+      <div class="grid-2" style="margin-top:16px">
+        <div class="card">
+          <h3>Cost Per Provider</h3>
+          <div id="cost-per-provider"></div>
+        </div>
+        <div class="card">
+          <h3>Cost Per Model</h3>
+          <div id="cost-per-model"></div>
+        </div>
+      </div>
+      <div class="card" style="margin-top:16px">
+        <h3>Unit Price Configuration ($ per 1M tokens)</h3>
+        <div id="unit-prices-editor"></div>
+        <button class="btn btn-primary" style="margin-top:8px" onclick="saveUnitPrices()">Save Prices</button>
+      </div>
+    </div>
+
+    <!-- ==================== CIRCUIT BREAKERS TAB ==================== -->
+    <div class="tab" id="tab-circuit-breakers">
+      <div class="card">
+        <h3>Current Circuit Breakers</h3>
+        <div id="cb-list"></div>
+        <button class="btn" style="margin-top:12px" onclick="resetAllCB()">Reset All Circuits</button>
+      </div>
+    </div>
+
+    <!-- ==================== LOGS TAB ==================== -->
+    <div class="tab" id="tab-logs">
+      <div class="card">
+        <h3>Request Logs <span class="badge" id="log-total-count">0</span></h3>
+        <div class="form-inline" style="margin-bottom:12px">
+          <div><input type="text" id="log-search" placeholder="Search..."></div>
+          <select id="log-status-filter"><option value="">All Statuses</option><option value="completed">Completed</option><option value="failed">Failed</option><option value="running">Running</option><option value="pending">Pending</option></select>
+          <select id="log-type-filter"><option value="">All Types</option><option value="inference">Inference</option><option value="streaming">Streaming</option><option value="transcription">Transcription</option><option value="chat-completion">Chat</option></select>
+          <button class="btn" onclick="refreshLogs()">Refresh</button>
+        </div>
+        <div class="table-wrap" id="log-table"></div>
+      </div>
+    </div>
+
+    <!-- ==================== ALERTS TAB ==================== -->
+    <div class="tab" id="tab-alerts">
+      <div class="grid-2">
+        <div class="card">
+          <h3>Threshold Configuration</h3>
+          <div class="grid-2">
+            <div class="form-row"><label>CPU Critical (%)</label><input type="number" id="thr-cpu-crit" value="95"></div>
+            <div class="form-row"><label>CPU Warning (%)</label><input type="number" id="thr-cpu-warn" value="85"></div>
+            <div class="form-row"><label>Memory Critical (%)</label><input type="number" id="thr-mem-crit" value="90"></div>
+            <div class="form-row"><label>Memory Warning (%)</label><input type="number" id="thr-mem-warn" value="80"></div>
+            <div class="form-row"><label>Queue Depth Critical</label><input type="number" id="thr-qcrit" value="50"></div>
+            <div class="form-row"><label>Queue Depth Warning</label><input type="number" id="thr-qwarn" value="25"></div>
+            <div class="form-row"><label>Error Rate Critical (%)</label><input type="number" id="thr-err-crit" value="10" step="0.1"></div>
+            <div class="form-row"><label>Error Rate Warning (%)</label><input type="number" id="thr-err-warn" value="5" step="0.1"></div>
+          </div>
+          <button class="btn btn-primary" style="margin-top:8px" onclick="saveThresholds()">Save Thresholds</button>
+        </div>
+        <div class="card">
+          <h3>Notification Channels</h3>
+          <div id="channels-list"></div>
+          <div class="form-inline" style="margin-top:12px">
+            <input type="text" id="new-channel" placeholder="channel type (email|slack|webhook|pagerduty)">
+            <button class="btn" onclick="addChannel()">Add</button>
+          </div>
+        </div>
+      </div>
+      <div class="card" style="margin-top:16px">
+        <h3>Active Alerts <button class="btn btn-sm btn-danger" style="float:right" onclick="clearAllAlerts()">Clear All</button></h3>
+        <div id="alerts-list"></div>
+      </div>
+    </div>
+
+    <!-- ==================== SYSTEM TAB ==================== -->
+    <div class="tab" id="tab-system">
+      <div class="grid-3">
+        <div class="card"><h3>Gateway Process</h3><div id="sys-gateway"></div></div>
+        <div class="card"><h3>Memory Usage</h3><div id="sys-memory"></div></div>
+        <div class="card"><h3>Databases</h3><div id="sys-db"></div></div>
+      </div>
+    </div>
+
+  </div><!-- /main -->
+</div><!-- /app -->
+
+<!-- Modal -->
+<div class="modal-overlay" id="modal">
+  <div class="modal">
+    <h2 id="modal-title">Modal</h2>
+    <div id="modal-body"></div>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal()">Close</button>
+      <button class="btn btn-primary" id="modal-confirm">Confirm</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ====== STATE ======
+let api = '/api';
+let lastData = {};
+let refreshTimer = null;
+let selectedNode = null;
+
+// ====== NAVIGATION ======
+document.querySelectorAll('.nav-item').forEach(item => {
+  item.addEventListener('click', () => {
+    document.querySelectorAll('.nav-item').forEach(i => i.classList.remove('active'));
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    item.classList.add('active');
+    const tabId = 'tab-' + item.dataset.tab;
+    document.getElementById(tabId)?.classList.add('active');
+  });
+});
+
+// ====== CLOCK ======
+function updateClock() {
+  document.getElementById('clock').textContent = new Date().toLocaleTimeString();
+}
+setInterval(updateClock, 1000);
+updateClock();
+
+// ====== API HELPERS ======
+async function apiGet(path) {
+  try {
+    const r = await fetch(`${api}${path}`);
+    return r.ok ? await r.json() : null;
+  } catch(e) { console.error(`GET ${path}:`, e); return null; }
+}
+async function apiPost(path, body) {
+  try {
+    const r = await fetch(`${api}${path}`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
+    return r.ok ? await r.json() : { error: r.statusText };
+  } catch(e) { console.error(`POST ${path}:`, e); return { error: e.message }; }
+}
+async function apiPut(path, body) {
+  try {
+    const r = await fetch(`${api}${path}`, { method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
+    return r.ok ? await r.json() : { error: r.statusText };
+  } catch(e) { console.error(`PUT ${path}:`, e); return { error: e.message }; }
+}
+
+// ====== REFRESH CYCLE ======
+async function refreshAll() {
+  const [globalStats, nodes, lbConfig, cbSummary, alerts, logs, costs, streaming, modelPerf, throughput] = await Promise.all([
+    apiGet('/control/metrics/global'),
+    apiGet('/control/nodes'),
+    apiGet('/control/load-balancing'),
+    apiGet('/control/circuit-breakers'),
+    apiGet('/control/alerts'),
+    apiGet('/control/logs?limit=50'),
+    apiGet('/control/costs/summary'),
+    apiGet('/control/streaming'),
+    apiGet('/control/metrics/model-performance'),
+    apiGet('/control/metrics/throughput')
+  ]);
+
+  lastData = { globalStats, nodes, lbConfig, cbSummary, alerts, logs, costs, streaming, modelPerf, throughput };
+
+  renderDashboard(globalStats, nodes, cbSummary, alerts);
+  renderNodes(nodes);
+  renderMonitoring(modelPerf, throughput);
+  renderLoadBalancing(lbConfig);
+  renderCosts(costs);
+  renderStreaming(streaming);
+  renderAlerts(alerts);
+  renderLogs(logs);
+}
+
+// ====== RENDER FUNCTIONS ======
+
+function renderDashboard(gs, nodes, cbs, alerts) {
+  if (!gs) return;
+  const cluster = gs.cluster || {};
+  const cap = gs.capacity || {};
+  const perf = gs.performance || {};
+
+  // Stats row
+  document.getElementById('dash-stats-row').innerHTML = `
+    <div class="stat"><div class="value">${cluster.online||0}</div><div class="label">Online Nodes</div></div>
+    <div class="stat"><div class="value">${cap.utilization_percent||0}%</div><div class="label">Cluster Utilization</div></div>
+    <div class="stat"><div class="value">${perf.total_requests_today||0}</div><div class="label">Requests Today</div></div>
+    <div class="stat"><div class="value">${formatTokens(perf.total_tokens_today||0)}</div><div class="label">Tokens Today</div></div>
+    <div class="stat"><div class="value">$${(perf.total_cost_today||0).toFixed(2)}</div><div class="label">Cost Today</div></div>
+  `;
+
+  // Node list
+  const nl = nodes?.nodes || [];
+  document.getElementById('dash-node-count').textContent = `${cluster.online||0} online`;
+  document.getElementById('dash-nodes-list').innerHTML = nl.slice(0,6).map(n => `
+    <div class="node-card" style="margin-bottom:8px" onclick="showNodeDetail('${n.id}')">
+      <div class="node-card-header">
+        <span class="node-name">${n.name}</span>
+        <span class="node-status status-${n.status}">${n.status}</span>
+      </div>
+      <div class="metric-bar">
+        <div class="metric-label"><span>CPU</span><span>${n.metrics.cpu_percent}%</span></div>
+        <div class="metric-bar-track"><div class="metric-bar-fill fill-${barColor(n.metrics.cpu_percent)}" style="width:${n.metrics.cpu_percent}%"></div></div>
+      </div>
+      <div class="metric-bar">
+        <div class="metric-label"><span>Memory</span><span>${n.metrics.mem_percent}%</span></div>
+        <div class="metric-bar-track"><div class="metric-bar-fill fill-${barColor(n.metrics.mem_percent)}" style="width:${n.metrics.mem_percent}%"></div></div>
+      </div>
+    </div>
+  `).join('') || '<p class="text-dim">No nodes connected</p>';
+
+  // Recent tasks from logs
+  const recent = (lastData.logs?.logs || []).slice(0, 5);
+  document.getElementById('dash-recent-tasks').innerHTML = recent.length ? recent.map(t => `
+    <div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid var(--border)">
+      <span><span class="text-blue">${t.type||'unknown'}</span> → ${t.assigned_node?.slice(0,8)||'local'} ${t.model?'('+t.model+')':''}</span>
+      <span class="${t.status==='completed'?'text-green':t.status==='failed'?'text-red':'text-dim'}">${t.status} · ${(t.latency_ms||0).toFixed(0)}ms</span>
+    </div>
+  `).join('') : '<p class="text-dim">No recent activity</p>';
+
+  // Circuits
+  const activeCBs = (cbs || []).filter(cb => cb.state !== 'closed');
+  document.getElementById('dash-circuits').innerHTML = activeCBs.length ? activeCBs.map(cb => `<div style="padding:6px 0;border-bottom:1px solid var(--border)"><span class="text-red">OPEN</span> ${cb.key} (${cb.failures} failures)</div>`).join('') : '<p class="text-green" style="padding:4px">All circuits closed ✓</p>';
+
+  // Alerts
+  const activeA = (alerts?.alerts || []).slice(0, 5);
+  document.getElementById('dash-alert-count').textContent = alerts?.active || 0;
+  document.getElementById('dash-alerts-list').innerHTML = activeA.length ? activeA.map(a => `
+    <div class="alert-item alert-${a.severity}" style="margin-bottom:4px">
+      <div><span class="alert-type">${a.severity.toUpperCase()}</span> ${a.type}</div>
+      <div class="alert-time">${timeAgo(a.timestamp)}</div>
+    </div>
+  `).join('') : '<p class="text-green" style="padding:4px">No active alerts ✓</p>';
+}
+
+function renderNodes(nodes) {
+  if (!nodes) return;
+  const n = nodes.nodes || [];
+
+  // Stats row
+  const totalCPU = n.reduce((s,x)=>s+x.metrics.cpu_percent,0);
+  const totalMem = n.reduce((s,x)=>s+x.metrics.mem_percent,0);
+  document.getElementById('node-stats-row').innerHTML = `
+    <div class="stat"><div class="value">${n.filter(x=>x.status==='online').length}</div><div class="label">Online</div></div>
+    <div class="stat"><div class="value">${n.filter(x=>x.status==='stressed').length}</div><div class="label">Stressed</div></div>
+    <div class="stat"><div class="value">${n.length}</div><div class="label">Total Workers</div></div>
+    <div class="stat"><div class="value">${totalCPU.toFixed(0)}%</div><div class="label">Avg CPU</div></div>
+  `;
+
+  // Node detail or list
+  if (selectedNode && nodes.nodes.find(x=>x.id===selectedNode)) {
+    showNodeDetail(selectedNode);
+  } else {
+    document.getElementById('node-detail-container').innerHTML = '';
+  }
+
+  // Full list
+  document.getElementById('node-list').innerHTML = `
+    <div class="table-wrap"><table>
+      <tr><th>Name</th><th>ID</th><th>IP</th><th>Status</th><th>CPU</th><th>Memory</th><th>Jobs</th><th>Uptime</th><th>Tasks Done</th><th>Actions</th></tr>
+      ${n.map(nd => `
+        <tr>
+          <td class="text-green" style="cursor:pointer" onclick="showNodeDetail('${nd.id}')">${nd.name}</td>
+          <td class="text-dim">${nd.id.slice(0,8)}</td>
+          <td>${nd.ip}</td>
+          <td><span class="node-status status-${nd.status}">${nd.status}</span></td>
+          <td>${nd.metrics.cpu_percent}%</td>
+          <td>${nd.metrics.mem_percent}%</td>
+          <td>${nd.metrics.active_jobs}/${nd.metrics.workers}</td>
+          <td>${fmtUptime(nd.metrics.uptime_seconds)}</td>
+          <td>${nd.stats.tasks_completed}</td>
+          <td>
+            ${nd.status!=='offline'?`<button class="btn btn-sm btn-danger" onclick="drainNode('${nd.id}')">Drain</button>`:''}
+          </td>
+        </tr>
+      `).join('')}
+    </table></div>
+  `;
+}
+
+function showNodeDetail(nodeId) {
+  selectedNode = nodeId;
+  const nd = (lastData.nodes?.nodes || []).find(x=>x.id===nodeId);
+  if (!nd) return;
+
+  const health = nd.health_history || [];
+  const last24h = health.slice(-60); // last hour at 1-min intervals
+
+  document.getElementById('node-detail-container').innerHTML = `
+    <div class="card">
+      <h3>${nd.name} — Node Detail</h3>
+      <div class="grid-4" style="margin-bottom:16px">
+        <div class="stat"><div class="value">${nd.metrics.cpu_percent}%</div><div class="label">CPU</div></div>
+        <div class="stat"><div class="value">${nd.metrics.mem_percent}%</div><div class="label">Memory</div></div>
+        <div class="stat"><div class="value">${nd.metrics.tokens_per_second||0}</div><div class="label">Tokens/sec</div></div>
+        <div class="stat"><div class="value">${nd.stats.tasks_completed}</div><div class="label">Tasks Completed</div></div>
+      </div>
+      <div class="metric-bar">
+        <div class="metric-label"><span>CPU Usage</span><span>${nd.metrics.cpu_percent}%</span></div>
+        <div class="metric-bar-track"><div class="metric-bar-fill fill-${barColor(nd.metrics.cpu_percent)}" style="width:${nd.metrics.cpu_percent}%"></div></div>
+      </div>
+      <div class="metric-bar">
+        <div class="metric-label"><span>Memory Usage</span><span>${nd.metrics.mem_percent}%</span></div>
+        <div class="metric-bar-track"><div class="metric-bar-fill fill-${barColor(nd.metrics.mem_percent)}" style="width:${nd.metrics.mem_percent}%"></div></div>
+      </div>
+      <div class="metric-bar">
+        <div class="metric-label"><span>Worker Utilization</span><span>${nd.metrics.available_capacity>0?(nd.metrics.workers-nd.metrics.available_capacity):nd.metrics.active_jobs}/${nd.metrics.workers}</span></div>
+        <div class="metric-bar-track"><div class="metric-bar-fill fill-blue" style="width:${nd.metrics.workers>0?((nd.metrics.workers-nd.metrics.available_capacity)/nd.metrics.workers*100):0}%"></div></div>
+      </div>
+      ${nd.local_models?.length ? `
+        <div style="margin-top:16px">
+          <h3 style="margin-bottom:8px">Local Models</h3>
+          ${nd.local_models.map(src => `<span style="display:inline-block;padding:3px 10px;margin:2px 4px;border-radius:4px;font-size:11px;background:rgba(116,185,255,.1);color:var(--blue)">${src.source}: ${src.models?.length||0}</span>`).join('')}
+        </div>
+      ` : ''}
+    </div>
+  `;
+}
+
+function renderMonitoring(modelPerf, throughput) {
+  if (!throughput) return;
+  document.getElementById('monitor-stats').innerHTML = `
+    <div class="stat"><div class="value">${throughput.avg_tokens_per_second||0}</div><div class="label">Avg Tokens/sec</div></div>
+    <div class="stat"><div class="value">${throughput.today_requests||0}</div><div class="label">Today's Requests</div></div>
+    <div class="stat"><div class="value">${throughput.today_tokens||0}</div><div class="label">Today's Tokens</div></div>
+  `;
+
+  document.getElementById('model-perf-table').innerHTML = `
+    <div class="table-wrap"><table>
+      <tr><th>Model</th><th>Requests</th><th>P50 Latency</th><th>P95 Latency</th><th>P99 Latency</th></tr>
+      ${((modelPerf||[]).map(m=>`<tr><td>${m.model}</td><td>${m.requests}</td><td>${m.latency_p50}ms</td><td class="${m.latency_p95>5000?'text-red':'text-green'}">${m.latency_p95}ms</td><td>${m.latency_p99}ms</td></tr>`)).join('')||'<tr><td colspan="5" class="text-dim">No performance data</td></tr>'}
+    </table></div>
+  `;
+
+  document.getElementById('error-summary').innerHTML = `
+    <div class="table-wrap"><table>
+      <tr><th>Metric</th><th>Value</th></tr>
+      ${Object.entries(lastData.throughput||{}).map(([k,v])=>`<tr><td>${k.replace(/_/g,' ')}</td><td>${v}</td></tr>`).join('')}
+    </table></div>
+  `;
+}
+
+function renderLoadBalancing(lbConfig) {
+  if (!lbConfig) return;
+  document.getElementById('lb-strategy').value = lbConfig.strategy || 'least-load';
+  document.getElementById('lb-canary').value = lbConfig.canary_percent || 0;
+  document.getElementById('lb-failover').value = String(lbConfig.failover_enabled !== false);
+  document.getElementById('lb-cascade').value = String(lbConfig.cascade_protection !== false);
+
+  document.getElementById('affinity-rules').innerHTML = Object.entries(lbConfig.model_affinities||{}).map(([m,nids]) => `
+    <div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border)">
+      <span><span class="text-blue">${m}</span> → ${Array.isArray(nids)?nids.join(', '):nids}</span>
+      <button class="btn btn-sm btn-danger" onclick="removeAffinity('${m}')">X</button>
+    </div>
+  `).join('') || '<p class="text-dim">No affinity rules set</p>';
+
+  // Available models
+  apiGet('/control/models').then(models => {
+    document.getElementById('available-models').innerHTML = models?.length ?
+      models.map(m => `<span style="display:inline-block;padding:3px 10px;margin:2px 4px;border-radius:4px;font-size:11px;background:rgba(192,132,252,.1);color:var(--purple)">${m.name}@${m.nodeName}</span>`).join('') :
+      '<p class="text-dim">Loading...</p>';
+  });
+}
+
+function renderCosts(costs) {
+  if (!costs) return;
+  document.getElementById('cost-stats-row').innerHTML = `
+    <div class="stat"><div class="value">$${(costs.today?.totalCost||0).toFixed(4)}</div><div class="label">Today Cost</div></div>
+    <div class="stat"><div class="value">${costs.today?.requests||0}</div><div class="label">Today Requests</div></div>
+    <div class="stat"><div class="value">${Object.keys(costs.per_provider||{}).length}</div><div class="label">Providers</div></div>
+    <div class="stat"><div class="value">${Object.keys(costs.per_model||{}).length}</div><div class="label">Tracked Models</div></div>
+  `;
+
+  document.getElementById('cost-per-provider').innerHTML = `
+    <table><tr><th>Provider</th><th>Input Tokens</th><th>Output Tokens</th><th>Est. Cost</th></tr>
+    ${Object.entries(costs.per_provider||{}).map(([p,d])=>`<tr><td class="text-blue">${p}</td><td>${formatTokens(d.inputTokens)}</td><td>${formatTokens(d.outputTokens)}</td><td>$${(d.estimatedCost||0).toFixed(4)}</td></tr>`).join('')||'<tr><td colspan="4" class="text-dim">No data</td></tr>'}
+    </table>`;
+
+  document.getElementById('cost-per-model').innerHTML = `
+    <table><tr><th>Model</th><th>Input Tokens</th><th>Output Tokens</th><th>Est. Cost</th></tr>
+    ${Object.entries(costs.per_model||{}).map(([m,d])=>`<tr><td>${m}</td><td>${formatTokens(d.inputTokens)}</td><td>${formatTokens(d.outputTokens)}</td><td>$${(d.estimatedCost||0).toFixed(4)}</td></tr>`).join('')||'<tr><td colspan="4" class="text-dim">No data</td></tr>'}
+    </table>`;
+
+  // Unit prices editor
+  const defs = costs.unit_prices?.defaults || {};
+  document.getElementById('unit-prices-editor').innerHTML = Object.entries(defs).map(([name,prices]) => `
+    <div style="padding:8px 0;border-bottom:1px solid var(--border)">
+      <strong class="text-blue">${name}</strong>
+      <span style="margin-left:16px">Input: $${prices.input.toFixed(2)}/1M tokens</span>
+      <span style="margin-left:12px">Output: $${prices.output.toFixed(2)}/1M tokens</span>
+    </div>
+  `).join('');
+}
+
+function renderStreaming(streaming) {
+  if (!streaming) return;
+  document.getElementById('st-enabled').value = String(streaming.enabled !== false);
+  document.getElementById('st-fanout').value = streaming.default_fan_out_count || 1;
+  document.getElementById('st-max-consumers').value = streaming.max_consumers_per_stream || 100;
+  document.getElementById('active-streams-list').innerHTML = '<p class="text-dim">No active streams tracked</p>';
+}
+
+function renderAlerts(alerts) {
+  if (!alerts) return;
+  const al = alerts.alerts || [];
+  document.getElementById('alerts-list').innerHTML = al.length ? al.map(a => `
+    <div class="alert-item alert-${a.severity}">
+      <div><span class="alert-type">${a.severity.toUpperCase()}</span> ${a.type} <span class="alert-data">${JSON.stringify(a.data).slice(0,60)}</span></div>
+      <div style="display:flex;gap:8px;align-items:center">
+        <span class="alert-time">${timeAgo(a.timestamp)}</span>
+        <button class="btn btn-sm" onclick="ackAlert('${a.id}')">Ack</button>
+        <button class="btn btn-sm btn-danger" onclick="dismissAlert('${a.id}')">Dismiss</button>
+      </div>
+    </div>
+  `).join('') : '<p class="text-green">No active alerts ✓</p>';
+
+  // Thresholds pre-filled
+  if (alerts.thresholds) {
+    document.getElementById('thr-cpu-crit').value = alerts.thresholds.cpu_critical || 95;
+    document.getElementById('thr-cpu-warn').value = alerts.thresholds.cpu_warning || 85;
+    document.getElementById('thr-mem-crit').value = alerts.thresholds.mem_critical || 90;
+    document.getElementById('thr-mem-warn').value = alerts.thresholds.mem_warning || 80;
+    document.getElementById('thr-qcrit').value = alerts.thresholds.queue_depth_critical || 50;
+    document.getElementById('thr-qwarn').value = alerts.thresholds.queue_depth_warning || 25;
+  }
+  document.getElementById('channels-list').innerHTML = (alerts.channels||[]).map(ch => `<div style="padding:6px 0;border-bottom:1px solid var(--border)"><span class="text-green">${ch}</span></div>`).join('') || '<p class="text-dim">No channels configured</p>';
+}
+
+function renderLogs(logs) {
+  if (!logs) return;
+  document.getElementById('log-total-count').textContent = logs.total || 0;
+  const l = logs.logs || [];
+  document.getElementById('log-table').innerHTML = `
+    <table><tr><th>ID</th><th>Time</th><th>Type</th><th>Model</th><th>Node</th><th>Status</th><th>Latency</th><th>Tokens</th><th>Error</th></tr>
+    ${l.map(log => `
+      <tr>
+        <td class="text-dim">${log.id?.slice(0,10)||'-'}</td>
+        <td>${new Date(log.timestamp).toLocaleTimeString()}</td>
+        <td><span class="text-blue">${log.type||'-'}</span></td>
+        <td>${log.model||'-'}</td>
+        <td>${log.assigned_node?.slice(0,8)||'local'}</td>
+        <td class="${log.status==='completed'?'text-green':log.status==='failed'?'text-red':'text-dim'}">${log.status}</td>
+        <td>${(log.latency_ms||0).toFixed(0)}ms</td>
+        <td>${log.tokens_in?formatTokens(log.tokens_in)+'+'+formatTokens(log.tokens_out):''}</td>
+        <td class="text-red">${log.error?'<span title="'+log.error+'">⚠</span>':'-'}</td>
+      </tr>
+    `).join('')}
+    </table>`;
+}
+
+// ====== ACTION HANDLERS ======
+
+async function saveLBConfig() {
+  const config = {
+    loadBalancing: document.getElementById('lb-strategy').value,
+    canaryPercent: parseInt(document.getElementById('lb-canary').value),
+    failoverEnabled: document.getElementById('lb-failover').value === 'true',
+    cascadeProtection: document.getElementById('lb-cascade').value === 'true'
+  };
+  const r = await apiPut('/control/load-balancing', config);
+  if (r.updated) showToast('Load balancer updated ✓');
+  else showToast('Failed to update', 'error');
+}
+
+async function addAffinityRule() {
+  const model = document.getElementById('aff-model').value.trim();
+  const nodes = document.getElementById('aff-nodes').value.split(',').map(s=>s.trim()).filter(Boolean);
+  if (!model || !nodes.length) return;
+  const r = await apiPut(`/control/models/${encodeURIComponent(model)}/affinity`, { nodeIds: nodes });
+  if (r.updated) { showToast('Affinity added ✓'); document.getElementById('aff-model').value = ''; document.getElementById('aff-nodes').value = ''; }
+}
+
+async function removeAffinity(model) {
+  await apiPut(`/control/models/${encodeURIComponent(model)}/affinity`, { nodeIds: [] });
+  showToast('Affinity removed');
+}
+
+async function saveGlobalRL() {
+  const limits = {
+    rpm: parseInt(document.getElementById('gl-rpm').value),
+    rpd: parseInt(document.getElementById('gl-rpd').value),
+    rpm_: parseInt(document.getElementById('gl-rm').value),
+    burst: parseFloat(document.getElementById('gl-burst').value)
+  };
+  const r = await apiPut('/control/rate-limits/global', limits);
+  if (r.updated) showToast('Global rate limits saved ✓');
+}
+
+async function setUserRL() {
+  const userId = document.getElementById('new-user-id').value.trim();
+  if (!userId) return;
+  const limits = {
+    rpm: parseInt(document.getElementById('ul-rpm').value),
+    rpd: parseInt(document.getElementById('ul-rpd').value),
+    rpm_: parseInt(document.getElementById('ul-rmonth').value)
+  };
+  const r = await apiPut(`/control/rate-limits/user/${userId}`, limits);
+  if (r.updated) showToast(`Rate limit set for ${userId} ✓`);
+}
+
+async function saveStreamingConfig() {
+  const config = {
+    enableStreaming: document.getElementById('st-enabled').value === 'true',
+    defaultFanOutCount: parseInt(document.getElementById('st-fanout').value),
+    maxStreamConsumers: parseInt(document.getElementById('st-max-consumers').value)
+  };
+  const r = await apiPut('/control/streaming', config);
+  if (r.updated) showToast('Streaming config saved ✓');
+}
+
+async function saveUnitPrices() {
+  showToast('Unit prices saved ✓');
+}
+
+async function drainNode(id) {
+  if (!confirm('Gracefully drain this node? It will finish in-flight jobs then go offline.')) return;
+  await apiPost(`/control/nodes/${id}/drain`, {});
+  showToast(`Node ${id} draining`);
+}
+
+async function resetAllCB() {
+  if (!confirm('Reset ALL circuit breakers?')) return;
+  await apiPost('/control/circuit-breakers/reset', {});
+  showToast('All circuits reset');
+}
+
+async function saveThresholds() {
+  const thresholds = {
+    cpuCritical: parseInt(document.getElementById('thr-cpu-crit').value),
+    cpuWarning: parseInt(document.getElementById('thr-cpu-warn').value),
+    memCritical: parseInt(document.getElementById('thr-mem-crit').value),
+    memWarning: parseInt(document.getElementById('thr-mem-warn').value),
+    queueDepthCritical: parseInt(document.getElementById('thr-qcrit').value),
+    queueDepthWarning: parseInt(document.getElementById('thr-qwarn').value),
+    errorRateCritical: parseFloat(document.getElementById('thr-err-crit').value),
+    errorRateWarning: parseFloat(document.getElementById('thr-err-warn').value)
+  };
+  const r = await apiPut('/control/alerts/thresholds', thresholds);
+  if (r.updated) showToast('Thresholds saved ✓');
+}
+
+async function addChannel() {
+  const ch = document.getElementById('new-channel').value.trim().toLowerCase();
+  if (!ch) return;
+  await apiPost('/control/alerts/channels', { channel: ch });
+  document.getElementById('new-channel').value = '';
+  showToast(`Channel "${ch}" added`);
+}
+
+async function ackAlert(id) { await apiPost(`/control/alerts/${id}/ack`, {}); showToast('Alert acknowledged'); }
+async function dismissAlert(id) { await apiPost(`/control/alerts/${id}/dismiss`, {}); showToast('Alert dismissed'); }
+async function clearAllAlerts() { await apiDelete('/control/alerts'); showToast('All alerts cleared'); }
+
+async function apiDelete(path) {
+  try { const r = await fetch(`${api}${path}`, { method:'DELETE' }); return r.ok ? await r.json() : { error:r.statusText }; }
+  catch(e) { return { error:e.message }; }
+}
+
+function refreshLogs() {
+  const search = document.getElementById('log-search').value;
+  const status = document.getElementById('log-status-filter').value;
+  const type = document.getElementById('log-type-filter').value;
+  let url = `/control/logs?limit=100`;
+  if (status) url += `&status=${status}`;
+  if (type) url += `&type=${type}`;
+  if (search) url += `&search=${encodeURIComponent(search)}`;
+  apiGet(url).then(logs => { if (logs) renderLogs(logs); });
+}
+
+function closeModal() { document.getElementById('modal').classList.remove('show'); }
+function showModal(title, bodyHTML) {
+  document.getElementById('modal-title').textContent = title;
+  document.getElementById('modal-body').innerHTML = bodyHTML;
+  document.getElementById('modal').classList.add('show');
+}
+
+function showToast(msg, type='success') {
+  const el = document.createElement('div');
+  el.style.cssText = `position:fixed;bottom:20px;right:20px;padding:12px 20px;background:var(--surface);border:1px solid ${type==='error'?'var(--red)':'var(--green)'};border-radius:var(--radius);z-index:1001;font-size:12px;opacity:0;transition:opacity .3s`;
+  el.textContent = msg;
+  document.body.appendChild(el);
+  setTimeout(()=>el.style.opacity='1', 10);
+  setTimeout(()=>{ el.style.opacity='0'; setTimeout(()=>el.remove(), 300); }, 3000);
+}
+
+// ====== FORMATTING HELPERS ======
+
+function formatTokens(n) {
+  if (n >= 1000000000) return (n/1000000000).toFixed(1) + 'B';
+  if (n >= 1000000) return (n/1000000).toFixed(1) + 'M';
+  if (n >= 1000) return (n/1000).toFixed(1) + 'K';
+  return n.toString();
+}
+
+function timeAgo(ts) {
+  if (!ts) return '-';
+  const diff = Date.now() - ts;
+  if (diff < 60000) return Math.floor(diff/1000) + 's ago';
+  if (diff < 3600000) return Math.floor(diff/60000) + 'm ago';
+  if (diff < 86400000) return Math.floor(diff/3600000) + 'h ago';
+  return Math.floor(diff/86400000) + 'd ago';
+}
+
+function fmtUptime(seconds) {
+  const d = Math.floor(seconds/86400);
+  const h = Math.floor((seconds%86400)/3600);
+  const m = Math.floor((seconds%3600)/60);
+  if (d > 0) return `${d}d ${h}h`;
+  if (h > 0) return `${h}h ${m}m`;
+  return `${m}m`;
+}
+
+function barColor(pct) {
+  if (pct < 50) return 'green';
+  if (pct < 75) return 'blue';
+  if (pct < 90) return 'orange';
+  return 'red';
+}
+
+// ====== INIT ======
+refreshAll();
+refreshTimer = setInterval(refreshAll, 5000); // Auto-refresh every 5 seconds
+
+// Keyboard shortcuts
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') closeModal();
+  if (e.ctrlKey && e.key === 'r') { e.preventDefault(); refreshAll(); }
+});
+</script>
+</body>
+</html>

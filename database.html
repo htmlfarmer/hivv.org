@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Database — HIVV.org</title>
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <link rel="icon" type="image/x-icon" href="/favicon.ico">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+</head>
+<body>
+<div class="container">
+
+<nav class="site-nav">
+  <a href="/" class="brand"> HIVV.org</a>
+  <div class="nav-links">
+    <a href="/">Home</a>
+    <a href="/database.html" class="active">Database</a>
+    <a href="/donate.html">Donate</a>
+    <a href="/system.html">System</a>
+    <a href="/connect.html">Connect</a>
+    <a href="/nodes.html">Nodes</a>
+    <a href="/api.html">API</a>
+    <a href="/account.html">Account</a>
+  </div>
+</nav>
+
+<h1>Database</h1>
+<p class="subtitle">Browse HIVV's public tables. Credentials, sessions, keys, IPs and request payloads are never exposed — the whitelist lives server-side.</p>
+
+<div class="grid grid-4" id="tables-grid" style="margin-bottom: 30px;">
+  <span style="color: #888;">Loading tables...</span>
+</div>
+
+<div class="card">
+  <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; flex-wrap: wrap; gap: 10px;">
+    <h2 style="margin: 0; border: none; color: #00ff88;" id="current-table-name">Select a table</h2>
+    <div style="display: flex; gap: 8px; align-items: center;">
+      <label>Limit:</label>
+      <select id="limit-select" style="flex: 0 0 100px;">
+        <option value="20">20</option>
+        <option value="50" selected>50</option>
+        <option value="100">100</option>
+      </select>
+      <button class="btn btn-small" onclick="refreshTable()">Refresh</button>
+    </div>
+  </div>
+  <div id="table-data" style="color: #888;">Pick a table above to view its contents.</div>
+</div>
+
+<hr style="border: none; border-top: 1px solid #333; margin: 40px 0;">
+<div style="text-align: center; color: #666; font-size: 0.85em; line-height: 2;">
+  <p>HIVV.org — The manifesting under the Raat ki Rani</p>
+  <p>
+    <a href="/terms.html" style="color: #555;">Terms of Service</a> &middot;
+    <a href="/privacy.html" style="color: #555;">Privacy Policy</a> &middot;
+    <a href="/aup.html" style="color: #555;">Acceptable Use</a>
+  </p>
+</div>
+
+</div>
+
+<script>
+let currentTable = null;
+
+async function loadTables() {
+  try {
+    const res = await fetch('/api/database/tables');
+    const data = await res.json();
+    const grid = document.getElementById('tables-grid');
+    if (!data.tables || data.tables.length === 0) {
+      grid.innerHTML = '<span style="color: #888;">No tables found.</span>';
+      return;
+    }
+    const protectedTables = ['api_keys', 'api_key_usage_log'];
+    grid.innerHTML = data.tables.map(function(t) {
+      const isProtected = protectedTables.indexOf(t.name) !== -1;
+      const color = isProtected ? '#ff6b6b' : '#00ff88';
+      const desc = isProtected ? ' (protected)' : '';
+      return '<div class="stat-box" style="border-left-color: ' + color + '; cursor: ' + (isProtected ? 'not-allowed' : 'pointer') + ';" onclick="' + (isProtected ? 'alert(\"Direct access to ' + t.name + ' is blocked. Use the API.\")' : 'selectTable(\"' + t.name + '\")') + '"><div class="stat-label">' + t.name + desc + '</div><div class="stat-value" style="color: ' + color + ';">' + t.row_count + '</div><div class="stat-sub">rows</div></div>';
+    }).join('');
+  } catch (err) {
+    document.getElementById('tables-grid').innerHTML = '<span style="color: #ff6b6b;">Failed to load tables: ' + err.message + '</span>';
+  }
+}
+
+async function selectTable(name) {
+  currentTable = name;
+  document.getElementById('current-table-name').textContent = name;
+  await refreshTable();
+}
+
+async function refreshTable() {
+  if (!currentTable) return;
+  const limit = document.getElementById('limit-select').value;
+  const el = document.getElementById('table-data');
+  el.innerHTML = '<span style="color: #888;">Loading...</span>';
+  try {
+    const res = await fetch('/api/database/' + currentTable + '?limit=' + limit);
+    const data = await res.json();
+    if (data.error) {
+      el.innerHTML = '<span style="color: #ff6b6b;">' + data.error + '</span>';
+      return;
+    }
+    if (!data.rows || data.rows.length === 0) {
+      el.innerHTML = '<span style="color: #888;">No rows in this table.</span>';
+      return;
+    }
+    const cols = Object.keys(data.rows[0]);
+    let html = '<div style="overflow-x: auto;"><table><thead><tr>';
+    for (const c of cols) html += '<th>' + c + '</th>';
+    html += '</tr></thead><tbody>';
+    for (const row of data.rows) {
+      html += '<tr>';
+      for (const c of cols) {
+        let val = row[c];
+        if (val === null) val = '<span style="color: #555;">null</span>';
+        else if (typeof val === 'object') val = JSON.stringify(val);
+        else val = String(val);
+        if (val.length > 80) val = val.slice(0, 80) + '...';
+        html += '<td style="font-size: 0.85em;">' + val + '</td>';
+      }
+      html += '</tr>';
+    }
+    html += '</tbody></table></div>';
+    html += '<div style="color: #888; margin-top: 10px; font-size: 0.85em;">Showing ' + data.rows.length + ' rows.</div>';
+    el.innerHTML = html;
+  } catch (err) {
+    el.innerHTML = '<span style="color: #ff6b6b;">Failed to load: ' + err.message + '</span>';
+  }
+}
+
+loadTables();
+</script>
+
+</body>
+</html>

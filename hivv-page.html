@@ -1,0 +1,1544 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <script>
+    // Redirect legacy demo page to active control plane dashboard
+    window.location.replace('/hivv-dashboard.html');
+  </script>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>HIVV Neural Command Center — Redirecting...</title>
+  <meta name="description" content="Real-time visualization and control of the HIVV AI agent network. Monitor all AI agents, their decisions, communications, and access.">
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <style>
+    :root {
+      --yes: #00ff88;
+      --no: #ff6b6b;
+      --maybe: #ffd93d;
+      --past: #a855f7;
+      --present: #00ff88;
+      --future: #74b9ff;
+      --human: #00ff88;
+      --agent: #c084fc;
+      --org: #74b9ff;
+      --public: #888;
+      --bg-dark: #06060c;
+      --bg-card: #0c0c18;
+      --bg-surface: #12121f;
+      --bg-hover: #1a1a2e;
+      --border: #1e1e32;
+      --text: #e8e8f0;
+      --text-muted: #6a6a8a;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: var(--bg-dark);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      min-height: 100vh;
+      line-height: 1.5;
+      overflow-x: hidden;
+    }
+
+    a { color: var(--future); text-decoration: none; }
+    a:hover { color: var(--present); }
+
+    .container { max-width: 1600px; margin: 0 auto; padding: 0 20px; }
+
+    /* Header */
+    header {
+      background: var(--bg-card);
+      border-bottom: 1px solid var(--border);
+      padding: 12px 20px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      position: sticky;
+      top: 0;
+      z-index: 100;
+      backdrop-filter: blur(10px);
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      font-size: 1.2em;
+      font-weight: 700;
+      color: var(--text);
+    }
+
+    .brand-icon {
+      width: 36px;
+      height: 36px;
+      background: linear-gradient(135deg, var(--past), var(--future));
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 18px;
+    }
+
+    .nav-links {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .nav-links a {
+      color: var(--text-muted);
+      text-decoration: none;
+      padding: 8px 14px;
+      border-radius: 6px;
+      font-size: 0.9em;
+      transition: all 0.2s;
+    }
+
+    .nav-links a:hover { color: var(--text); background: var(--bg-hover); }
+    .nav-links a.active { color: var(--present); background: var(--bg-surface); }
+
+    .connection-status {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 0.8em;
+      color: var(--text-muted);
+      padding: 6px 12px;
+      background: var(--bg-surface);
+      border-radius: 20px;
+    }
+
+    .connection-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--yes);
+      animation: pulse 2s infinite;
+    }
+
+    .connection-dot.offline { background: var(--no); animation: none; }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.5; }
+    }
+
+    /* Main Layout */
+    .main-layout {
+      display: grid;
+      grid-template-columns: 280px 1fr 320px;
+      gap: 20px;
+      padding: 20px;
+      min-height: calc(100vh - 65px);
+    }
+
+    @media (max-width: 1200px) {
+      .main-layout { grid-template-columns: 1fr; }
+      .sidebar-left, .sidebar-right { display: none; }
+    }
+
+    /* Sidebars */
+    .sidebar {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      overflow: hidden;
+      height: fit-content;
+      max-height: calc(100vh - 100px);
+      overflow-y: auto;
+    }
+
+    .sidebar-header {
+      padding: 16px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .sidebar-title {
+      font-size: 0.75em;
+      text-transform: uppercase;
+      letter-spacing: 1.5px;
+      color: var(--text-muted);
+      font-weight: 600;
+    }
+
+    .sidebar-content { padding: 12px; }
+
+    /* View Switcher */
+    .view-switcher {
+      display: flex;
+      gap: 4px;
+      padding: 4px;
+      background: var(--bg-surface);
+      border-radius: 8px;
+    }
+
+    .view-btn {
+      flex: 1;
+      padding: 8px 12px;
+      border: none;
+      background: transparent;
+      color: var(--text-muted);
+      font-size: 0.75em;
+      font-weight: 600;
+      border-radius: 6px;
+      cursor: pointer;
+      transition: all 0.2s;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .view-btn:hover { color: var(--text); }
+    .view-btn.active { background: var(--bg-card); color: var(--present); }
+
+    /* Network Graph */
+    .network-container {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .network-header {
+      padding: 16px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .network-stats {
+      display: flex;
+      gap: 20px;
+    }
+
+    .network-stat {
+      text-align: center;
+    }
+
+    .network-stat-value {
+      font-size: 1.4em;
+      font-weight: 700;
+    }
+
+    .network-stat-label {
+      font-size: 0.7em;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 1px;
+    }
+
+    .network-canvas-wrap {
+      flex: 1;
+      position: relative;
+      min-height: 500px;
+    }
+
+    #network-svg {
+      width: 100%;
+      height: 100%;
+      min-height: 500px;
+    }
+
+    /* SVG Network Styles */
+    .node-circle {
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .node-circle:hover { filter: brightness(1.3); }
+
+    .node-label {
+      font-size: 10px;
+      fill: var(--text);
+      text-anchor: middle;
+      pointer-events: none;
+    }
+
+    .link-line {
+      stroke-opacity: 0.4;
+      transition: all 0.2s;
+    }
+
+    .link-line:hover { stroke-opacity: 0.8; }
+
+    /* Temporal Tabs */
+    .temporal-tabs {
+      display: flex;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .temp-tab {
+      flex: 1;
+      padding: 12px;
+      border: none;
+      background: transparent;
+      color: var(--text-muted);
+      font-size: 0.85em;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s;
+      position: relative;
+    }
+
+    .temp-tab::after {
+      content: '';
+      position: absolute;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      height: 3px;
+      background: transparent;
+      border-radius: 3px 3px 0 0;
+    }
+
+    .temp-tab:hover { color: var(--text); }
+    .temp-tab.active { color: var(--present); }
+    .temp-tab.active::after { background: var(--present); }
+    .temp-tab.past.active { color: var(--past); }
+    .temp-tab.past.active::after { background: var(--past); }
+    .temp-tab.future.active { color: var(--future); }
+    .temp-tab.future.active::after { background: var(--future); }
+
+    /* Agent Cards */
+    .agent-list { padding: 12px; }
+
+    .agent-card {
+      background: var(--bg-surface);
+      border-radius: 10px;
+      padding: 14px;
+      margin-bottom: 10px;
+      cursor: pointer;
+      transition: all 0.2s;
+      border: 1px solid transparent;
+    }
+
+    .agent-card:hover { border-color: var(--border); transform: translateX(4px); }
+    .agent-card.selected { border-color: var(--past); background: var(--bg-hover); }
+
+    .agent-card-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      margin-bottom: 8px;
+    }
+
+    .agent-name {
+      font-weight: 600;
+      font-size: 0.95em;
+      color: var(--text);
+    }
+
+    .agent-type {
+      font-size: 0.7em;
+      padding: 3px 8px;
+      border-radius: 4px;
+      font-weight: 600;
+      text-transform: uppercase;
+    }
+
+    .agent-type.human { background: rgba(0,255,136,0.15); color: var(--human); }
+    .agent-type.agent { background: rgba(192,132,252,0.15); color: var(--agent); }
+    .agent-type.org { background: rgba(116,185,255,0.15); color: var(--org); }
+
+    .agent-meta {
+      font-size: 0.8em;
+      color: var(--text-muted);
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .agent-meta span {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    /* Gate Badges */
+    .gate-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 3px 10px;
+      border-radius: 12px;
+      font-size: 0.75em;
+      font-weight: 700;
+    }
+
+    .gate-badge.yes { background: rgba(0,255,136,0.15); color: var(--yes); }
+    .gate-badge.no { background: rgba(255,107,107,0.15); color: var(--no); }
+    .gate-badge.maybe { background: rgba(255,217,61,0.15); color: var(--maybe); }
+
+    /* Command Panel */
+    .command-panel {
+      padding: 16px;
+      border-top: 1px solid var(--border);
+      background: var(--bg-surface);
+    }
+
+    .command-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 8px;
+      margin-bottom: 12px;
+    }
+
+    .cmd-btn {
+      padding: 10px 8px;
+      border: 1px solid var(--border);
+      background: var(--bg-card);
+      color: var(--text);
+      font-size: 0.7em;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      border-radius: 6px;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .cmd-btn:hover { background: var(--bg-hover); transform: translateY(-2px); }
+    .cmd-btn.allow { border-color: var(--yes); color: var(--yes); }
+    .cmd-btn.deny { border-color: var(--no); color: var(--no); }
+    .cmd-btn.pause { border-color: var(--maybe); color: var(--maybe); }
+    .cmd-btn.revoke { border-color: var(--past); color: var(--past); }
+    .cmd-btn.delegate { border-color: var(--future); color: var(--future); }
+    .cmd-btn.ask { border-color: var(--org); color: var(--org); }
+    .cmd-btn.escalate { border-color: var(--text); }
+    .cmd-btn.audit { border-color: var(--text-muted); color: var(--text-muted); }
+
+    /* Detail Panel */
+    .detail-panel {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      overflow: hidden;
+      height: fit-content;
+      max-height: calc(100vh - 100px);
+      display: flex;
+      flex-direction: column;
+    }
+
+    .detail-header {
+      padding: 16px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .detail-content {
+      padding: 16px;
+      overflow-y: auto;
+      flex: 1;
+    }
+
+    .detail-section {
+      margin-bottom: 20px;
+    }
+
+    .detail-section-title {
+      font-size: 0.7em;
+      text-transform: uppercase;
+      letter-spacing: 1.5px;
+      color: var(--text-muted);
+      margin-bottom: 10px;
+      font-weight: 600;
+    }
+
+    .identity-card {
+      background: var(--bg-surface);
+      border-radius: 10px;
+      padding: 14px;
+    }
+
+    .identity-row {
+      display: flex;
+      justify-content: space-between;
+      padding: 8px 0;
+      border-bottom: 1px solid var(--border);
+      font-size: 0.85em;
+    }
+
+    .identity-row:last-child { border-bottom: none; }
+    .identity-label { color: var(--text-muted); }
+    .identity-value { font-weight: 500; }
+
+    /* Activity Feed */
+    .activity-feed { padding: 12px; }
+
+    .activity-item {
+      padding: 12px;
+      margin-bottom: 8px;
+      background: var(--bg-surface);
+      border-radius: 8px;
+      border-left: 3px solid var(--border);
+      font-size: 0.85em;
+    }
+
+    .activity-item.yes { border-left-color: var(--yes); }
+    .activity-item.no { border-left-color: var(--no); }
+    .activity-item.maybe { border-left-color: var(--maybe); }
+    .activity-item.past { border-left-color: var(--past); }
+    .activity-item.future { border-left-color: var(--future); }
+    .activity-item.human { border-left-color: var(--human); }
+    .activity-item.agent { border-left-color: var(--agent); }
+
+    .activity-header {
+      display: flex;
+      justify-content: space-between;
+      margin-bottom: 4px;
+    }
+
+    .activity-who {
+      font-weight: 600;
+      color: var(--text);
+    }
+
+    .activity-what {
+      color: var(--text-muted);
+      font-size: 0.9em;
+    }
+
+    .activity-time {
+      color: var(--text-muted);
+      font-size: 0.75em;
+    }
+
+    .activity-gate {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 4px;
+      font-size: 0.7em;
+      font-weight: 700;
+      margin-top: 6px;
+    }
+
+    /* Pending Decisions */
+    .pending-item {
+      background: var(--bg-surface);
+      border-radius: 10px;
+      padding: 14px;
+      margin-bottom: 10px;
+      border: 1px solid var(--maybe);
+    }
+
+    .pending-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 10px;
+    }
+
+    .pending-title {
+      font-weight: 600;
+    }
+
+    .pending-actions {
+      display: flex;
+      gap: 8px;
+    }
+
+    .pending-btn {
+      padding: 6px 14px;
+      border: none;
+      border-radius: 6px;
+      font-size: 0.8em;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .pending-btn.allow { background: var(--yes); color: #000; }
+    .pending-btn.deny { background: var(--no); color: #fff; }
+    .pending-btn.ask { background: var(--maybe); color: #000; }
+    .pending-btn:hover { transform: scale(1.05); }
+
+    /* Messages / Communications */
+    .message-list { padding: 12px; }
+
+    .message-item {
+      background: var(--bg-surface);
+      border-radius: 10px;
+      padding: 14px;
+      margin-bottom: 10px;
+    }
+
+    .message-from {
+      font-weight: 600;
+      color: var(--agent);
+      margin-bottom: 4px;
+    }
+
+    .message-to {
+      font-size: 0.85em;
+      color: var(--text-muted);
+      margin-bottom: 8px;
+    }
+
+    .message-content {
+      font-size: 0.9em;
+      color: var(--text);
+      padding: 10px;
+      background: var(--bg-card);
+      border-radius: 6px;
+      border-left: 3px solid var(--agent);
+    }
+
+    /* Empty State */
+    .empty-state {
+      text-align: center;
+      padding: 40px 20px;
+      color: var(--text-muted);
+    }
+
+    .empty-icon {
+      font-size: 3em;
+      margin-bottom: 12px;
+      opacity: 0.3;
+    }
+
+    .empty-text {
+      font-size: 0.9em;
+    }
+
+    /* Scrollbar */
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+
+    /* Badge */
+    .badge {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 4px;
+      font-size: 0.7em;
+      font-weight: 700;
+      text-transform: uppercase;
+    }
+    .badge-active { background: rgba(0,255,136,0.15); color: var(--yes); }
+    .badge-inactive { background: rgba(255,255,255,0.1); color: var(--text-muted); }
+    .badge-past { background: rgba(168,85,247,0.15); color: var(--past); }
+    .badge-present { background: rgba(0,255,136,0.15); color: var(--present); }
+    .badge-future { background: rgba(116,185,255,0.15); color: var(--future); }
+
+    /* Utility */
+    .mono { font-family: 'SF Mono', Monaco, monospace; }
+    .text-yes { color: var(--yes); }
+    .text-no { color: var(--no); }
+    .text-maybe { color: var(--maybe); }
+    .text-past { color: var(--past); }
+    .text-future { color: var(--future); }
+    .text-muted { color: var(--text-muted); }
+
+    /* Tooltip */
+    .tooltip {
+      position: absolute;
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      padding: 10px 14px;
+      border-radius: 8px;
+      font-size: 0.85em;
+      z-index: 1000;
+      pointer-events: none;
+      max-width: 250px;
+      box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <a href="/" class="brand">
+    <div class="brand-icon">⚡</div>
+    <span>HIVV</span>
+  </a>
+
+  <nav class="nav-links">
+    <a href="/">Home</a>
+    <a href="/database.html">Database</a>
+    <a href="/hivv.html" class="active">Neural Command</a>
+    <a href="/nodes.html">Nodes</a>
+    <a href="/bee.html">Account</a>
+  </nav>
+
+  <div class="connection-status">
+    <div class="connection-dot" id="connectionDot"></div>
+    <span id="connectionText">Connecting...</span>
+  </div>
+</header>
+
+<div class="container">
+  <div class="main-layout">
+
+    <!-- LEFT SIDEBAR -->
+    <aside class="sidebar sidebar-left">
+      <div class="sidebar-header">
+        <span class="sidebar-title">🌐 World View</span>
+      </div>
+      <div class="sidebar-content">
+        <div class="view-switcher">
+          <button class="view-btn active" data-view="world">World</button>
+          <button class="view-btn" data-view="me">Me</button>
+          <button class="view-btn" data-view="org">Org</button>
+        </div>
+      </div>
+
+      <div class="sidebar-header" style="margin-top: 12px;">
+        <span class="sidebar-title">⏱️ Temporal</span>
+      </div>
+      <div class="temporal-tabs">
+        <button class="temp-tab past" data-temp="past">Past</button>
+        <button class="temp-tab active" data-temp="present">Present</button>
+        <button class="temp-tab future" data-temp="future">Future</button>
+      </div>
+
+      <div class="sidebar-header" style="margin-top: 12px;">
+        <span class="sidebar-title">🤖 Agents</span>
+        <span class="badge badge-active" id="agentCount">0</span>
+      </div>
+      <div class="agent-list" id="agentList">
+        <div class="empty-state">
+          <div class="empty-icon">◌</div>
+          <div class="empty-text">No agents yet</div>
+        </div>
+      </div>
+
+      <div class="command-panel">
+        <div class="sidebar-title" style="margin-bottom: 10px;">⚡ Commands</div>
+        <div class="command-grid">
+          <button class="cmd-btn allow" onclick="sendCommand('ALLOW')" title="Grant permission">Allow</button>
+          <button class="cmd-btn deny" onclick="sendCommand('DENY')" title="Block action">Deny</button>
+          <button class="cmd-btn pause" onclick="sendCommand('PAUSE')" title="Pause agent">Pause</button>
+          <button class="cmd-btn revoke" onclick="sendCommand('REVOKE')" title="Revoke permissions">Revoke</button>
+          <button class="cmd-btn delegate" onclick="sendCommand('DELEGATE')" title="Delegate authority">Delegate</button>
+          <button class="cmd-btn ask" onclick="sendCommand('ASK')" title="Ask for clarification">Ask</button>
+          <button class="cmd-btn escalate" onclick="sendCommand('ESCALATE')" title="Escalate to human">Escalate</button>
+          <button class="cmd-btn audit" onclick="sendCommand('AUDIT')" title="Request audit">Audit</button>
+        </div>
+        <div style="font-size: 0.75em; color: var(--text-muted); text-align: center;">
+          Select an agent first, then issue command
+        </div>
+      </div>
+    </aside>
+
+    <!-- CENTER: Network Graph -->
+    <main class="network-container">
+      <div class="network-header">
+        <div>
+          <h2 style="font-size: 1.1em; margin-bottom: 4px;">Neural Network Map</h2>
+          <p style="font-size: 0.8em; color: var(--text-muted);">Real-time agent relationships and communications</p>
+        </div>
+        <div class="network-stats">
+          <div class="network-stat">
+            <div class="network-stat-value text-yes" id="statHumans">0</div>
+            <div class="network-stat-label">Humans</div>
+          </div>
+          <div class="network-stat">
+            <div class="network-stat-value text-past" id="statAgents">0</div>
+            <div class="network-stat-label">Agents</div>
+          </div>
+          <div class="network-stat">
+            <div class="network-stat-value text-future" id="statPending">0</div>
+            <div class="network-stat-label">Pending</div>
+          </div>
+          <div class="network-stat">
+            <div class="network-stat-value" id="statActions">0</div>
+            <div class="network-stat-label">Actions/Day</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="network-canvas-wrap">
+        <svg id="network-svg" viewBox="0 0 800 500">
+          <defs>
+            <radialGradient id="bgGrad" cx="50%" cy="50%" r="50%">
+              <stop offset="0%" stop-color="#0c0c18"/>
+              <stop offset="100%" stop-color="#06060c"/>
+            </radialGradient>
+            <filter id="glow">
+              <feGaussianBlur stdDeviation="3" result="coloredBlur"/>
+              <feMerge>
+                <feMergeNode in="coloredBlur"/>
+                <feMergeNode in="SourceGraphic"/>
+              </feMerge>
+            </filter>
+          </defs>
+          <rect fill="url(#bgGrad)" width="100%" height="100%"/>
+          <g id="networkGroup"></g>
+        </svg>
+      </div>
+    </main>
+
+    <!-- RIGHT SIDEBAR -->
+    <aside class="sidebar sidebar-right">
+      <div class="detail-panel">
+        <div class="detail-header">
+          <span class="sidebar-title">🔍 Inspector</span>
+          <span id="selectedAgentBadge"></span>
+        </div>
+        <div class="detail-content" id="detailContent">
+          <div class="empty-state">
+            <div class="empty-icon">👁</div>
+            <div class="empty-text">Click an agent to inspect</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="detail-panel" style="margin-top: 16px;">
+        <div class="detail-header">
+          <span class="sidebar-title">📊 Activity</span>
+          <span class="badge badge-present">Live</span>
+        </div>
+        <div class="activity-feed" id="activityFeed" style="max-height: 300px; overflow-y: auto;">
+          <div class="empty-state">
+            <div class="empty-icon">◎</div>
+            <div class="empty-text">No recent activity</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="detail-panel" style="margin-top: 16px;" id="pendingPanel" style="display: none;">
+        <div class="detail-header">
+          <span class="sidebar-title">⚠️ Pending Decisions</span>
+          <span class="badge badge-future" id="pendingCount">0</span>
+        </div>
+        <div class="activity-feed" id="pendingList" style="max-height: 250px; overflow-y: auto;">
+        </div>
+      </div>
+    </aside>
+
+  </div>
+</div>
+
+<!-- Tooltip -->
+<div class="tooltip" id="tooltip" style="display: none;"></div>
+
+<script>
+const SVG_NS = 'http://www.w3.org/2000/svg';
+let state = {
+  agents: [],
+  relationships: [],
+  activities: [],
+  pending: [],
+  selectedAgent: null,
+  currentView: 'world',
+  currentTemp: 'present',
+  lastUpdate: null
+};
+
+let svg, networkGroup;
+
+// Initialize
+document.addEventListener('DOMContentLoaded', () => {
+  svg = document.getElementById('network-svg');
+  networkGroup = document.getElementById('networkGroup');
+
+  // View switcher
+  document.querySelectorAll('.view-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.view-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      state.currentView = btn.dataset.view;
+      filterAndRender();
+    });
+  });
+
+  // Temporal tabs
+  document.querySelectorAll('.temp-tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+      document.querySelectorAll('.temp-tab').forEach(t => t.classList.remove('active'));
+      tab.classList.add('active');
+      state.currentTemp = tab.dataset.temp;
+      renderActivities();
+    });
+  });
+
+  // Initial load
+  loadData();
+  setInterval(loadData, 10000);
+});
+
+async function loadData() {
+  try {
+    const [agentRes, activityRes, pendingRes, hivvRes] = await Promise.all([
+      fetch('/api/hivv/agents'),
+      fetch('/api/activity/recent?limit=50'),
+      fetch('/api/hivv/pending'),
+      fetch('/api/hivv/protocol')
+    ]);
+
+    const agentData = await agentRes.json();
+    const activityData = await activityRes.json();
+    const pendingData = await pendingRes.json();
+    const hivvData = await hivvRes.json();
+
+    state.agents = agentData.agents || generateDemoAgents();
+    state.activities = activityData.events || [];
+    state.pending = pendingData.pending || [];
+
+    // Merge with demo data if empty
+    if (state.agents.length === 0) {
+      state.agents = generateDemoAgents();
+    }
+
+    updateStats();
+    filterAndRender();
+    renderActivities();
+    renderPending();
+
+    // Update connection status
+    document.getElementById('connectionDot').classList.remove('offline');
+    document.getElementById('connectionText').textContent = 'Live';
+
+  } catch (err) {
+    console.error('Failed to load data:', err);
+    document.getElementById('connectionDot').classList.add('offline');
+    document.getElementById('connectionText').textContent = 'Offline';
+
+    // Load demo data
+    if (state.agents.length === 0) {
+      state.agents = generateDemoAgents();
+      state.activities = generateDemoActivities();
+      filterAndRender();
+      renderActivities();
+    }
+  }
+}
+
+function generateDemoAgents() {
+  return [
+    {
+      id: 'hivv-core',
+      name: 'HIVV Core',
+      type: 'agent',
+      status: 'active',
+      capabilities: ['orchestration', 'routing', 'monitoring'],
+      permissions: ['all'],
+      gate: 'yes',
+      publicIdentity: { name: 'HIVV Core', role: 'Network Orchestrator', org: 'HIVV Network' },
+      privateIdentity: { notes: 'Central coordination agent', trustLevel: 'verified' },
+      sessionIdentity: { delegatedBy: 'system', validUntil: null, scope: 'full-network' },
+      relationships: ['asher', 'hivv-monitor', 'local-ai-1'],
+      events: [],
+      currentAction: 'Monitoring network health',
+      lastActive: Date.now()
+    },
+    {
+      id: 'asher',
+      name: 'Asher',
+      type: 'human',
+      status: 'active',
+      capabilities: ['admin', 'owner'],
+      permissions: ['all'],
+      gate: 'yes',
+      publicIdentity: { name: 'Asher', role: 'Network Owner', org: 'Personal' },
+      privateIdentity: { email: 'asher@hivv.org', notes: 'Primary account holder' },
+      sessionIdentity: { delegatedBy: null, validUntil: null, scope: 'owner' },
+      relationships: ['hivv-core', 'local-ai-1'],
+      events: [],
+      currentAction: 'Managing network',
+      lastActive: Date.now()
+    },
+    {
+      id: 'local-ai-1',
+      name: 'Ollama Local',
+      type: 'agent',
+      status: 'active',
+      capabilities: ['inference', 'chat', 'code'],
+      permissions: ['local-only'],
+      gate: 'yes',
+      publicIdentity: { name: 'Local AI', role: 'Edge Inference', org: 'Home Lab' },
+      privateIdentity: { model: 'llama3.2', hardware: 'GPU RTX 3080', notes: 'Primary local model' },
+      sessionIdentity: { delegatedBy: 'asher', validUntil: null, scope: 'local-inference' },
+      relationships: ['asher', 'hivv-core', 'claude-api'],
+      events: [],
+      currentAction: 'Processing inference request',
+      lastActive: Date.now() - 5000
+    },
+    {
+      id: 'claude-api',
+      name: 'Claude API',
+      type: 'agent',
+      status: 'active',
+      capabilities: ['inference', 'reasoning', 'code'],
+      permissions: ['api-external'],
+      gate: 'maybe',
+      publicIdentity: { name: 'Claude', role: 'External AI', org: 'Anthropic' },
+      privateIdentity: { notes: 'External API - requires approval for sensitive data' },
+      sessionIdentity: { delegatedBy: 'hivv-core', validUntil: null, scope: 'read-only' },
+      relationships: ['hivv-core', 'local-ai-1'],
+      events: [],
+      currentAction: 'Awaiting authorization for data access',
+      lastActive: Date.now() - 30000
+    },
+    {
+      id: 'hivv-monitor',
+      name: 'Monitor Agent',
+      type: 'agent',
+      status: 'active',
+      capabilities: ['monitoring', 'metrics', 'alerts'],
+      permissions: ['read-all'],
+      gate: 'yes',
+      publicIdentity: { name: 'HIVV Monitor', role: 'System Monitor', org: 'HIVV Network' },
+      privateIdentity: { notes: 'Continuously monitors system metrics and agent health' },
+      sessionIdentity: { delegatedBy: 'hivv-core', validUntil: null, scope: 'monitoring' },
+      relationships: ['hivv-core'],
+      events: [],
+      currentAction: 'Collecting metrics',
+      lastActive: Date.now() - 1000
+    },
+    {
+      id: 'guest-1',
+      name: 'Guest Session',
+      type: 'human',
+      status: 'inactive',
+      capabilities: ['read-public'],
+      permissions: ['read-public'],
+      gate: 'yes',
+      publicIdentity: { name: 'Anonymous', role: 'Guest', org: null },
+      privateIdentity: {},
+      sessionIdentity: { delegatedBy: null, validUntil: Date.now() + 3600000, scope: 'public-read' },
+      relationships: [],
+      events: [],
+      currentAction: 'Idle',
+      lastActive: Date.now() - 600000
+    }
+  ];
+}
+
+function generateDemoActivities() {
+  const now = Date.now();
+  return [
+    { id: 1, who: 'local-ai-1', what: 'Completed inference request', gate: 'yes', time: now - 5000, detail: 'Generated response for user query' },
+    { id: 2, who: 'hivv-monitor', what: 'Checked system health', gate: 'yes', time: now - 8000, detail: 'All systems operational' },
+    { id: 3, who: 'claude-api', what: 'Requested data access', gate: 'maybe', time: now - 15000, detail: 'Needs authorization for user context' },
+    { id: 4, who: 'asher', what: 'Approved agent registration', gate: 'yes', time: now - 30000, detail: 'Registered new monitoring agent' },
+    { id: 5, who: 'hivv-core', what: 'Routed request to local-ai-1', gate: 'yes', time: now - 45000, detail: 'Load balanced to fastest agent' },
+    { id: 6, who: 'guest-1', what: 'Viewed public dashboard', gate: 'yes', time: now - 120000, detail: 'Read-only access' },
+    { id: 7, who: 'local-ai-1', what: 'Completed code generation', gate: 'yes', time: now - 180000, detail: 'Generated React component' },
+    { id: 8, who: 'asher', what: 'Updated agent permissions', gate: 'yes', time: now - 300000, detail: 'Expanded Claude API scope' },
+    { id: 9, who: 'hivv-core', what: 'Scheduled daily backup', gate: 'yes', time: now - 600000, detail: 'Automated backup initiated' },
+    { id: 10, who: 'claude-api', what: 'Was denied data access', gate: 'no', time: now - 900000, detail: 'Sensitive data protection triggered' }
+  ];
+}
+
+function filterAndRender() {
+  let filtered = [...state.agents];
+
+  // Filter by view
+  if (state.currentView === 'me') {
+    filtered = filtered.filter(a => a.type === 'human');
+  } else if (state.currentView === 'org') {
+    filtered = filtered.filter(a => a.publicIdentity?.org && a.type !== 'human');
+  }
+
+  // Generate relationships from agent data
+  state.relationships = [];
+  filtered.forEach(agent => {
+    if (agent.relationships) {
+      agent.relationships.forEach(relId => {
+        const target = filtered.find(a => a.id === relId);
+        if (target) {
+          state.relationships.push({
+            source: agent.id,
+            target: relId,
+            type: 'communicates'
+          });
+        }
+      });
+    }
+  });
+
+  renderAgentList(filtered);
+  renderNetwork(filtered);
+}
+
+function updateStats() {
+  const humans = state.agents.filter(a => a.type === 'human').length;
+  const agents = state.agents.filter(a => a.type === 'agent').length;
+  const pending = state.pending.length;
+
+  document.getElementById('statHumans').textContent = humans;
+  document.getElementById('statAgents').textContent = agents;
+  document.getElementById('statPending').textContent = pending;
+  document.getElementById('agentCount').textContent = state.agents.length;
+  document.getElementById('statActions').textContent = state.activities.length || 847;
+}
+
+function renderAgentList(agents) {
+  const container = document.getElementById('agentList');
+
+  if (agents.length === 0) {
+    container.innerHTML = `
+      <div class="empty-state">
+        <div class="empty-icon">◌</div>
+        <div class="empty-text">No agents in this view</div>
+      </div>`;
+    return;
+  }
+
+  container.innerHTML = agents.map(agent => {
+    const gateColor = agent.gate === 'yes' ? 'yes' : agent.gate === 'no' ? 'no' : 'maybe';
+    const gateSymbol = agent.gate === 'yes' ? '✓' : agent.gate === 'no' ? '✗' : '?';
+    const isSelected = state.selectedAgent?.id === agent.id;
+
+    return `
+      <div class="agent-card ${isSelected ? 'selected' : ''}" onclick="selectAgent('${agent.id}')">
+        <div class="agent-card-header">
+          <span class="agent-name">${escapeHtml(agent.name)}</span>
+          <span class="agent-type ${agent.type}">${agent.type}</span>
+        </div>
+        <div class="agent-meta">
+          <span class="gate-badge ${gateColor}">${gateSymbol} ${agent.gate.toUpperCase()}</span>
+          <span>${agent.capabilities?.length || 0} caps</span>
+        </div>
+        <div style="font-size: 0.8em; color: var(--text-muted); margin-top: 8px;">
+          ${escapeHtml(agent.currentAction || 'Idle')}
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
+function selectAgent(id) {
+  state.selectedAgent = state.agents.find(a => a.id === id) || null;
+
+  // Update selection UI
+  document.querySelectorAll('.agent-card').forEach(card => card.classList.remove('selected'));
+  if (state.selectedAgent) {
+    const cards = document.querySelectorAll('.agent-card');
+    const idx = state.agents.findIndex(a => a.id === id);
+    if (cards[idx]) cards[idx].classList.add('selected');
+  }
+
+  renderAgentDetail();
+}
+
+function renderAgentDetail() {
+  const container = document.getElementById('detailContent');
+  const agent = state.selectedAgent;
+
+  if (!agent) {
+    container.innerHTML = `
+      <div class="empty-state">
+        <div class="empty-icon">👁</div>
+        <div class="empty-text">Click an agent to inspect</div>
+      </div>`;
+    document.getElementById('selectedAgentBadge').innerHTML = '';
+    return;
+  }
+
+  document.getElementById('selectedAgentBadge').innerHTML =
+    `<span class="agent-type ${agent.type}">${agent.type}</span>`;
+
+  const gateColor = agent.gate === 'yes' ? 'yes' : agent.gate === 'no' ? 'no' : 'maybe';
+
+  container.innerHTML = `
+    <div class="detail-section">
+      <div class="detail-section-title">🎭 Public Identity</div>
+      <div class="identity-card">
+        <div class="identity-row">
+          <span class="identity-label">Name</span>
+          <span class="identity-value">${escapeHtml(agent.publicIdentity?.name || agent.name)}</span>
+        </div>
+        <div class="identity-row">
+          <span class="identity-label">Role</span>
+          <span class="identity-value">${escapeHtml(agent.publicIdentity?.role || 'Unknown')}</span>
+        </div>
+        <div class="identity-row">
+          <span class="identity-label">Organization</span>
+          <span class="identity-value">${escapeHtml(agent.publicIdentity?.org || 'None')}</span>
+        </div>
+        <div class="identity-row">
+          <span class="identity-label">Gate Status</span>
+          <span class="gate-badge ${gateColor}">${agent.gate?.toUpperCase() || 'UNKNOWN'}</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="detail-section">
+      <div class="detail-section-title">🔐 Session Identity</div>
+      <div class="identity-card">
+        <div class="identity-row">
+          <span class="identity-label">Delegated By</span>
+          <span class="identity-value">${escapeHtml(agent.sessionIdentity?.delegatedBy || 'Self')}</span>
+        </div>
+        <div class="identity-row">
+          <span class="identity-label">Scope</span>
+          <span class="identity-value">${escapeHtml(agent.sessionIdentity?.scope || 'None')}</span>
+        </div>
+        <div class="identity-row">
+          <span class="identity-label">Valid Until</span>
+          <span class="identity-value">${agent.sessionIdentity?.validUntil ? new Date(agent.sessionIdentity.validUntil).toLocaleString() : 'Indefinite'}</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="detail-section">
+      <div class="detail-section-title">⚙️ Capabilities</div>
+      <div style="display: flex; flex-wrap: wrap; gap: 6px;">
+        ${(agent.capabilities || []).map(c => `<span class="badge badge-future">${escapeHtml(c)}</span>`).join('')}
+      </div>
+    </div>
+
+    <div class="detail-section">
+      <div class="detail-section-title">🔑 Permissions</div>
+      <div style="display: flex; flex-wrap: wrap; gap: 6px;">
+        ${(agent.permissions || []).map(p => `<span class="badge badge-present">${escapeHtml(p)}</span>`).join('')}
+      </div>
+    </div>
+
+    <div class="detail-section">
+      <div class="detail-section-title">🔗 Relationships (${agent.relationships?.length || 0})</div>
+      <div style="font-size: 0.85em;">
+        ${(agent.relationships || []).map(rId => {
+          const rel = state.agents.find(a => a.id === rId);
+          return rel ? `<div style="padding: 6px 0; border-bottom: 1px solid var(--border);">
+            <span class="agent-type ${rel.type}" style="font-size: 0.65em;">${rel.type}</span>
+            ${escapeHtml(rel.name)}
+          </div>` : '';
+        }).join('')}
+      </div>
+    </div>
+
+    <div class="detail-section">
+      <div class="detail-section-title">📍 Current State</div>
+      <div class="identity-card">
+        <div class="identity-row">
+          <span class="identity-label">Status</span>
+          <span class="identity-value ${agent.status === 'active' ? 'text-yes' : 'text-muted'}">${agent.status?.toUpperCase() || 'UNKNOWN'}</span>
+        </div>
+        <div class="identity-row">
+          <span class="identity-label">Action</span>
+          <span class="identity-value">${escapeHtml(agent.currentAction || 'Idle')}</span>
+        </div>
+        <div class="identity-row">
+          <span class="identity-label">Last Active</span>
+          <span class="identity-value">${timeAgo(agent.lastActive)}</span>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function renderActivities() {
+  const container = document.getElementById('activityFeed');
+  let filtered = [...state.activities];
+
+  // Filter by temporal
+  const now = Date.now();
+  if (state.currentTemp === 'past') {
+    filtered = filtered.filter(a => a.time < now - 60000);
+  } else if (state.currentTemp === 'present') {
+    filtered = filtered.filter(a => a.time >= now - 60000);
+  } else if (state.currentTemp === 'future') {
+    // Show pending as "future"
+    filtered = state.pending.map(p => ({
+      id: p.id,
+      who: p.agentId,
+      what: p.action,
+      gate: 'maybe',
+      time: now + (p.scheduledAt || 0),
+      detail: p.reason,
+      isFuture: true
+    }));
+  }
+
+  if (filtered.length === 0) {
+    container.innerHTML = `
+      <div class="empty-state">
+        <div class="empty-icon">◎</div>
+        <div class="empty-text">No ${state.currentTemp} activity</div>
+      </div>`;
+    return;
+  }
+
+  container.innerHTML = filtered.slice(0, 20).map(activity => {
+    const agent = state.agents.find(a => a.id === activity.who);
+    const gateClass = activity.gate === 'yes' ? 'yes' : activity.gate === 'no' ? 'no' : activity.isFuture ? 'future' : 'maybe';
+
+    return `
+      <div class="activity-item ${gateClass}" onclick="selectAgent('${activity.who}')">
+        <div class="activity-header">
+          <span class="activity-who">${escapeHtml(agent?.name || activity.who)}</span>
+          <span class="activity-time">${timeAgo(activity.time)}</span>
+        </div>
+        <div class="activity-what">${escapeHtml(activity.what)}</div>
+        ${activity.detail ? `<div style="font-size: 0.8em; color: var(--text-muted); margin-top: 4px;">${escapeHtml(activity.detail)}</div>` : ''}
+        <span class="activity-gate badge-${gateClass === 'yes' ? 'active' : gateClass === 'no' ? 'inactive' : 'future'}">${activity.gate?.toUpperCase() || '?'}</span>
+      </div>
+    `;
+  }).join('');
+}
+
+function renderPending() {
+  const container = document.getElementById('pendingList');
+  const pending = state.pending.length > 0 ? state.pending : [
+    { id: 1, agentId: 'claude-api', action: 'Access user profile data', reason: 'Needs authorization for personalized response', scheduledAt: 30000 },
+    { id: 2, agentId: 'local-ai-1', action: 'Execute code generation', reason: 'Code execution requires approval', scheduledAt: 60000 }
+  ];
+
+  if (pending.length === 0) {
+    document.getElementById('pendingPanel').style.display = 'none';
+    return;
+  }
+
+  document.getElementById('pendingPanel').style.display = 'block';
+  document.getElementById('pendingCount').textContent = pending.length;
+
+  container.innerHTML = pending.map(p => {
+    const agent = state.agents.find(a => a.id === p.agentId);
+    return `
+      <div class="pending-item">
+        <div class="pending-header">
+          <span class="pending-title">${escapeHtml(agent?.name || p.agentId)}</span>
+          <span class="badge badge-future">PENDING</span>
+        </div>
+        <div style="font-size: 0.9em; margin-bottom: 10px;">${escapeHtml(p.action)}</div>
+        ${p.reason ? `<div style="font-size: 0.8em; color: var(--text-muted); margin-bottom: 10px;">${escapeHtml(p.reason)}</div>` : ''}
+        <div class="pending-actions">
+          <button class="pending-btn allow" onclick="handleDecision(${p.id}, 'allow')">✓ Allow</button>
+          <button class="pending-btn deny" onclick="handleDecision(${p.id}, 'deny')">✗ Deny</button>
+          <button class="pending-btn ask" onclick="handleDecision(${p.id}, 'ask')">? Ask</button>
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
+function renderNetwork(agents) {
+  // Clear
+  networkGroup.innerHTML = '';
+
+  if (agents.length === 0) return;
+
+  const rect = svg.getBoundingClientRect();
+  const width = 800;
+  const height = 500;
+  const centerX = width / 2;
+  const centerY = height / 2;
+
+  // Position nodes
+  const nodePositions = {};
+  const radius = Math.min(width, height) * 0.35;
+
+  // Humans in center cluster
+  const humans = agents.filter(a => a.type === 'human');
+  const nonHumans = agents.filter(a => a.type !== 'human');
+
+  // Center cluster for humans
+  humans.forEach((agent, i) => {
+    const angle = (i / Math.max(humans.length, 1)) * Math.PI * 2 - Math.PI / 2;
+    const r = radius * 0.25;
+    nodePositions[agent.id] = {
+      x: centerX + Math.cos(angle) * r,
+      y: centerY + Math.sin(angle) * r
+    };
+  });
+
+  // Outer ring for others
+  nonHumans.forEach((agent, i) => {
+    const angle = (i / nonHumans.length) * Math.PI * 2 - Math.PI / 2;
+    nodePositions[agent.id] = {
+      x: centerX + Math.cos(angle) * radius,
+      y: centerY + Math.sin(angle) * radius
+    };
+  });
+
+  // Draw links
+  const drawnLinks = new Set();
+  state.relationships.forEach(rel => {
+    const source = nodePositions[rel.source];
+    const target = nodePositions[rel.target];
+    if (!source || !target) return;
+
+    const linkKey = [rel.source, rel.target].sort().join('-');
+    if (drawnLinks.has(linkKey)) return;
+    drawnLinks.add(linkKey);
+
+    const line = document.createElementNS(SVG_NS, 'line');
+    line.setAttribute('x1', source.x);
+    line.setAttribute('y1', source.y);
+    line.setAttribute('x2', target.x);
+    line.setAttribute('y2', target.y);
+    line.setAttribute('stroke', rel.type === 'communicates' ? '#74b9ff' : '#666');
+    line.setAttribute('stroke-width', '2');
+    line.setAttribute('class', 'link-line');
+    networkGroup.appendChild(line);
+  });
+
+  // Draw nodes
+  agents.forEach(agent => {
+    const pos = nodePositions[agent.id];
+    if (!pos) return;
+
+    const g = document.createElementNS(SVG_NS, 'g');
+    g.setAttribute('transform', `translate(${pos.x}, ${pos.y})`);
+    g.style.cursor = 'pointer';
+
+    // Node circle
+    const circle = document.createElementNS(SVG_NS, 'circle');
+    const size = agent.type === 'human' ? 24 : agent.type === 'org' ? 20 : 16;
+    circle.setAttribute('r', size);
+    circle.setAttribute('class', 'node-circle');
+
+    // Color by gate and type
+    let color;
+    if (agent.type === 'human') {
+      color = '#00ff88';
+    } else if (agent.gate === 'yes') {
+      color = '#00ff88';
+    } else if (agent.gate === 'no') {
+      color = '#ff6b6b';
+    } else {
+      color = '#ffd93d';
+    }
+
+    circle.setAttribute('fill', color);
+    circle.setAttribute('filter', 'url(#glow)');
+    g.appendChild(circle);
+
+    // Inner dot for humans
+    if (agent.type === 'human') {
+      const inner = document.createElementNS(SVG_NS, 'circle');
+      inner.setAttribute('r', '8');
+      inner.setAttribute('fill', '#fff');
+      g.appendChild(inner);
+    }
+
+    // Type icon
+    const icon = document.createElementNS(SVG_NS, 'text');
+    icon.setAttribute('y', size + 16);
+    icon.setAttribute('class', 'node-label');
+    icon.textContent = agent.name.length > 12 ? agent.name.substring(0, 12) + '...' : agent.name;
+    g.appendChild(icon);
+
+    // Gate indicator
+    const gate = document.createElementNS(SVG_NS, 'text');
+    gate.setAttribute('y', -size - 8);
+    gate.setAttribute('class', 'node-label');
+    gate.setAttribute('fill', agent.gate === 'yes' ? '#00ff88' : agent.gate === 'no' ? '#ff6b6b' : '#ffd93d');
+    gate.setAttribute('font-size', '14');
+    gate.textContent = agent.gate === 'yes' ? '✓' : agent.gate === 'no' ? '✗' : '?';
+    g.appendChild(gate);
+
+    // Event handlers
+    g.addEventListener('click', () => selectAgent(agent.id));
+    g.addEventListener('mouseenter', (e) => showTooltip(e, agent));
+    g.addEventListener('mouseleave', hideTooltip);
+
+    networkGroup.appendChild(g);
+  });
+
+  // Center label
+  const centerLabel = document.createElementNS(SVG_NS, 'text');
+  centerLabel.setAttribute('x', centerX);
+  centerLabel.setAttribute('y', centerY);
+  centerLabel.setAttribute('text-anchor', 'middle');
+  centerLabel.setAttribute('fill', '#666');
+  centerLabel.setAttribute('font-size', '12');
+  centerLabel.textContent = 'HIVV NETWORK';
+  networkGroup.appendChild(centerLabel);
+
+  // Outer ring
+  const ring = document.createElementNS(SVG_NS, 'circle');
+  ring.setAttribute('cx', centerX);
+  ring.setAttribute('cy', centerY);
+  ring.setAttribute('r', radius * 1.1);
+  ring.setAttribute('fill', 'none');
+  ring.setAttribute('stroke', '#1e1e32');
+  ring.setAttribute('stroke-width', '1');
+  ring.setAttribute('stroke-dasharray', '5,5');
+  networkGroup.insertBefore(ring, networkGroup.firstChild);
+}
+
+function showTooltip(e, agent) {
+  const tooltip = document.getElementById('tooltip');
+  tooltip.innerHTML = `
+    <div style="font-weight: 600; margin-bottom: 6px;">${escapeHtml(agent.name)}</div>
+    <div style="color: var(--text-muted); font-size: 0.85em;">
+      ${escapeHtml(agent.publicIdentity?.role || agent.type)} ${agent.publicIdentity?.org ? '· ' + escapeHtml(agent.publicIdentity.org) : ''}
+    </div>
+    <div style="margin-top: 8px; font-size: 0.8em;">
+      <span class="gate-badge ${agent.gate}">${agent.gate?.toUpperCase()}</span>
+      <span style="margin-left: 8px;">${agent.capabilities?.length || 0} capabilities</span>
+    </div>
+  `;
+  tooltip.style.display = 'block';
+  tooltip.style.left = (e.pageX + 15) + 'px';
+  tooltip.style.top = (e.pageY + 15) + 'px';
+}
+
+function hideTooltip() {
+  document.getElementById('tooltip').style.display = 'none';
+}
+
+async function handleDecision(id, type) {
+  try {
+    await fetch('/api/hivv/decision', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ request_id: id, decision: type })
+    });
+    loadData();
+  } catch (err) {
+    console.error('Decision failed:', err);
+  }
+}
+
+function sendCommand(cmd) {
+  if (!state.selectedAgent) {
+    alert('Select an agent first');
+    return;
+  }
+
+  const agentName = state.selectedAgent.name;
+  const confirmed = confirm(`Send ${cmd} command to ${agentName}?`);
+  if (!confirmed) return;
+
+  // In production, this would send to the API
+  console.log(`Command ${cmd} sent to ${state.selectedAgent.id}`);
+
+  // Add to activities
+  state.activities.unshift({
+    id: Date.now(),
+    who: 'asher',
+    what: `Sent ${cmd} to ${agentName}`,
+    gate: 'yes',
+    time: Date.now(),
+    detail: `Human-initiated command`
+  });
+
+  renderActivities();
+}
+
+function timeAgo(ts) {
+  if (!ts) return 'never';
+  const diff = Date.now() - ts;
+  if (diff < 0) return 'in ' + Math.abs(Math.round(diff / 1000)) + 's';
+  if (diff < 60000) return Math.round(diff / 1000) + 's ago';
+  if (diff < 3600000) return Math.round(diff / 60000) + 'm ago';
+  if (diff < 86400000) return Math.round(diff / 3600000) + 'h ago';
+  return Math.round(diff / 86400000) + 'd ago';
+}
+
+function escapeHtml(str) {
+  if (str == null) return '';
+  const d = document.createElement('div');
+  d.textContent = String(str);
+  return d.innerHTML;
+}
+</script>
+
+</body>
+</html>

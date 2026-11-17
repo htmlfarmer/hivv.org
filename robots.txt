@@ -1,0 +1,16 @@
+# robots.txt
+User-agent: *
+Allow: /
+Allow: /api/health
+Allow: /api/control/nodes
+Allow: /api/capabilities
+Allow: /api/public/*
+Allow: /v1/*
+Allow: /ai.txt
+Disallow: /api/control/
+Disallow: /api/auth/
+Disallow: /api/keys/
+Disallow: /api/policy/audit/
+Disallow: /api/database/
+
+Sitemap: https://hivv.org/sitemap.xml

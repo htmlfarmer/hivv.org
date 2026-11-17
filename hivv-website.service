@@ -1,0 +1,15 @@
+[Unit]
+Description=HIVV Website & API Server
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/hivv start
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=hivv
+
+[Install]
+WantedBy=multi-user.target

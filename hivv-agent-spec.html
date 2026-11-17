@@ -1,0 +1,545 @@
+# HIVV Agent — Node Software Specification
+
+## Overview
+
+`hivv-agent` is lightweight software that runs on any computer to add it to the HIVV network. It enables:
+
+- **AI Serving**: Expose local AI models via OpenAI-compatible API
+- **Monitoring**: Report hardware metrics to HIVV.org
+- **Control**: Accept commands from HIVV.org to start/stop models
+- **Discovery**: Find other nodes on LAN and connect to the global network
+
+---
+
+## Quick Install
+
+```bash
+npm install -g hivv-agent
+hivv-agent init
+hivv-agent connect
+```
+
+---
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                      HIVV AGENT                             │
+│                                                              │
+│   ┌─────────────┐  ┌─────────────┐  ┌─────────────────┐   │
+│   │  HTTP API   │  │  WEBSOCKET │  │   FILE WATCHER   │   │
+│   │  (Express)  │  │  (Real-time)│  │   (Config)      │   │
+│   └──────┬──────┘  └──────┬──────┘  └────────┬────────┘   │
+│          │                │                   │              │
+│   ┌──────▼────────────────▼───────────────────▼────────┐   │
+│   │                    CORE ENGINE                      │   │
+│   │  ┌──────────┐  ┌──────────┐  ┌──────────────┐  │   │
+│   │  │  MODEL   │  │  METRICS │  │    CONTROL    │  │   │
+│   │  │  MANAGER │  │ COLLECTOR│  │    HANDLER   │  │   │
+│   │  └──────────┘  └──────────┘  └──────────────┘  │   │
+│   └──────────────────────────────────────────────────┘   │
+│          │                │                │               │
+│   ┌──────▼──────┐  ┌──────▼──────┐  ┌────▼────────┐   │
+│   │ LOCAL AI    │  │ HIVV.ORG   │  │ PEER NODES  │   │
+│   │ (LM Studio, │  │  CLOUD     │  │  (LAN/P2P)  │   │
+│   │  Ollama...) │  │            │  │              │   │
+│   └─────────────┘  └────────────┘  └──────────────┘   │
+└─────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## API Endpoints
+
+### Health & Info
+
+```
+GET /health
+Response: {
+  "status": "ok",
+  "uptime": 86400,
+  "version": "1.0.0"
+}
+
+GET /api/v1/models
+Response: {
+  "models": [
+    { "id": "llama-3-70b", "name": "Llama 3 70B", "context_length": 8192 },
+    { "id": "mistral-7b", "name": "Mistral 7B", "context_length": 4096 }
+  ]
+}
+```
+
+### OpenAI-Compatible Chat
+
+```
+POST /v1/chat/completions
+Headers: Content-Type: application/json
+Body: {
+  "model": "llama-3-70b",
+  "messages": [{"role": "user", "content": "Hello!"}],
+  "stream": true
+}
+Response: Server-Sent Events (SSE)
+```
+
+### Metrics
+
+```
+GET /metrics
+Response: {
+  "cpu_pct": 23.4,
+  "memory_used_mb": 8192,
+  "memory_total_mb": 32768,
+  "gpu_util_pct": 78.5,
+  "gpu_mem_used_mb": 18432,
+  "gpu_mem_total_mb": 24576,
+  "gpu_temperature_c": 67,
+  "models_loaded": ["llama-3-70b"],
+  "active_requests": 2,
+  "queue_depth": 0
+}
+```
+
+### Control Commands
+
+```
+POST /control/start-model
+Body: { "model": "llama-3-70b", "parameters": {} }
+Response: { "status": "starting", "model": "llama-3-70b" }
+
+POST /control/stop-model
+Body: { "model": "llama-3-70b" }
+Response: { "status": "stopped", "model": "llama-3-70b" }
+
+POST /control/pull-model
+Body: { "model": "llama-3-70b", "source": "huggingface" }
+Response: { "status": "pulling", "model": "llama-3-70b", "progress": 0 }
+
+POST /control/config
+Body: { "setting": "max_tokens", "value": 4096 }
+Response: { "status": "updated" }
+```
+
+---
+
+## WebSocket Protocol
+
+Connect to HIVV.org for real-time communication:
+
+```javascript
+const ws = new WebSocket('wss://hivv.org/nodes/{node_id}');
+ws.on('open', () => {
+  ws.send(JSON.stringify({
+    type: 'REGISTER',
+    node_key: 'sk_live_xxx...'
+  }));
+});
+
+ws.on('message', (data) => {
+  const msg = JSON.parse(data);
+  
+  switch(msg.type) {
+    case 'HEARTBEAT_ACK':
+      // Connected successfully
+      break;
+    case 'COMMAND':
+      // New command from HIVV.org
+      handleCommand(msg.payload);
+      break;
+    case 'CONFIG_UPDATE':
+      // Configuration changed
+      applyConfig(msg.config);
+      break;
+  }
+});
+
+function handleCommand(payload) {
+  switch(payload.command) {
+    case 'START_MODEL':
+      startModel(payload.model, payload.parameters);
+      break;
+    case 'STOP_MODEL':
+      stopModel(payload.model);
+      break;
+    case 'RESTART':
+      restartAgent();
+      break;
+    case 'UPDATE_CONFIG':
+      applyConfig(payload.config);
+      break;
+    case 'PULL_MODEL':
+      pullModel(payload.model, payload.source);
+      break;
+  }
+  
+  // Report result
+  ws.send(JSON.stringify({
+    type: 'COMMAND_RESULT',
+    command_id: payload.command_id,
+    status: 'completed',
+    result: { /* result data */ }
+  }));
+}
+```
+
+---
+
+## Heartbeat Protocol
+
+Send metrics every 5-10 seconds:
+
+```javascript
+setInterval(() => {
+  const metrics = collectMetrics();
+  
+  ws.send(JSON.stringify({
+    type: 'HEARTBEAT',
+    timestamp: new Date().toISOString(),
+    metrics: {
+      status: 'online',
+      cpu_pct: metrics.cpu_pct,
+      memory_pct: (metrics.memory_used_mb / metrics.memory_total_mb) * 100,
+      gpu_util_pct: metrics.gpu_util_pct,
+      gpu_mem_used_mb: metrics.gpu_mem_used_mb,
+      models_loaded: metrics.models_loaded,
+      queue_depth: metrics.queue_depth,
+      uptime_seconds: metrics.uptime
+    }
+  }));
+}, 5000);
+```
+
+---
+
+## LAN Discovery
+
+Broadcast presence on local network using mDNS/Bonjour:
+
+```javascript
+const Bonjour = require('bonjour-service');
+const bonjour = new Bonjour();
+
+// Advertise this node
+bonjour.publish({
+  name: 'HIVV-Node-' + os.hostname(),
+  type: 'hivv-agent',
+  port: 9876,
+  txt: {
+    node_id: 'node_abc123',
+    models: 'llama-3,mistral-7b,codellama',
+    gpu: 'RTX 4090',
+    vram_gb: '24'
+  }
+});
+
+// Browse for other nodes on LAN
+bonjour.find({ type: 'hivv-agent' }, (service) => {
+  console.log('Found peer:', service.name, service.host, service.port);
+  connectToPeer(service);
+});
+```
+
+---
+
+## Example: LM Studio Integration
+
+```javascript
+const http = require('http');
+
+class LMStudioAdapter {
+  constructor(baseUrl = 'http://localhost:1234') {
+    this.baseUrl = baseUrl;
+  }
+  
+  async listModels() {
+    const res = await this.request('/v1/models');
+    return res.data.map(m => ({
+      id: m.id,
+      name: m.id,
+      context_length: m.context_window || 4096
+    }));
+  }
+  
+  async chat(messages, model, stream = true) {
+    return this.request('/v1/chat/completions', {
+      method: 'POST',
+      body: {
+        model,
+        messages,
+        stream
+      }
+    });
+  }
+  
+  async pullModel(modelId) {
+    return this.request('/api/models/pull', {
+      method: 'POST',
+      body: { model: modelId }
+    });
+  }
+  
+  async request(path, options = {}) {
+    return new Promise((resolve, reject) => {
+      const url = new URL(this.baseUrl + path);
+      const req = http.request({
+        hostname: url.hostname,
+        port: url.port,
+        path: url.pathname,
+        method: options.method || 'GET'
+      }, (res) => {
+        let data = '';
+        res.on('data', chunk => data += chunk);
+        res.on('end', () => {
+          try { resolve(JSON.parse(data)); }
+          catch (e) { resolve(data); }
+        });
+      });
+      req.on('error', reject);
+      if (options.body) {
+        req.write(JSON.stringify(options.body));
+      }
+      req.end();
+    });
+  }
+}
+```
+
+---
+
+## Example: Ollama Integration
+
+```javascript
+const http = require('http');
+
+class OllamaAdapter {
+  constructor(baseUrl = 'http://localhost:11434') {
+    this.baseUrl = baseUrl;
+  }
+  
+  async listModels() {
+    const res = await this.request('/api/tags');
+    return res.models.map(m => ({
+      id: m.name,
+      name: m.name,
+      context_length: 4096 // Ollama doesn't expose this easily
+    }));
+  }
+  
+  async chat(messages, model, stream = true) {
+    return this.request('/api/chat', {
+      method: 'POST',
+      body: {
+        model,
+        messages,
+        stream
+      }
+    }, stream);
+  }
+  
+  async pullModel(modelId) {
+    // Ollama uses streaming for pulls
+    return this.request('/api/pull', {
+      method: 'POST',
+      body: { model: modelId }
+    }, true);
+  }
+  
+  async request(path, options = {}, stream = false) {
+    return new Promise((resolve, reject) => {
+      const url = new URL(this.baseUrl + path);
+      const req = http.request({
+        hostname: url.hostname,
+        port: url.port,
+        path: url.pathname,
+        method: options.method || 'GET'
+      }, (res) => {
+        if (stream) {
+          resolve(res); // Return stream for SSE handling
+        } else {
+          let data = '';
+          res.on('data', chunk => data += chunk);
+          res.on('end', () => {
+            try { resolve(JSON.parse(data)); }
+            catch (e) { resolve(data); }
+          });
+        }
+      });
+      req.on('error', reject);
+      if (options.body) {
+        req.write(JSON.stringify(options.body));
+      }
+      req.end();
+    });
+  }
+}
+```
+
+---
+
+## Metrics Collection
+
+```javascript
+const os = require('os');
+const si = require('systeminformation');
+
+async function collectMetrics() {
+  const [cpu, mem, gpu, proc] = await Promise.all([
+    si.currentLoad(),
+    si.mem(),
+    si.graphics(),
+    si.processes()
+  ]);
+  
+  return {
+    cpu_pct: cpu.currentLoad,
+    memory_used_mb: Math.round(mem.used / 1024 / 1024),
+    memory_total_mb: Math.round(mem.total / 1024 / 1024),
+    gpu_util_pct: gpu.controllers[0]?.utilizationGpu || 0,
+    gpu_mem_used_mb: Math.round(gpu.controllers[0]?.utilizationMemory / 1024 / 1024) || 0,
+    gpu_mem_total_mb: Math.round(gpu.controllers[0]?.memoryTotal / 1024 / 1024) || 0,
+    gpu_temperature_c: gpu.controllers[0]?.temperatureGpu || 0,
+    uptime: os.uptime(),
+    processes: proc.all
+  };
+}
+```
+
+---
+
+## Configuration File
+
+`~/.hivv-agent/config.json`:
+
+```json
+{
+  "node_id": "node_abc123",
+  "node_key": "sk_live_xxx...",
+  "name": "My Home Lab",
+  "hivv_endpoint": "wss://hivv.org/nodes/abc123",
+  "advertise_lan": true,
+  "advertise_port": 9876,
+  
+  "local_ai": [
+    {
+      "name": "lmstudio",
+      "type": "lmstudio",
+      "url": "http://localhost:1234",
+      "auto_detect": true
+    },
+    {
+      "name": "ollama",
+      "type": "ollama", 
+      "url": "http://localhost:11434",
+      "auto_detect": true
+    }
+  ],
+  
+  "defaults": {
+    "max_tokens": 4096,
+    "temperature": 0.7,
+    "stream": true
+  },
+  
+  "metrics_interval_ms": 5000,
+  "heartbeat_interval_ms": 10000
+}
+```
+
+---
+
+## Environment Variables
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `HIVV_NODE_ID` | Node ID from registration | — |
+| `HIVV_NODE_KEY` | Secret key for authentication | — |
+| `HIVV_ENDPOINT` | WebSocket endpoint for HIVV.org | `wss://hivv.org` |
+| `HIVV_LAN_PORT` | Local port for LAN discovery | `9876` |
+| `HIVV_METRICS_INTERVAL` | Metrics collection interval (ms) | `5000` |
+| `HIVV_HEARTBEAT_INTERVAL` | Heartbeat interval (ms) | `10000` |
+
+---
+
+## CLI Commands
+
+```bash
+# Initialize configuration
+hivv-agent init --name "My Node" --ai-url http://localhost:1234
+
+# Connect to HIVV network
+hivv-agent connect
+
+# Start the agent
+hivv-agent start
+
+# Stop the agent
+hivv-agent stop
+
+# Show status
+hivv-agent status
+
+# View logs
+hivv-agent logs
+
+# Pull a model
+hivv-agent pull llama-3-70b
+
+# List models
+hivv-agent models
+
+# Send a test request
+hivv-agent chat "Hello!"
+
+# Update configuration
+hivv-agent config set max_tokens 8192
+
+# Disconnect and remove
+hivv-agent destroy
+```
+
+---
+
+## Docker Support
+
+```dockerfile
+FROM node:18-alpine
+
+RUN npm install -g hivv-agent
+
+COPY config.json /root/.hivv-agent/config.json
+
+EXPOSE 9876
+
+CMD ["hivv-agent", "start"]
+```
+
+```bash
+docker run -d \
+  --name hivv-agent \
+  -v ~/.hivv-agent:/root/.hivv-agent \
+  -p 9876:9876 \
+  -p 1234:1234 \
+  hivv/agent
+```
+
+---
+
+## Security Considerations
+
+1. **Node Key**: Store securely, never commit to git
+2. **TLS**: Always use WSS for production connections
+3. **Firewall**: Only expose port 9876 on LAN, not WAN
+4. **API Keys**: If using LM Studio/Ollama with API keys, use environment variables
+5. **Model Files**: Store in secure location with appropriate permissions
+
+---
+
+## Future Enhancements
+
+- [ ] WireGuard VPN for secure peer-to-peer communication
+- [ ] GNUnet for decentralized discovery
+- [ ] IPFS integration for model sharing
+- [ ] Hardware security keys for node authentication
+- [ ] Encrypted model weights at rest

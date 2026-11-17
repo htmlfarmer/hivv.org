@@ -1,0 +1,819 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI Hub — HIVV.org</title>
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #0a0a0f; color: #e0e0e0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+
+    .hub-container { max-width: 1400px; margin: 0 auto; padding: 20px; }
+
+    .hub-header {
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 20px 0; border-bottom: 1px solid #1a1a2e; margin-bottom: 30px;
+    }
+    .hub-header h1 { font-size: 2em; color: #fff; }
+    .hub-header h1 span { color: #00ff88; }
+
+    .stats-row {
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; margin-bottom: 30px;
+    }
+    .stat-box {
+      background: linear-gradient(135deg, #1a1a2e 0%, #0d0d1a 100%);
+      border: 1px solid #2a2a4e; border-radius: 16px; padding: 20px;
+      text-align: center; transition: all 0.3s;
+    }
+    .stat-box:hover { transform: translateY(-2px); border-color: #00ff88; }
+    .stat-box .value { font-size: 2.5em; font-weight: bold; color: #00ff88; }
+    .stat-box .label { color: #888; font-size: 0.85em; margin-top: 4px; }
+    .stat-box .sub { color: #555; font-size: 0.75em; }
+
+    .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+    @media (max-width: 900px) { .grid-2 { grid-template-columns: 1fr; } }
+
+    .card {
+      background: #0d0d18; border: 1px solid #1a1a2e; border-radius: 16px; padding: 24px;
+      margin-bottom: 20px;
+    }
+    .card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+    .card h2 { color: #fff; font-size: 1.2em; }
+    .card h2 .icon { margin-right: 8px; }
+
+    .scan-input-group {
+      display: flex; gap: 12px; margin-bottom: 20px;
+    }
+    .scan-input {
+      flex: 1; padding: 14px 18px; background: #1a1a2e; border: 2px solid #2a2a4e;
+      border-radius: 12px; color: #fff; font-size: 1em; transition: all 0.3s;
+    }
+    .scan-input:focus { outline: none; border-color: #00ff88; box-shadow: 0 0 20px rgba(0,255,136,0.1); }
+    .scan-input::placeholder { color: #555; }
+
+    .btn {
+      padding: 12px 24px; border: none; border-radius: 12px; font-size: 0.95em;
+      font-weight: 600; cursor: pointer; transition: all 0.3s;
+    }
+    .btn-primary { background: linear-gradient(135deg, #00ff88, #00cc6a); color: #000; }
+    .btn-primary:hover { transform: translateY(-2px); box-shadow: 0 8px 25px rgba(0,255,136,0.3); }
+    .btn-secondary { background: #2a2a4e; color: #fff; }
+    .btn-secondary:hover { background: #3a3a5e; }
+    .btn-danger { background: #ff4757; color: #fff; }
+    .btn-sm { padding: 8px 16px; font-size: 0.85em; }
+
+    .endpoint-list { max-height: 500px; overflow-y: auto; }
+    .endpoint-item {
+      display: flex; align-items: center; gap: 16px; padding: 16px;
+      background: #1a1a2e; border-radius: 12px; margin-bottom: 12px;
+      border-left: 4px solid #444; transition: all 0.3s;
+    }
+    .endpoint-item:hover { background: #222238; border-left-color: #00ff88; }
+    .endpoint-item.online { border-left-color: #00ff88; }
+    .endpoint-item.offline { border-left-color: #ff4757; opacity: 0.7; }
+    .endpoint-item.scanning { border-left-color: #ffd93d; }
+
+    .endpoint-icon {
+      width: 48px; height: 48px; border-radius: 12px; display: flex;
+      align-items: center; justify-content: center; font-size: 1.5em;
+      background: #2a2a4e;
+    }
+    .endpoint-info { flex: 1; }
+    .endpoint-info .name { font-weight: 600; color: #fff; margin-bottom: 4px; }
+    .endpoint-info .url { color: #888; font-size: 0.85em; font-family: monospace; }
+    .endpoint-info .meta { color: #555; font-size: 0.75em; margin-top: 4px; }
+
+    .endpoint-status {
+      text-align: center; min-width: 80px;
+    }
+    .status-badge {
+      display: inline-block; padding: 4px 12px; border-radius: 20px;
+      font-size: 0.75em; font-weight: 600;
+    }
+    .status-online { background: rgba(0,255,136,0.2); color: #00ff88; }
+    .status-offline { background: rgba(255,71,87,0.2); color: #ff4757; }
+    .status-unknown { background: rgba(255,217,61,0.2); color: #ffd93d; }
+
+    .latency { font-size: 0.85em; color: #888; margin-top: 4px; }
+    .latency.fast { color: #00ff88; }
+    .latency.medium { color: #ffd93d; }
+    .latency.slow { color: #ff4757; }
+
+    .progress-bar {
+      width: 100%; height: 4px; background: #1a1a2e; border-radius: 2px; overflow: hidden; margin-top: 8px;
+    }
+    .progress-bar .fill { height: 100%; background: linear-gradient(90deg, #00ff88, #00cc6a); transition: width 0.3s; }
+
+    .models-list {
+      display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px;
+    }
+    .model-tag {
+      background: #2a2a4e; padding: 4px 10px; border-radius: 6px;
+      font-size: 0.75em; color: #ffd93d;
+    }
+
+    .actions { display: flex; gap: 8px; }
+
+    .scan-results {
+      background: #1a1a2e; border-radius: 12px; padding: 20px; margin-top: 16px;
+    }
+    .scan-progress { margin-bottom: 16px; }
+    .scan-status { color: #888; margin-bottom: 8px; font-size: 0.9em; }
+
+    .quick-add-grid {
+      display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px;
+    }
+    .quick-add-btn {
+      padding: 16px; background: #1a1a2e; border: 2px solid #2a2a4e;
+      border-radius: 12px; text-align: center; cursor: pointer; transition: all 0.3s;
+    }
+    .quick-add-btn:hover { border-color: #00ff88; background: #222238; transform: translateY(-2px); }
+    .quick-add-btn .icon { font-size: 2em; margin-bottom: 8px; }
+    .quick-add-btn .name { color: #fff; font-weight: 600; }
+    .quick-add-btn .port { color: #555; font-size: 0.8em; margin-top: 4px; }
+
+    .toast {
+      position: fixed; bottom: 20px; right: 20px; padding: 16px 24px;
+      background: #1a1a2e; border: 1px solid #00ff88; border-radius: 12px;
+      color: #fff; font-weight: 500; z-index: 1000; animation: slideIn 0.3s ease;
+    }
+    @keyframes slideIn { from { transform: translateX(100%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+
+    .modal-overlay {
+      position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+      background: rgba(0,0,0,0.8); z-index: 999; display: none; align-items: center; justify-content: center;
+    }
+    .modal-overlay.active { display: flex; }
+    .modal {
+      background: #0d0d18; border: 1px solid #2a2a4e; border-radius: 16px; padding: 30px; max-width: 500px; width: 90%;
+    }
+    .modal h3 { color: #fff; margin-bottom: 20px; }
+    .form-group { margin-bottom: 16px; }
+    .form-group label { display: block; color: #888; font-size: 0.85em; margin-bottom: 6px; }
+    .form-group input, .form-group select {
+      width: 100%; padding: 12px; background: #1a1a2e; border: 1px solid #2a2a4e;
+      border-radius: 8px; color: #fff; font-size: 0.95em;
+    }
+    .form-group input:focus { outline: none; border-color: #00ff88; }
+
+    .tab-nav { display: flex; gap: 4px; margin-bottom: 20px; border-bottom: 1px solid #1a1a2e; }
+    .tab-btn {
+      padding: 12px 20px; background: none; border: none; color: #666;
+      cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -1px;
+      transition: all 0.3s;
+    }
+    .tab-btn:hover { color: #888; }
+    .tab-btn.active { color: #00ff88; border-bottom-color: #00ff88; }
+
+    .empty-state {
+      text-align: center; padding: 40px; color: #555;
+    }
+    .empty-state .icon { font-size: 3em; margin-bottom: 16px; }
+
+    ::-webkit-scrollbar { width: 8px; }
+    ::-webkit-scrollbar-track { background: #1a1a2e; }
+    ::-webkit-scrollbar-thumb { background: #3a3a5e; border-radius: 4px; }
+    ::-webkit-scrollbar-thumb:hover { background: #4a4a6e; }
+  </style>
+</head>
+<body>
+<div class="hub-container">
+
+  <div class="hub-header">
+    <h1><span>AI</span> Hub</h1>
+    <div>
+      <a href="/" class="btn btn-secondary" style="margin-right: 12px;">← Back to Home</a>
+      <a href="/dashboard.html" class="btn btn-secondary">My Account</a>
+    </div>
+  </div>
+
+  <div class="stats-row" id="stats-row">
+    <div class="stat-box">
+      <div class="value" id="total-endpoints">0</div>
+      <div class="label">Total Endpoints</div>
+      <div class="sub" id="online-count">0 online</div>
+    </div>
+    <div class="stat-box">
+      <div class="value" id="total-models">0</div>
+      <div class="label">Models Detected</div>
+    </div>
+    <div class="stat-box">
+      <div class="value" id="avg-latency">--</div>
+      <div class="label">Avg Latency</div>
+      <div class="sub" id="best-endpoint">Best response time</div>
+    </div>
+    <div class="stat-box">
+      <div class="value" id="total-requests">0</div>
+      <div class="label">Requests Today</div>
+      <div class="sub" id="total-cost">$0 est. cost</div>
+    </div>
+  </div>
+
+  <div class="tab-nav">
+    <button class="tab-btn active" onclick="showTab('endpoints')">📡 Endpoints</button>
+    <button class="tab-btn" onclick="showTab('scan')">🔍 Network Scan</button>
+    <button class="tab-btn" onclick="showTab('add')">➕ Add Manual</button>
+    <button class="tab-btn" onclick="showTab('settings')">⚙️ Settings</button>
+  </div>
+
+  <div id="tab-endpoints" class="tab-content">
+    <div class="card">
+      <div class="card-header">
+        <h2><span class="icon">📡</span> Your AI Endpoints</h2>
+        <button class="btn btn-sm btn-secondary" onclick="refreshAllEndpoints()">🔄 Refresh All</button>
+      </div>
+      <div class="endpoint-list" id="endpoint-list">
+        <div class="empty-state">
+          <div class="icon">🔍</div>
+          <p>No endpoints configured yet.</p>
+          <p style="margin-top: 8px;">Use the scanner or add manually below.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="tab-scan" class="tab-content" style="display: none;">
+    <div class="grid-2">
+      <div class="card">
+        <div class="card-header">
+          <h2><span class="icon">🔍</span> Network Scanner</h2>
+        </div>
+        <p style="color: #888; margin-bottom: 16px; font-size: 0.9em;">
+          Enter an IP address or hostname. The scanner will check common AI ports automatically.
+        </p>
+
+        <div class="scan-input-group">
+          <input type="text" id="scan-target" class="scan-input" placeholder="192.168.1.100 or example.com">
+          <button class="btn btn-primary" onclick="startScan()">Scan</button>
+        </div>
+
+        <div style="margin-bottom: 20px;">
+          <label style="color: #666; font-size: 0.85em; display: block; margin-bottom: 8px;">Common AI Ports:</label>
+          <div style="display: flex; flex-wrap: wrap; gap: 8px;">
+            <label style="display: flex; align-items: center; gap: 4px; color: #888; font-size: 0.85em; cursor: pointer;">
+              <input type="checkbox" value="1234" checked> LM Studio
+            </label>
+            <label style="display: flex; align-items: center; gap: 4px; color: #888; font-size: 0.85em; cursor: pointer;">
+              <input type="checkbox" value="11434" checked> Ollama
+            </label>
+            <label style="display: flex; align-items: center; gap: 4px; color: #888; font-size: 0.85em; cursor: pointer;">
+              <input type="checkbox" value="8080" checked> llama.cpp
+            </label>
+            <label style="display: flex; align-items: center; gap: 4px; color: #888; font-size: 0.85em; cursor: pointer;">
+              <input type="checkbox" value="8000" checked> vLLM
+            </label>
+            <label style="display: flex; align-items: center; gap: 4px; color: #888; font-size: 0.85em; cursor: pointer;">
+              <input type="checkbox" value="5000" checked> Text Gen
+            </label>
+          </div>
+        </div>
+
+        <div class="scan-results" id="scan-results" style="display: none;">
+          <div class="scan-status" id="scan-status">Scanning...</div>
+          <div class="progress-bar"><div class="fill" id="scan-progress" style="width: 0%"></div></div>
+          <div id="scan-found" style="margin-top: 16px;"></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <h2><span class="icon">⚡</span> Quick Add</h2>
+        </div>
+        <p style="color: #888; margin-bottom: 16px; font-size: 0.9em;">Popular local AI setups. Click to auto-configure.</p>
+        <div class="quick-add-grid">
+          <div class="quick-add-btn" onclick="quickAdd('lmstudio', 'localhost', 1234)">
+            <div class="icon">💻</div>
+            <div class="name">LM Studio</div>
+            <div class="port">:1234</div>
+          </div>
+          <div class="quick-add-btn" onclick="quickAdd('ollama', 'localhost', 11434)">
+            <div class="icon">🦙</div>
+            <div class="name">Ollama</div>
+            <div class="port">:11434</div>
+          </div>
+          <div class="quick-add-btn" onclick="quickAdd('llamacpp', 'localhost', 8080)">
+            <div class="icon">🔧</div>
+            <div class="name">llama.cpp</div>
+            <div class="port">:8080</div>
+          </div>
+          <div class="quick-add-btn" onclick="quickAdd('vllm', 'localhost', 8000)">
+            <div class="icon">🚀</div>
+            <div class="name">vLLM</div>
+            <div class="port">:8000</div>
+          </div>
+          <div class="quick-add-btn" onclick="quickAdd('textgen', 'localhost', 5000)">
+            <div class="icon">📝</div>
+            <div class="name">Text Gen</div>
+            <div class="port">:5000</div>
+          </div>
+          <div class="quick-add-btn" onclick="quickAdd('oobabooga', 'localhost', 5000)">
+            <div class="icon">🎭</div>
+            <div class="name">Oobabooga</div>
+            <div class="port">:5000</div>
+          </div>
+          <div class="quick-add-btn" onclick="quickAdd('localai', 'localhost', 8080)">
+            <div class="icon">🤖</div>
+            <div class="name">LocalAI</div>
+            <div class="port">:8080</div>
+          </div>
+          <div class="quick-add-btn" onclick="quickAdd('koboldcpp', 'localhost', 5000)">
+            <div class="icon">🏰</div>
+            <div class="name">KoboldCPP</div>
+            <div class="port">:5000</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="tab-add" class="tab-content" style="display: none;">
+    <div class="card">
+      <div class="card-header">
+        <h2><span class="icon">➕</span> Add Custom Endpoint</h2>
+      </div>
+      <form id="add-form" onsubmit="addEndpoint(event)">
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px;">
+          <div class="form-group">
+            <label>Name</label>
+            <input type="text" id="add-name" placeholder="My Local Llama" required>
+          </div>
+          <div class="form-group">
+            <label>Provider</label>
+            <select id="add-provider" required>
+              <option value="">Select provider...</option>
+              <option value="lmstudio">LM Studio</option>
+              <option value="ollama">Ollama</option>
+              <option value="llamacpp">llama.cpp</option>
+              <option value="vllm">vLLM</option>
+              <option value="textgen">Text Generation</option>
+              <option value="oobabooga">Oobabooga</option>
+              <option value="koboldcpp">KoboldCPP</option>
+              <option value="localai">LocalAI</option>
+              <option value="custom">Custom (specify URL)</option>
+            </select>
+          </div>
+        </div>
+        <div class="form-group">
+          <label>URL / IP Address</label>
+          <input type="text" id="add-host" placeholder="192.168.1.100 or localhost" required>
+        </div>
+        <div class="form-group">
+          <label>API Endpoint (full URL, optional)</label>
+          <input type="text" id="add-url" placeholder="http://localhost:1234/v1/chat/completions">
+          <small style="color: #555; font-size: 0.8em;">Leave empty to use default for provider</small>
+        </div>
+        <div class="form-group">
+          <label>Default Model (optional)</label>
+          <input type="text" id="add-model" placeholder="llama3, gpt-4o, etc.">
+        </div>
+        <div style="display: flex; gap: 12px; align-items: center;">
+          <button type="submit" class="btn btn-primary">Add Endpoint</button>
+          <label style="display: flex; align-items: center; gap: 8px; color: #888; cursor: pointer;">
+            <input type="checkbox" id="add-shared"> Share with all users (enable if this is a server others can use)
+          </label>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div id="tab-settings" class="tab-content" style="display: none;">
+    <div class="card">
+      <div class="card-header">
+        <h2><span class="icon">⚙️</span> Gateway Settings</h2>
+      </div>
+      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px;">
+        <div class="form-group">
+          <label>Default Provider Priority</label>
+          <select id="setting-priority">
+            <option value="priority">Priority Based</option>
+            <option value="round_robin">Round Robin</option>
+            <option value="weighted">Weighted by Usage</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Auto-Failover</label>
+          <select id="setting-failover">
+            <option value="true">Enabled</option>
+            <option value="false">Disabled</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Max Retries Per Request</label>
+          <input type="number" id="setting-retries" value="3" min="1" max="10">
+        </div>
+        <div class="form-group">
+          <label>Request Timeout (ms)</label>
+          <input type="number" id="setting-timeout" value="120000" min="10000" max="300000">
+        </div>
+      </div>
+      <button class="btn btn-primary" onclick="saveSettings()" style="margin-top: 16px;">Save Settings</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="modal-overlay">
+  <div class="modal">
+    <h3 id="modal-title">Edit Endpoint</h3>
+    <form id="edit-form" onsubmit="saveEndpoint(event)">
+      <input type="hidden" id="edit-id">
+      <div class="form-group">
+        <label>Name</label>
+        <input type="text" id="edit-name" required>
+      </div>
+      <div class="form-group">
+        <label>URL</label>
+        <input type="text" id="edit-url" required>
+      </div>
+      <div class="form-group">
+        <label>Model</label>
+        <input type="text" id="edit-model">
+      </div>
+      <div class="form-group">
+        <label>Priority (1-100)</label>
+        <input type="number" id="edit-priority" value="50" min="1" max="100">
+      </div>
+      <div style="display: flex; gap: 12px; margin-top: 20px;">
+        <button type="submit" class="btn btn-primary">Save</button>
+        <button type="button" class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+        <button type="button" class="btn btn-danger" onclick="deleteEndpoint()" style="margin-left: auto;">Delete</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<script>
+const PROVIDER_INFO = {
+  lmstudio: { name: 'LM Studio', icon: '💻', defaultPort: 1234, modelsUrl: '/v1/models' },
+  ollama: { name: 'Ollama', icon: '🦙', defaultPort: 11434, modelsUrl: '/api/tags' },
+  llamacpp: { name: 'llama.cpp', icon: '🔧', defaultPort: 8080, modelsUrl: '/v1/models' },
+  vllm: { name: 'vLLM', icon: '🚀', defaultPort: 8000, modelsUrl: '/v1/models' },
+  textgen: { name: 'Text Generation', icon: '📝', defaultPort: 5000, modelsUrl: '/v1/models' },
+  oobabooga: { name: 'Oobabooga', icon: '🎭', defaultPort: 5000, modelsUrl: '/v1/models' },
+  koboldcpp: { name: 'KoboldCPP', icon: '🏰', defaultPort: 5000, modelsUrl: '/v1/models' },
+  localai: { name: 'LocalAI', icon: '🤖', defaultPort: 8080, modelsUrl: '/v1/models' },
+  custom: { name: 'Custom', icon: '⚙️', defaultPort: 0, modelsUrl: '/v1/models' }
+};
+
+let endpoints = JSON.parse(localStorage.getItem('hivv_endpoints') || '[]');
+let scanning = false;
+
+function showTab(tab) {
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.tab-content').forEach(t => t.style.display = 'none');
+  event.target.classList.add('active');
+  document.getElementById('tab-' + tab).style.display = 'block';
+}
+
+function saveEndpoints() {
+  localStorage.setItem('hivv_endpoints', JSON.stringify(endpoints));
+}
+
+function renderEndpoints() {
+  const list = document.getElementById('endpoint-list');
+
+  if (endpoints.length === 0) {
+    list.innerHTML = `<div class="empty-state"><div class="icon">🔍</div><p>No endpoints configured yet.</p><p style="margin-top: 8px;">Use the scanner or add manually below.</p></div>`;
+    return;
+  }
+
+  list.innerHTML = endpoints.map((ep, idx) => `
+    <div class="endpoint-item ${ep.status || 'unknown'}" id="ep-${idx}">
+      <div class="endpoint-icon">${PROVIDER_INFO[ep.provider]?.icon || '🤖'}</div>
+      <div class="endpoint-info">
+        <div class="name">${escapeHtml(ep.name)}</div>
+        <div class="url">${escapeHtml(ep.url)}</div>
+        ${ep.models?.length ? `<div class="models-list">${ep.models.slice(0,3).map(m => `<span class="model-tag">${escapeHtml(m)}</span>`).join('')}${ep.models.length > 3 ? `<span class="model-tag">+${ep.models.length-3}</span>` : ''}</div>` : ''}
+        ${ep.latency ? `<div class="latency ${ep.latency < 200 ? 'fast' : ep.latency < 1000 ? 'medium' : 'slow'}">⏱ ${ep.latency}ms</div>` : ''}
+      </div>
+      <div class="endpoint-status">
+        <span class="status-badge status-${ep.status || 'unknown'}">${ep.status === 'online' ? 'Online' : ep.status === 'offline' ? 'Offline' : 'Unknown'}</span>
+        <div class="latency" style="margin-top: 8px;">${ep.requests || 0} requests</div>
+      </div>
+      <div class="actions">
+        <button class="btn btn-sm btn-secondary" onclick="testEndpoint(${idx})">Test</button>
+        <button class="btn btn-sm btn-secondary" onclick="editEndpoint(${idx})">Edit</button>
+      </div>
+    </div>
+  `).join('');
+
+  updateStats();
+}
+
+function updateStats() {
+  document.getElementById('total-endpoints').textContent = endpoints.length;
+  document.getElementById('online-count').textContent = endpoints.filter(e => e.status === 'online').length + ' online';
+
+  const allModels = [...new Set(endpoints.flatMap(e => e.models || []))];
+  document.getElementById('total-models').textContent = allModels.length;
+
+  const latencies = endpoints.filter(e => e.latency).map(e => e.latency);
+  if (latencies.length > 0) {
+    const avg = Math.round(latencies.reduce((a, b) => a + b, 0) / latencies.length);
+    document.getElementById('avg-latency').textContent = avg + 'ms';
+    const best = Math.min(...latencies);
+    const bestEp = endpoints.find(e => e.latency === best);
+    document.getElementById('best-endpoint').textContent = bestEp?.name || 'Best';
+  }
+}
+
+async function testEndpoint(idx) {
+  const ep = endpoints[idx];
+  const el = document.getElementById('ep-' + idx);
+  if (el) el.classList.add('scanning');
+
+  try {
+    const start = Date.now();
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 10000);
+
+    const resp = await fetch(ep.url + '/v1/models', {
+      method: 'GET',
+      signal: controller.signal
+    });
+
+    clearTimeout(timer);
+
+    if (resp.ok) {
+      const data = await resp.json();
+      let models = [];
+
+      if (data.data) {
+        models = data.data.map(m => m.id);
+      } else if (data.models) {
+        models = data.models.map(m => m.name || m.id);
+      } else if (Array.isArray(data)) {
+        models = data.map(m => m.name || m.id);
+      }
+
+      endpoints[idx] = { ...ep, status: 'online', latency: Date.now() - start, models: models };
+      showToast(`✓ ${ep.name} is online! Found ${models.length} models.`);
+    } else {
+      endpoints[idx] = { ...ep, status: 'offline' };
+      showToast(`✗ ${ep.name} returned error: ${resp.status}`);
+    }
+  } catch (err) {
+    endpoints[idx] = { ...ep, status: 'offline' };
+    showToast(`✗ ${ep.name} unreachable: ${err.message}`);
+  }
+
+  saveEndpoints();
+  renderEndpoints();
+}
+
+async function refreshAllEndpoints() {
+  showToast('Testing all endpoints...');
+  for (let i = 0; i < endpoints.length; i++) {
+    await testEndpoint(i);
+    await new Promise(r => setTimeout(r, 500));
+  }
+}
+
+function editEndpoint(idx) {
+  const ep = endpoints[idx];
+  document.getElementById('edit-id').value = idx;
+  document.getElementById('edit-name').value = ep.name;
+  document.getElementById('edit-url').value = ep.url;
+  document.getElementById('edit-model').value = ep.models?.[0] || '';
+  document.getElementById('edit-priority').value = ep.priority || 50;
+  document.getElementById('modal-overlay').classList.add('active');
+}
+
+function saveEndpoint(e) {
+  e.preventDefault();
+  const idx = parseInt(document.getElementById('edit-id').value);
+  endpoints[idx] = {
+    ...endpoints[idx],
+    name: document.getElementById('edit-name').value,
+    url: document.getElementById('edit-url').value,
+    model: document.getElementById('edit-model').value,
+    priority: parseInt(document.getElementById('edit-priority').value)
+  };
+  saveEndpoints();
+  renderEndpoints();
+  closeModal();
+  showToast('Endpoint updated!');
+}
+
+function deleteEndpoint() {
+  const idx = parseInt(document.getElementById('edit-id').value);
+  if (confirm('Delete ' + endpoints[idx].name + '?')) {
+    endpoints.splice(idx, 1);
+    saveEndpoints();
+    renderEndpoints();
+    closeModal();
+    showToast('Endpoint deleted');
+  }
+}
+
+function closeModal() {
+  document.getElementById('modal-overlay').classList.remove('active');
+}
+
+async function startScan() {
+  const target = document.getElementById('scan-target').value.trim();
+  if (!target) { alert('Enter an IP or hostname'); return; }
+
+  const ports = [...document.querySelectorAll('#tab-scan input[type="checkbox"]:checked')].map(c => c.value);
+  if (ports.length === 0) { alert('Select at least one port'); return; }
+
+  const resultsEl = document.getElementById('scan-results');
+  const statusEl = document.getElementById('scan-status');
+  const progressEl = document.getElementById('scan-progress');
+  const foundEl = document.getElementById('scan-found');
+
+  resultsEl.style.display = 'block';
+  statusEl.textContent = `Scanning ${target}...`;
+  progressEl.style.width = '0%';
+  foundEl.innerHTML = '';
+  scanning = true;
+
+  const found = [];
+
+  for (let i = 0; i < ports.length; i++) {
+    if (!scanning) break;
+    const port = ports[i];
+    statusEl.textContent = `Checking port ${port}...`;
+    progressEl.style.width = ((i + 1) / ports.length * 100) + '%';
+
+    const url = `http://${target}:${port}`;
+
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 5000);
+
+      const resp = await fetch(url + '/v1/models', {
+        method: 'GET',
+        signal: controller.signal
+      });
+
+      clearTimeout(timer);
+
+      if (resp.ok) {
+        const data = await resp.json();
+        let models = [];
+        if (data.data) models = data.data.map(m => m.id);
+        else if (data.models) models = data.models.map(m => m.name);
+
+        found.push({ url, port, models });
+        foundEl.innerHTML += `<div style="margin-bottom: 8px; padding: 8px; background: #0a2a1a; border-radius: 8px; border-left: 3px solid #00ff88;">
+          <strong style="color: #00ff88;">✓ Found ${target}:${port}</strong>
+          ${models.length ? `<div style="margin-top: 4px; font-size: 0.85em; color: #888;">Models: ${models.slice(0, 5).join(', ')}</div>` : ''}
+        </div>`;
+      }
+    } catch (err) {
+    }
+
+    await new Promise(r => setTimeout(r, 200));
+  }
+
+  scanning = false;
+  statusEl.textContent = found.length > 0 ? `Found ${found.length} endpoint(s)!` : 'No endpoints found.';
+
+  if (found.length > 0) {
+    foundEl.innerHTML += `<button class="btn btn-primary" onclick="addFoundEndpoints()" style="margin-top: 12px;">Add All Found Endpoints</button>`;
+  }
+}
+
+function addFoundEndpoints() {
+  const found = window._foundScanResults || [];
+  for (const f of found) {
+    const provider = detectProvider(f.port);
+    endpoints.push({
+      name: PROVIDER_INFO[provider]?.name + ' @ ' + f.url.replace('http://', ''),
+      provider: provider,
+      url: f.url,
+      models: f.models,
+      priority: 50,
+      status: 'online',
+      latency: 0,
+      requests: 0
+    });
+  }
+  saveEndpoints();
+  renderEndpoints();
+  showToast(`Added ${found.length} endpoint(s)!`);
+  document.getElementById('scan-results').style.display = 'none';
+}
+
+window._foundScanResults = [];
+
+async function quickAdd(provider, host, port) {
+  const url = `http://${host}:${port}`;
+  const info = PROVIDER_INFO[provider];
+
+  showToast(`Checking ${info.name} at ${host}:${port}...`);
+
+  try {
+    const resp = await fetch(url + info.modelsUrl, { signal: AbortSignal.timeout(5000) });
+    if (resp.ok) {
+      const data = await resp.json();
+      let models = [];
+      if (data.data) models = data.data.map(m => m.id);
+      else if (data.models) models = data.models?.map(m => m.name);
+      else if (Array.isArray(data)) models = data.map(m => m.name || m.model?.name).filter(Boolean);
+
+      endpoints.push({
+        name: `${info.name} @ ${host}`,
+        provider: provider,
+        url: url,
+        models: models,
+        priority: 50,
+        status: 'online',
+        latency: 0,
+        requests: 0
+      });
+      saveEndpoints();
+      renderEndpoints();
+      showToast(`✓ ${info.name} added with ${models.length} models!`);
+    } else {
+      showToast(`${info.name} not responding (${resp.status})`);
+    }
+  } catch (err) {
+    showToast(`${info.name} unreachable: ${err.message}`);
+  }
+}
+
+function detectProvider(port) {
+  for (const [key, info] of Object.entries(PROVIDER_INFO)) {
+    if (info.defaultPort === port) return key;
+  }
+  return 'custom';
+}
+
+function addEndpoint(e) {
+  e.preventDefault();
+  const provider = document.getElementById('add-provider').value;
+  const host = document.getElementById('add-host').value.trim();
+  let url = document.getElementById('add-url').value.trim();
+  const model = document.getElementById('add-model').value.trim();
+  const shared = document.getElementById('add-shared').checked;
+
+  if (!url) {
+    const port = PROVIDER_INFO[provider]?.defaultPort || 8080;
+    url = `http://${host}:${port}`;
+  }
+
+  endpoints.push({
+    name: document.getElementById('add-name').value,
+    provider: provider,
+    url: url,
+    models: model ? [model] : [],
+    priority: 50,
+    status: 'unknown',
+    shared: shared,
+    requests: 0
+  });
+
+  saveEndpoints();
+  renderEndpoints();
+  e.target.reset();
+  showToast('Endpoint added!');
+}
+
+function saveSettings() {
+  const settings = {
+    priority: document.getElementById('setting-priority').value,
+    failover: document.getElementById('setting-failover').value === 'true',
+    retries: parseInt(document.getElementById('setting-retries').value),
+    timeout: parseInt(document.getElementById('setting-timeout').value)
+  };
+  localStorage.setItem('hivv_settings', JSON.stringify(settings));
+  showToast('Settings saved!');
+}
+
+function loadSettings() {
+  const saved = localStorage.getItem('hivv_settings');
+  if (saved) {
+    const s = JSON.parse(saved);
+    document.getElementById('setting-priority').value = s.priority || 'priority';
+    document.getElementById('setting-failover').value = s.failover ? 'true' : 'false';
+    document.getElementById('setting-retries').value = s.retries || 3;
+    document.getElementById('setting-timeout').value = s.timeout || 120000;
+  }
+}
+
+function showToast(msg) {
+  const existing = document.querySelector('.toast');
+  if (existing) existing.remove();
+
+  const toast = document.createElement('div');
+  toast.className = 'toast';
+  toast.textContent = msg;
+  document.body.appendChild(toast);
+  setTimeout(() => toast.remove(), 3000);
+}
+
+function escapeHtml(str) {
+  if (!str) return '';
+  const d = document.createElement('div');
+  d.textContent = str;
+  return d.innerHTML;
+}
+
+loadSettings();
+renderEndpoints();
+</script>
+</body>
+</html>

@@ -1,0 +1,524 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Live status of the HIVV.org AI gateway — request throughput, local backends, model rotation, and recent activity.">
+  <title>Live Status — HIVV.org</title>
+  <link rel="stylesheet" href="/css/shared.css">
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <style>
+    :root {
+      --accent: #00ff88;
+      --accent-2: #74b9ff;
+      --accent-3: #a855f7;
+      --warn: #ff9f43;
+      --red: #ff4757;
+    }
+    body { background: #050508; }
+
+    /* Nav — styled to match the site (shared.css has no .site-nav rules) */
+    .site-nav {
+      display: flex;
+      align-items: center;
+      gap: 20px;
+      flex-wrap: wrap;
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 12px 20px;
+      margin-bottom: 22px;
+    }
+    .site-nav .brand {
+      color: var(--accent);
+      font-weight: 800;
+      font-size: 1.15rem;
+      letter-spacing: -0.02em;
+      text-decoration: none;
+    }
+    .site-nav .brand:hover { filter: drop-shadow(0 0 8px rgba(0,255,136,0.5)); }
+    .site-nav .nav-links {
+      display: flex;
+      gap: 4px;
+      flex-wrap: wrap;
+      margin-left: auto;
+    }
+    .site-nav .nav-links a {
+      color: var(--text-muted);
+      text-decoration: none;
+      padding: 7px 14px;
+      border-radius: 8px;
+      font-size: 0.85rem;
+      font-weight: 600;
+      border: 1px solid transparent;
+      transition: all 0.15s;
+    }
+    .site-nav .nav-links a:hover { color: var(--text); background: rgba(255,255,255,0.05); }
+    .site-nav .nav-links a.active {
+      color: var(--accent);
+      background: rgba(0,255,136,0.1);
+      border-color: rgba(0,255,136,0.25);
+    }
+    .status-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 16px;
+      margin: 24px 0;
+    }
+    .big-stat {
+      background: linear-gradient(135deg, rgba(0,255,136,0.05), rgba(0,255,136,0.01));
+      border: 1px solid rgba(0,255,136,0.2);
+      border-radius: 14px;
+      padding: 22px 18px;
+      text-align: center;
+    }
+    .big-stat .v {
+      font-size: 2.4rem;
+      font-weight: 800;
+      color: var(--accent);
+      font-variant-numeric: tabular-nums;
+      line-height: 1;
+    }
+    .big-stat .l {
+      color: var(--text-muted);
+      font-size: 0.78rem;
+      margin-top: 8px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    .big-stat .delta {
+      font-size: 0.7rem;
+      color: var(--text-dim);
+      margin-top: 4px;
+    }
+
+    .row-grid {
+      display: grid;
+      grid-template-columns: 1.4fr 1fr;
+      gap: 20px;
+      margin: 24px 0;
+    }
+    @media (max-width: 900px) { .row-grid { grid-template-columns: 1fr; } }
+
+    .panel {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 22px;
+    }
+    .panel h3 {
+      margin: 0 0 14px;
+      font-size: 0.85rem;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--text-muted);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .panel h3 .live {
+      display: inline-flex; align-items: center; gap: 6px;
+      font-size: 0.7rem;
+      color: var(--accent);
+      font-weight: 600;
+      text-transform: none;
+      letter-spacing: 0;
+    }
+    .panel h3 .live .pulse {
+      width: 7px; height: 7px; border-radius: 50%; background: var(--accent);
+      animation: pulse 2s infinite;
+    }
+    @keyframes pulse {
+      0% { box-shadow: 0 0 0 0 rgba(0,255,136,0.6); }
+      70% { box-shadow: 0 0 0 10px rgba(0,255,136,0); }
+      100% { box-shadow: 0 0 0 0 rgba(0,255,136,0); }
+    }
+
+    /* Activity stream */
+    .stream {
+      max-height: 540px;
+      overflow-y: auto;
+      padding-right: 4px;
+    }
+    .stream-row {
+      display: grid;
+      grid-template-columns: 56px 1fr 80px 80px;
+      gap: 10px;
+      align-items: center;
+      padding: 10px 8px;
+      border-radius: 6px;
+      font-size: 0.85rem;
+      font-variant-numeric: tabular-nums;
+      transition: background 0.2s;
+    }
+    .stream-row:hover { background: rgba(255,255,255,0.03); }
+    .stream-row + .stream-row { border-top: 1px solid rgba(255,255,255,0.04); }
+    .stream-row.fresh {
+      animation: flash 1.4s ease-out;
+    }
+    @keyframes flash {
+      0% { background: rgba(0,255,136,0.12); }
+      100% { background: transparent; }
+    }
+    .stream-row .ts { color: var(--text-dim); font-size: 0.8rem; }
+    .stream-row .provider { color: var(--accent-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .stream-row .model { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .stream-row .lat { color: var(--text-muted); text-align: right; }
+    .stream-row .tokens { color: var(--text-muted); text-align: right; }
+    .stream-empty { color: var(--text-dim); font-style: italic; padding: 20px; text-align: center; }
+
+    /* Local backends list */
+    .backend {
+      display: flex; align-items: center; gap: 12px;
+      padding: 10px 12px;
+      border-radius: 8px;
+      background: rgba(116,185,255,0.05);
+      border: 1px solid rgba(116,185,255,0.15);
+      margin-bottom: 8px;
+      font-size: 0.85rem;
+    }
+    .backend .dot {
+      width: 10px; height: 10px; border-radius: 50%; background: var(--accent);
+      box-shadow: 0 0 8px var(--accent);
+      flex-shrink: 0;
+    }
+    .backend.off { background: rgba(255,71,87,0.05); border-color: rgba(255,71,87,0.2); }
+    .backend.off .dot { background: var(--red); box-shadow: none; }
+    .backend .info { flex: 1; min-width: 0; }
+    .backend .name { color: var(--accent-2); font-weight: 600; }
+    .backend .url { color: var(--text-dim); font-size: 0.75rem; font-family: monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .backend .provider-tag {
+      padding: 2px 8px;
+      background: rgba(168,85,247,0.15);
+      color: var(--accent-3);
+      border-radius: 4px;
+      font-size: 0.7rem;
+      font-weight: 600;
+    }
+
+    /* Models table */
+    .model-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+      gap: 8px;
+      max-height: 400px;
+      overflow-y: auto;
+    }
+    .model-chip {
+      background: rgba(116,185,255,0.05);
+      border: 1px solid rgba(116,185,255,0.15);
+      border-radius: 6px;
+      padding: 8px 10px;
+      font-size: 0.78rem;
+      color: var(--text);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .model-chip.cloud { background: rgba(255,159,67,0.05); border-color: rgba(255,159,67,0.15); }
+    .model-chip.local { background: rgba(0,255,136,0.05); border-color: rgba(0,255,136,0.15); }
+    .model-chip .dot {
+      width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0;
+    }
+    .model-chip.cloud .dot { background: var(--warn); }
+    .model-chip.local .dot { background: var(--accent); }
+    .model-chip .label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+    /* Gateway banner */
+    .gateway-banner {
+      background: linear-gradient(135deg, rgba(0,255,136,0.05), rgba(168,85,247,0.08));
+      border: 1px solid rgba(0,255,136,0.2);
+      border-radius: 14px;
+      padding: 18px 22px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 12px;
+    }
+    .gateway-banner .left { display: flex; align-items: center; gap: 12px; }
+    .gateway-banner .version {
+      font-family: monospace;
+      color: var(--text-dim);
+      font-size: 0.85rem;
+    }
+    .gateway-banner .meta {
+      display: flex; gap: 18px; flex-wrap: wrap;
+      font-size: 0.85rem;
+    }
+    .gateway-banner .meta b { color: var(--accent); }
+
+    .gateway-banner.warn {
+      background: linear-gradient(135deg, rgba(255,159,67,0.08), rgba(255,71,87,0.05));
+      border-color: rgba(255,159,67,0.3);
+    }
+  </style>
+</head>
+<body>
+<div class="container">
+
+  <nav class="site-nav">
+    <a href="/" class="brand">🐝 HIVV.org</a>
+    <div class="nav-links">
+      <a href="/">Control Center</a>
+      <a href="/chat/">Chat</a>
+      <a href="/dashboard">Governance</a>
+      <a href="/status" class="active">Status</a>
+      <a href="/nodes.html">Nodes</a>
+      <a href="/docs">API Docs</a>
+      <a href="/account" id="nav-account">Account</a>
+    </div>
+  </nav>
+
+  <!-- Gateway banner -->
+  <div class="gateway-banner" id="gateway-banner">
+    <div class="left">
+      <span class="live-pill" id="banner-pill" style="margin: 0;">
+        <span class="pulse"></span>
+        <span id="banner-text">Gateway online</span>
+      </span>
+      <span class="version" id="banner-version">v2</span>
+    </div>
+    <div class="meta">
+      <span>uptime: <b id="banner-uptime">—</b></span>
+      <span>last beat: <b id="banner-lastbeat">—</b></span>
+    </div>
+  </div>
+
+  <!-- Top stats -->
+  <div class="status-grid">
+    <div class="big-stat">
+      <div class="v" id="stat-requests-today">—</div>
+      <div class="l">requests today</div>
+      <div class="delta" id="stat-requests-hour">— this hour</div>
+    </div>
+    <div class="big-stat">
+      <div class="v" id="stat-tokens-today">—</div>
+      <div class="l">tokens today · via hub</div>
+      <div class="delta" id="stat-tokens-hour">— this hour</div>
+    </div>
+    <div class="big-stat">
+      <div class="v" id="stat-providers">—</div>
+      <div class="l">providers online</div>
+      <div class="delta">cloud + local</div>
+    </div>
+    <div class="big-stat">
+      <div class="v" id="stat-local">—</div>
+      <div class="l">local backends</div>
+      <div class="delta">discovered live</div>
+    </div>
+    <div class="big-stat">
+      <div class="v" id="stat-users">—</div>
+      <div class="l">human collaborators</div>
+      <div class="delta" id="stat-visitors">— anonymous</div>
+    </div>
+    <div class="big-stat">
+      <div class="v" id="stat-avg-latency">—</div>
+      <div class="l">avg response (5m)</div>
+      <div class="delta" id="stat-success-rate">— success</div>
+    </div>
+  </div>
+
+  <!-- Main row: activity stream + backends -->
+  <div class="row-grid">
+    <div class="panel">
+      <h3>
+        Live Request Stream
+        <span class="live"><span class="pulse"></span>streaming</span>
+      </h3>
+      <div class="stream" id="stream">
+        <div class="stream-empty">Waiting for requests…</div>
+      </div>
+      <div style="margin-top: 12px; font-size: 0.72rem; color: var(--text-dim);">
+        Shows model + latency only · no prompts or IPs · refreshes every 4s
+      </div>
+    </div>
+
+    <div>
+      <div class="panel" style="margin-bottom: 16px;">
+        <h3>Local Backends</h3>
+        <div id="backends">
+          <div class="stream-empty">Scanning ports…</div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h3>Models in Rotation</h3>
+        <div class="model-grid" id="models">
+          <div class="stream-empty">Loading…</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <footer>
+    <p>HIVV.org — Autonomous Agent Governance & High-Throughput Inference</p>
+    <p>
+      <a href="/">Control Center</a> ·
+      <a href="/chat/">Chat</a> ·
+      <a href="/dashboard">Governance</a> ·
+      <a href="/status">Status</a> ·
+      <a href="/docs">API Docs</a> ·
+      <a href="/account">Account</a>
+    </p>
+  </footer>
+
+</div>
+
+<script>
+(async () => {
+  const $ = (id) => document.getElementById(id);
+  const fmt = (n) => Number(n || 0).toLocaleString();
+  const ago = (ts) => {
+    const s = Math.floor((Date.now() - new Date(ts).getTime()) / 1000);
+    if (s < 60) return `${s}s`;
+    if (s < 3600) return `${Math.floor(s / 60)}m`;
+    if (s < 86400) return `${Math.floor(s / 3600)}h`;
+    return `${Math.floor(s / 86400)}d`;
+  };
+  const uptime = (s) => {
+    if (s < 60) return `${s}s`;
+    if (s < 3600) return `${Math.floor(s / 60)}m`;
+    if (s < 86400) return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
+    return `${Math.floor(s / 86400)}d ${Math.floor((s % 86400) / 3600)}h`;
+  };
+  const escapeHtml = (t) => {
+    if (!t) return '';
+    const d = document.createElement('div');
+    d.textContent = String(t);
+    return d.innerHTML;
+  };
+
+  let lastActivityIds = new Set();
+
+  async function refreshAll() {
+    await Promise.all([refreshStatus(), refreshActivity(), refreshHeartbeat(), refreshModels()]);
+  }
+
+  async function refreshStatus() {
+    try {
+      const r = await fetch('/api/public/status');
+      const d = await r.json();
+      if (!d.ok) throw new Error(d.error);
+      $('stat-requests-today').textContent = fmt(d.today.requests);
+      $('stat-tokens-today').textContent = fmt(d.today.tokens);
+      $('stat-requests-hour').textContent = `${fmt(d.last_hour.requests)} this hour`;
+      $('stat-tokens-hour').textContent = `${fmt(d.last_hour.tokens)} this hour`;
+      $('stat-providers').textContent = d.gateway.providers_active;
+      $('stat-local').textContent = d.gateway.local_backends.length;
+      $('stat-users').textContent = fmt(d.totals.users);
+      $('stat-visitors').textContent = `${fmt(d.totals.visitors)} anonymous`;
+      $('banner-version').textContent = `v${d.gateway.version}`;
+      $('banner-uptime').textContent = uptime(d.gateway.uptime_process);
+
+      // Render local backends (with the model they actually serve, when known)
+      $('backends').innerHTML = d.gateway.local_backends.map(b => `
+        <div class="backend">
+          <span class="dot"></span>
+          <div class="info">
+            <div class="name">${escapeHtml(b.name)}${b.model ? ` <span style="color: var(--text-dim); font-weight: 400;">· ${escapeHtml(b.model)}</span>` : ''}</div>
+            <div class="url">${escapeHtml(b.url)}</div>
+          </div>
+          <span class="provider-tag">${escapeHtml(b.provider)}</span>
+        </div>
+      `).join('') || '<div class="stream-empty">No local backends discovered.</div>';
+
+      // Latency: server-computed TRUE 5-minute window (was: avg of last 6 rows
+      // of any age, mislabeled "5m" — a batch job could pin it at 4000ms+)
+      const l5 = d.latency_5m;
+      if (l5 && l5.requests > 0) {
+        $('stat-avg-latency').textContent = `${l5.avg_ms}ms`;
+        $('stat-success-rate').textContent = `${l5.success_pct}% success · ${fmt(l5.requests)} req`;
+      } else {
+        $('stat-avg-latency').textContent = '—';
+        $('stat-success-rate').textContent = 'no requests in last 5m';
+      }
+    } catch (e) {
+      console.error('status refresh failed:', e);
+    }
+  }
+
+  async function refreshActivity() {
+    try {
+      const r = await fetch('/api/public/activity');
+      const d = await r.json();
+      if (!d.activity || d.activity.length === 0) {
+        $('stream').innerHTML = '<div class="stream-empty">No requests yet — be the first!</div>';
+        return;
+      }
+      const freshIds = new Set(d.activity.map(a => `${a.ts}-${a.model}-${a.latency_ms}`));
+      const isFirstRender = lastActivityIds.size === 0;
+      $('stream').innerHTML = d.activity.map(a => {
+        const id = `${a.ts}-${a.model}-${a.latency_ms}`;
+        const fresh = !isFirstRender && !lastActivityIds.has(id) ? 'fresh' : '';
+        const provider = a.provider === 'unknown' ? '' : `${a.provider} · `;
+        const modelShort = a.model.length > 40 ? a.model.slice(0, 37) + '…' : a.model;
+        return `
+          <div class="stream-row ${fresh}">
+            <span class="ts">${ago(a.ts)}</span>
+            <span class="model">${escapeHtml(provider + modelShort)}</span>
+            <span class="tokens">${fmt(a.tokens)} tok</span>
+            <span class="lat">${a.latency_ms || 0}ms</span>
+          </div>
+        `;
+      }).join('');
+      lastActivityIds = freshIds;
+    } catch (e) {
+      console.error('activity refresh failed:', e);
+    }
+  }
+
+  async function refreshHeartbeat() {
+    try {
+      const r = await fetch('/api/public/heartbeat');
+      if (!r.ok) throw new Error('down');
+      const d = await r.json();
+      $('banner-pill').classList.remove('warn');
+      $('banner-text').textContent = `Gateway online · ${d.local_backends_online} local`;
+      const date = new Date(d.ts);
+      $('banner-lastbeat').textContent = date.toLocaleTimeString();
+    } catch (e) {
+      $('banner-pill').classList.add('warn');
+      $('banner-text').textContent = 'Gateway unreachable';
+    }
+  }
+
+  async function refreshModels() {
+    try {
+      const r = await fetch('/api/public/models');
+      const d = await r.json();
+      const allModels = [];
+      for (const p of d.providers) {
+        for (const m of p.models) {
+          allModels.push({ name: m, kind: p.kind });
+        }
+      }
+      // Show top 60 unique models, deduplicated
+      const seen = new Set();
+      const uniq = [];
+      for (const m of allModels) {
+        if (seen.has(m.name)) continue;
+        seen.add(m.name);
+        uniq.push(m);
+        if (uniq.length >= 60) break;
+      }
+      $('models').innerHTML = uniq.map(m => `
+        <div class="model-chip ${m.kind}">
+          <span class="dot"></span>
+          <span class="label">${escapeHtml(m.name)}</span>
+        </div>
+      `).join('') || '<div class="stream-empty">No models loaded.</div>';
+    } catch (e) {
+      console.error('models refresh failed:', e);
+    }
+  }
+
+  refreshAll();
+  setInterval(refreshStatus, 12000);
+  setInterval(refreshActivity, 4000);
+  setInterval(refreshHeartbeat, 3000);
+  setInterval(refreshModels, 60000);
+})();
+</script>
+</body>
+</html>

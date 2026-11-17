@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <defs>
+    <radialGradient id="bg" cx="50%" cy="45%" r="55%">
+      <stop offset="0%" stop-color="#ffd23d"/>
+      <stop offset="100%" stop-color="#ff9f1c"/>
+    </radialGradient>
+  </defs>
+  <circle cx="32" cy="32" r="30" fill="url(#bg)" stroke="#3a1505" stroke-width="3"/>
+  <!-- bee body -->
+  <ellipse cx="32" cy="34" rx="9" ry="13" fill="#ffb31a" stroke="#3a1505" stroke-width="2"/>
+  <!-- stripes -->
+  <path d="M24 30 Q32 33 40 30" fill="none" stroke="#3a1505" stroke-width="2"/>
+  <path d="M24 37 Q32 40 40 37" fill="none" stroke="#3a1505" stroke-width="2"/>
+  <!-- head -->
+  <circle cx="32" cy="20" r="8" fill="#ffd23d" stroke="#3a1505" stroke-width="2"/>
+  <!-- antennae -->
+  <path d="M27 13 Q25 8 22 7" fill="none" stroke="#3a1505" stroke-width="2" stroke-linecap="round"/>
+  <path d="M37 13 Q39 8 42 7" fill="none" stroke="#3a1505" stroke-width="2" stroke-linecap="round"/>
+  <circle cx="22" cy="7" r="1.6" fill="#3a1505"/>
+  <circle cx="42" cy="7" r="1.6" fill="#3a1505"/>
+  <!-- eyes -->
+  <circle cx="29" cy="20" r="2.4" fill="#0a0a0f"/>
+  <circle cx="35" cy="20" r="2.4" fill="#0a0a0f"/>
+  <circle cx="29.6" cy="19.4" r="0.7" fill="#fff"/>
+  <circle cx="35.6" cy="19.4" r="0.7" fill="#fff"/>
+  <!-- smile -->
+  <path d="M29 24 Q32 27 35 24" fill="none" stroke="#3a1505" stroke-width="1.5" stroke-linecap="round"/>
+  <!-- wings -->
+  <ellipse cx="18" cy="22" rx="9" ry="6" fill="#ffffff" fill-opacity="0.6" stroke="#3a1505" stroke-width="1.5"/>
+  <ellipse cx="46" cy="22" rx="9" ry="6" fill="#ffffff" fill-opacity="0.6" stroke="#3a1505" stroke-width="1.5"/>
+  <line x1="18" y1="22" x2="28" y2="22" stroke="#3a1505" stroke-width="1" stroke-opacity="0.4"/>
+  <line x1="46" y1="22" x2="36" y2="22" stroke="#3a1505" stroke-width="1" stroke-opacity="0.4"/>
+  <line x1="22" y1="18" x2="22" y2="26" stroke="#3a1505" stroke-width="1" stroke-opacity="0.4"/>
+  <line x1="42" y1="18" x2="42" y2="26" stroke="#3a1505" stroke-width="1" stroke-opacity="0.4"/>
+</svg>

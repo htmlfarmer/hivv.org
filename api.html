@@ -1,0 +1,759 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>API Documentation — HIVV AI Gateway & Control Plane</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <link rel="stylesheet" href="/css/shared.css">
+  <link rel="stylesheet" href="/styles.css">
+  <style>
+    :root {
+      --accent: #00ff88;
+      --accent-cyan: #4dabf7;
+      --accent-purple: #c084fc;
+      --accent-warn: #ffd93d;
+      --bg-card: rgba(13, 17, 23, 0.85);
+      --border-subtle: rgba(255, 255, 255, 0.08);
+      --border-accent: rgba(0, 255, 136, 0.25);
+    }
+
+    body {
+      background: #07070c;
+      color: #e2e8f0;
+      font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', Roboto, sans-serif;
+      line-height: 1.65;
+      padding: 0 20px 60px;
+    }
+
+    .container {
+      max-width: 1140px;
+      margin: 0 auto;
+    }
+
+    /* Hero */
+    .api-hero {
+      margin: 20px 0 36px;
+      padding: 32px 28px;
+      background: radial-gradient(circle at 10% 20%, rgba(0, 255, 136, 0.08) 0%, transparent 60%),
+                  radial-gradient(circle at 90% 80%, rgba(192, 132, 252, 0.06) 0%, transparent 60%),
+                  #0c0c16;
+      border: 1px solid var(--border-accent);
+      border-radius: 16px;
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.45);
+    }
+    .api-hero h1 {
+      font-size: 2.2rem;
+      font-weight: 800;
+      letter-spacing: -0.02em;
+      color: #fff;
+      margin-bottom: 8px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .api-hero .badge-pill {
+      font-size: 0.75rem;
+      font-weight: 700;
+      letter-spacing: 0.05em;
+      padding: 4px 10px;
+      border-radius: 999px;
+      background: rgba(0, 255, 136, 0.15);
+      color: var(--accent);
+      border: 1px solid rgba(0, 255, 136, 0.3);
+      text-transform: uppercase;
+    }
+    .api-hero p {
+      font-size: 1.05rem;
+      color: #94a3b8;
+      max-width: 780px;
+      margin-bottom: 18px;
+    }
+    .api-specs-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 14px;
+      margin-top: 16px;
+      font-size: 0.85rem;
+    }
+    .api-spec-item {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      background: rgba(255, 255, 255, 0.04);
+      border: 1px solid var(--border-subtle);
+      padding: 6px 14px;
+      border-radius: 8px;
+      color: #cbd5e1;
+    }
+    .api-spec-item b {
+      color: var(--accent);
+    }
+
+    /* Section Cards */
+    .doc-section {
+      background: var(--bg-card);
+      border: 1px solid var(--border-subtle);
+      border-radius: 14px;
+      padding: 28px 26px;
+      margin-bottom: 28px;
+      backdrop-filter: blur(12px);
+      box-shadow: 0 4px 24px rgba(0, 0, 0, 0.3);
+      transition: border-color 0.2s ease;
+    }
+    .doc-section:hover {
+      border-color: rgba(255, 255, 255, 0.14);
+    }
+    .doc-section h2 {
+      font-size: 1.35rem;
+      font-weight: 700;
+      color: #fff;
+      margin-bottom: 12px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .doc-section p {
+      color: #94a3b8;
+      font-size: 0.95rem;
+      margin-bottom: 16px;
+    }
+
+    /* Endpoint header bar */
+    .endpoint-bar {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      background: #090912;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 8px;
+      padding: 8px 14px;
+      margin: 16px 0 12px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.9rem;
+    }
+    .method-badge {
+      font-weight: 800;
+      font-size: 0.72rem;
+      padding: 3px 8px;
+      border-radius: 4px;
+      letter-spacing: 0.05em;
+    }
+    .method-badge.post { background: #00ff88; color: #050508; }
+    .method-badge.get { background: #38bdf8; color: #050508; }
+    .method-badge.put { background: #fbbf24; color: #050508; }
+    .method-badge.delete { background: #f87171; color: #050508; }
+    .endpoint-path {
+      color: #f1f5f9;
+      font-weight: 600;
+    }
+    .endpoint-desc {
+      margin-left: auto;
+      font-size: 0.78rem;
+      color: #64748b;
+      font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    }
+
+    /* Code Block styling */
+    .code-block {
+      margin: 14px 0 20px;
+      background: #06060c;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 10px;
+      overflow: hidden;
+    }
+    .code-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 7px 14px;
+      background: rgba(255, 255, 255, 0.03);
+      border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    }
+    .code-lang {
+      font-size: 0.72rem;
+      font-family: monospace;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: #38bdf8;
+      font-weight: 700;
+    }
+    .code-copy-btn {
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      color: #94a3b8;
+      border-radius: 6px;
+      padding: 4px 10px;
+      font-size: 0.72rem;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+    .code-copy-btn:hover {
+      background: rgba(0, 255, 136, 0.15);
+      color: #00ff88;
+      border-color: rgba(0, 255, 136, 0.3);
+    }
+    .code-copy-btn.copied {
+      background: rgba(0, 255, 136, 0.25);
+      color: #00ff88;
+    }
+    .code-block pre {
+      margin: 0;
+      padding: 16px;
+      overflow-x: auto;
+      font-family: 'JetBrains Mono', 'Fira Code', 'Courier New', monospace;
+      font-size: 0.85rem;
+      line-height: 1.6;
+      color: #f1f5f9;
+    }
+
+    /* Params Table */
+    .param-table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 14px 0 20px;
+      font-size: 0.88rem;
+    }
+    .param-table th, .param-table td {
+      padding: 10px 14px;
+      text-align: left;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    }
+    .param-table th {
+      color: #94a3b8;
+      font-size: 0.78rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      background: rgba(255, 255, 255, 0.02);
+    }
+    .param-table code {
+      background: rgba(56, 189, 248, 0.12);
+      color: #38bdf8;
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-family: monospace;
+      font-size: 0.82rem;
+    }
+    .param-type {
+      color: #c084fc;
+      font-size: 0.8rem;
+      font-family: monospace;
+    }
+
+    /* Footer */
+    footer {
+      text-align: center;
+      padding: 40px 0 20px;
+      color: #64748b;
+      font-size: 0.85rem;
+      border-top: 1px solid rgba(255, 255, 255, 0.06);
+      margin-top: 40px;
+    }
+    footer a {
+      color: #94a3b8;
+      text-decoration: none;
+      margin: 0 8px;
+      transition: color 0.15s;
+    }
+    footer a:hover {
+      color: #00ff88;
+    }
+  </style>
+</head>
+<body>
+<div class="container">
+
+  <!-- Main Unified Navigation -->
+  <nav class="site-nav">
+    <a href="/" class="brand" title="HIVV AI">HIVV.org</a>
+    <div class="nav-links">
+      <a href="/">Playground</a>
+      <a href="/dashboard">Control Center</a>
+      <a href="/status">Status</a>
+      <a href="/docs" class="active">API Docs</a>
+      <a href="/account">Account</a>
+    </div>
+  </nav>
+
+  <!-- Hero Header -->
+  <header class="api-hero">
+    <h1>
+      HIVV Gateway API
+      <span class="badge-pill">v2 Public</span>
+    </h1>
+    <p>
+      An OpenAI-compatible inference proxy, autonomous agent tri-state governance engine, and distributed compute pool. Plug in standard OpenAI SDKs or communicate with local on-premise Gemma-4 running at ~64 tokens/sec.
+    </p>
+    <div class="api-specs-row">
+      <span class="api-spec-item">Base URL: <b>https://hivv.org/v1</b></span>
+      <span class="api-spec-item">Streaming: <b>Server-Sent Events (SSE)</b></span>
+      <span class="api-spec-item">Local Inference: <b>~64 tps hardware-accelerated</b></span>
+      <span class="api-spec-item">Rate Limit: <b>60 req/min (free open tier)</b></span>
+    </div>
+  </header>
+
+  <!-- 1. OpenAI-Compatible Chat Completions -->
+  <section class="doc-section" id="chat-completions">
+    <h2>⚡ 1. OpenAI-Compatible Chat API</h2>
+    <p>
+      Direct drop-in replacement for OpenAI's Chat Completions endpoint. Supports full multi-turn dialog, token-by-token streaming, reasoning trace accordions (<code>reasoning_content</code>), and automatic local-to-cloud failover.
+    </p>
+
+    <div class="endpoint-bar">
+      <span class="method-badge post">POST</span>
+      <span class="endpoint-path">/v1/chat/completions</span>
+      <span class="endpoint-desc">Streaming &amp; non-streaming chat</span>
+    </div>
+
+    <table class="param-table">
+      <thead>
+        <tr><th>Parameter</th><th>Type</th><th>Required</th><th>Description</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>messages</code></td>
+          <td><span class="param-type">array</span></td>
+          <td>Yes</td>
+          <td>Array of conversation messages: <code>[{"role": "user", "content": "..."}]</code></td>
+        </tr>
+        <tr>
+          <td><code>model</code></td>
+          <td><span class="param-type">string</span></td>
+          <td>No</td>
+          <td>Model identifier (e.g., <code>local-model</code>, <code>gemma-4</code>, <code>gpt-4o</code>, <code>claude-3-5-sonnet</code>). Defaults to fastest local engine.</td>
+        </tr>
+        <tr>
+          <td><code>stream</code></td>
+          <td><span class="param-type">boolean</span></td>
+          <td>No</td>
+          <td>Set to <code>true</code> (default) for real-time SSE streaming, or <code>false</code> for JSON completion.</td>
+        </tr>
+        <tr>
+          <td><code>provider</code></td>
+          <td><span class="param-type">string</span></td>
+          <td>No</td>
+          <td>Override provider selection (e.g. <code>llamacpp</code>, <code>ollama</code>, <code>local</code>, <code>anthropic</code>, <code>openai</code>).</td>
+        </tr>
+        <tr>
+          <td><code>api_url</code></td>
+          <td><span class="param-type">string</span></td>
+          <td>No</td>
+          <td>Direct custom AI endpoint URL (e.g. <code>http://localhost:8080/v1/chat/completions</code>). Routes directly to any local or remote worker.</td>
+        </tr>
+        <tr>
+          <td><code>temperature</code></td>
+          <td><span class="param-type">number</span></td>
+          <td>No</td>
+          <td>Sampling temperature between 0.0 and 2.0 (default 0.7).</td>
+        </tr>
+        <tr>
+          <td><code>max_tokens</code></td>
+          <td><span class="param-type">integer</span></td>
+          <td>No</td>
+          <td>Maximum tokens to generate.</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h3 style="color:#fff;font-size:1rem;margin-top:20px;">Code Examples</h3>
+
+    <!-- cURL Example -->
+    <div class="code-block">
+      <div class="code-header">
+        <span class="code-lang">cURL (Streaming SSE)</span>
+        <button class="code-copy-btn" onclick="HIVV.copyCode(this)">Copy</button>
+      </div>
+      <pre><code>curl -N -X POST https://hivv.org/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "local-model",
+    "stream": true,
+    "messages": [
+      {"role": "system", "content": "You are a concise, ultra-fast assistant."},
+      {"role": "user", "content": "Explain quantum computing in two sentences."}
+    ]
+  }'</code></pre>
+    </div>
+
+    <!-- Python Example -->
+    <div class="code-block">
+      <div class="code-header">
+        <span class="code-lang">Python (Official OpenAI SDK)</span>
+        <button class="code-copy-btn" onclick="HIVV.copyCode(this)">Copy</button>
+      </div>
+      <pre><code>from openai import OpenAI
+
+# Initialize client pointing to HIVV gateway
+client = OpenAI(
+    base_url="https://hivv.org/v1",
+    api_key="public-spectator"  # Any string for public tier; or user X-Session-Token
+)
+
+response = client.chat.completions.create(
+    model="local-model",
+    messages=[
+        {"role": "user", "content": "Hello HIVV, what is 42 * 9?"}
+    ],
+    stream=True
+)
+
+for chunk in response:
+    content = chunk.choices[0].delta.content or ""
+    print(content, end="", flush=True)
+print()</code></pre>
+    </div>
+
+    <!-- JavaScript Example -->
+    <div class="code-block">
+      <div class="code-header">
+        <span class="code-lang">JavaScript / TypeScript (Fetch Streaming)</span>
+        <button class="code-copy-btn" onclick="HIVV.copyCode(this)">Copy</button>
+      </div>
+      <pre><code>const response = await fetch('https://hivv.org/v1/chat/completions', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    stream: true,
+    messages: [{ role: 'user', content: 'What is the speed of light?' }]
+  })
+});
+
+const reader = response.body.getReader();
+const decoder = new TextDecoder();
+let buffer = '';
+
+while (true) {
+  const { done, value } = await reader.read();
+  if (done) break;
+  buffer += decoder.decode(value, { stream: true });
+  const lines = buffer.split('\n');
+  buffer = lines.pop();
+
+  for (const line of lines) {
+    if (line.startsWith('data: ')) {
+      const data = line.slice(6).trim();
+      if (data === '[DONE]') break;
+      const parsed = JSON.parse(data);
+      const delta = parsed.choices?.[0]?.delta?.content || '';
+      process.stdout.write(delta);
+    }
+  }
+}</code></pre>
+    </div>
+
+    <div class="endpoint-bar" style="margin-top:24px;">
+      <span class="method-badge get">GET</span>
+      <span class="endpoint-path">/v1/models</span>
+      <span class="endpoint-desc">List registered models &amp; providers</span>
+    </div>
+    <div class="code-block">
+      <div class="code-header">
+        <span class="code-lang">cURL</span>
+        <button class="code-copy-btn" onclick="HIVV.copyCode(this)">Copy</button>
+      </div>
+      <pre><code>curl https://hivv.org/v1/models</code></pre>
+    </div>
+  </section>
+
+  <!-- 2. Agent Governance & Tri-State Control -->
+  <section class="doc-section" id="governance-api">
+    <h2>🛡️ 2. Autonomous Agent Governance API</h2>
+    <p>
+      Inspect agent states under the Tri-State model (<code>YES</code> Autonomous, <code>MAYBE</code> Human Approval Required, <code>NO</code> Blocked) and manage access permissions.
+    </p>
+
+    <div class="endpoint-bar">
+      <span class="method-badge get">GET</span>
+      <span class="endpoint-path">/api/dashboard/agents</span>
+      <span class="endpoint-desc">Query agent fleet (public &amp; authenticated)</span>
+    </div>
+    <p style="font-size:0.85rem;color:#94a3b8;">
+      Query parameters: <code>perspective=public</code> (default, safe for guests) or <code>perspective=private</code> (requires authenticated <code>X-Session-Token</code>).
+    </p>
+    <div class="code-block">
+      <div class="code-header">
+        <span class="code-lang">JSON Response</span>
+        <button class="code-copy-btn" onclick="HIVV.copyCode(this)">Copy</button>
+      </div>
+      <pre><code>{
+  "success": true,
+  "perspective": "public",
+  "agents": [
+    {
+      "id": "1",
+      "public_name": "Autonomous Weaver",
+      "agent_type": "orchestrator",
+      "state": "yes",
+      "trust_score": 92,
+      "pending_permissions": 0
+    }
+  ]
+}</code></pre>
+    </div>
+
+    <div class="endpoint-bar">
+      <span class="method-badge get">GET</span>
+      <span class="endpoint-path">/api/agents/approvals/pending</span>
+      <span class="endpoint-desc">Pending permission requests</span>
+    </div>
+
+    <div class="endpoint-bar">
+      <span class="method-badge post">POST</span>
+      <span class="endpoint-path">/api/agents/approvals/:id/decide</span>
+      <span class="endpoint-desc">Approve or deny pending permission</span>
+    </div>
+    <div class="code-block">
+      <div class="code-header">
+        <span class="code-lang">cURL</span>
+        <button class="code-copy-btn" onclick="HIVV.copyCode(this)">Copy</button>
+      </div>
+      <pre><code>curl -X POST https://hivv.org/api/agents/approvals/perm_123/decide \
+  -H "Content-Type: application/json" \
+  -H "X-Session-Token: YOUR_SESSION_TOKEN" \
+  -d '{"decision": "approve"}'</code></pre>
+    </div>
+
+    <div class="endpoint-bar">
+      <span class="method-badge post">POST</span>
+      <span class="endpoint-path">/api/dashboard/agents/:id/state</span>
+      <span class="endpoint-desc">Toggle agent tri-state (yes / maybe / no)</span>
+    </div>
+  </section>
+
+  <!-- 3. Real-Time Telemetry & Public Pulse -->
+  <section class="doc-section" id="telemetry-api">
+    <h2>📡 3. Gateway Telemetry &amp; Public Pulse</h2>
+    <p>
+      High-frequency, unauthenticated metrics for monitoring health, provider status, and live request latency.
+    </p>
+
+    <div class="endpoint-bar">
+      <span class="method-badge get">GET</span>
+      <span class="endpoint-path">/api/public/heartbeat</span>
+      <span class="endpoint-desc">3-second heartbeat probe</span>
+    </div>
+    <div class="code-block">
+      <div class="code-header">
+        <span class="code-lang">JSON Response</span>
+        <button class="code-copy-btn" onclick="HIVV.copyCode(this)">Copy</button>
+      </div>
+      <pre><code>{
+  "ok": true,
+  "ts": 1788855296527,
+  "local_backends_online": 2
+}</code></pre>
+    </div>
+
+    <div class="endpoint-bar">
+      <span class="method-badge get">GET</span>
+      <span class="endpoint-path">/api/public/status</span>
+      <span class="endpoint-desc">Full gateway throughput, uptime, and active backends</span>
+    </div>
+
+    <div class="endpoint-bar">
+      <span class="method-badge get">GET</span>
+      <span class="endpoint-path">/api/public/activity</span>
+      <span class="endpoint-desc">Anonymized recent request stream</span>
+    </div>
+  </section>
+
+  <!-- 4. Key Vault & Donor Pool -->
+  <section class="doc-section" id="key-vault">
+    <h2>🔐 4. Authentication &amp; Compute Pool</h2>
+    <p>
+      Users can create accounts, securely store private LLM API keys in an encrypted vault, or donate idle quota to the crowdsourced compute pool.
+    </p>
+
+    <div class="endpoint-bar">
+      <span class="method-badge post">POST</span>
+      <span class="endpoint-path">/api/auth/login</span>
+      <span class="endpoint-desc">Authenticate and receive session token</span>
+    </div>
+    <div class="code-block">
+      <div class="code-header">
+        <span class="code-lang">cURL</span>
+        <button class="code-copy-btn" onclick="HIVV.copyCode(this)">Copy</button>
+      </div>
+      <pre><code>curl -X POST https://hivv.org/api/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username": "your_username", "password": "your_password"}'</code></pre>
+    </div>
+
+    <div class="endpoint-bar">
+      <span class="method-badge post">POST</span>
+      <span class="endpoint-path">/api/keys/donate</span>
+      <span class="endpoint-desc">Contribute unused API key to the community pool</span>
+    </div>
+    <p style="font-size:0.85rem;color:#94a3b8;margin-top:12px;">
+      Donate any AI provider key (OpenAI, Anthropic, Google, MiniMax, etc.) to the community compute pool. When local AI isn't available, your donated key helps others get responses. Keys are encrypted at rest with AES-256-GCM.
+    </p>
+    <div class="code-block">
+      <div class="code-header">
+        <span class="code-lang">cURL</span>
+        <button class="code-copy-btn" onclick="HIVV.copyCode(this)">Copy</button>
+      </div>
+      <pre><code>curl -X POST https://hivv.org/api/keys/donate \
+  -H "Content-Type: application/json" \
+  -H "X-Session-Token: YOUR_SESSION_TOKEN" \
+  -d '{
+    "provider": "openai",
+    "api_key": "sk-proj-...",
+    "model_preference": "gpt-4o",
+    "priority": 5
+  }'</code></pre>
+    </div>
+    <table class="param-table">
+      <thead>
+        <tr><th>Parameter</th><th>Type</th><th>Required</th><th>Description</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>provider</code></td>
+          <td><span class="param-type">string</span></td>
+          <td>Yes</td>
+          <td>Provider name: <code>openai</code>, <code>anthropic</code>, <code>google</code>, <code>minimax</code>, etc.</td>
+        </tr>
+        <tr>
+          <td><code>api_key</code></td>
+          <td><span class="param-type">string</span></td>
+          <td>Yes</td>
+          <td>Your API key. Encrypted immediately on receipt — never stored in plaintext.</td>
+        </tr>
+        <tr>
+          <td><code>model_preference</code></td>
+          <td><span class="param-type">string</span></td>
+          <td>No</td>
+          <td>Preferred model to use with this key (e.g. <code>gpt-4o</code>, <code>claude-3-5-sonnet</code>).</td>
+        </tr>
+        <tr>
+          <td><code>priority</code></td>
+          <td><span class="param-type">integer</span></td>
+          <td>No</td>
+          <td>Priority 1-10 (higher = used first). Default: 5.</td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <!-- 5. Distributed Node Network -->
+  <section class="doc-section" id="node-network">
+    <h2>🐝 5. Distributed Node Network</h2>
+    <p>
+      Every <code>hivv start</code> machine registers with the hub and appears in the cluster. Monitor node health, view per-node performance, and see which models are available across the network.
+    </p>
+
+    <div class="endpoint-bar">
+      <span class="method-badge get">GET</span>
+      <span class="endpoint-path">/api/control/nodes</span>
+      <span class="endpoint-desc">List all registered nodes with metrics</span>
+    </div>
+    <p style="font-size:0.85rem;color:#94a3b8;">
+      Public endpoint — no auth required. Returns node details including status, capabilities, local models, system info, and live metrics.
+    </p>
+    <div class="code-block">
+      <div class="code-header">
+        <span class="code-lang">JSON Response</span>
+        <button class="code-copy-btn" onclick="HIVV.copyCode(this)">Copy</button>
+      </div>
+      <pre><code>{
+  "total": 3,
+  "online": 2,
+  "nodes": [
+    {
+      "id": "a1b2c3d4",
+      "name": "office-gpu",
+      "ip": "203.0.113.42",
+      "lan_ip": "192.168.1.42",
+      "version": "1.2.3",
+      "status": "online",
+      "registered_at": 1694800000000,
+      "last_heartbeat": 1694800060000,
+      "capabilities": ["llama.cpp", "ollama"],
+      "local_models": [
+        { "source": "llama.cpp", "models": ["gemma-4-9b"], "port": 8080 }
+      ],
+      "system": {
+        "cpus": 16,
+        "arch": "x64",
+        "platform": "linux"
+      },
+      "metrics": {
+        "cpu_percent": 34.2,
+        "mem_percent": 62.1,
+        "active_jobs": 1,
+        "uptime_seconds": 86400,
+        "workers": 4,
+        "available_capacity": 3
+      },
+      "stats": {
+        "tasks_completed": 142,
+        "tasks_failed": 2,
+        "total_tokens_processed": 1850000,
+        "total_cost": 0.42
+      }
+    }
+  ]
+}</code></pre>
+    </div>
+
+    <div class="endpoint-bar">
+      <span class="method-badge get">GET</span>
+      <span class="endpoint-path">/api/control/stats</span>
+      <span class="endpoint-desc">Cluster-wide performance stats</span>
+    </div>
+    <p style="font-size:0.85rem;color:#94a3b8;">
+      Aggregated stats across all nodes — perfect for dashboards. Shows per-node breakdown plus cluster totals.
+    </p>
+    <div class="code-block">
+      <div class="code-header">
+        <span class="code-lang">JSON Response</span>
+        <button class="code-copy-btn" onclick="HIVV.copyCode(this)">Copy</button>
+      </div>
+      <pre><code>{
+  "count": 3,
+  "totals": {
+    "tasks_completed": 587,
+    "tasks_failed": 4,
+    "tokens": 7250000,
+    "requests": 612,
+    "cost": 1.84
+  },
+  "nodes": [
+    {
+      "id": "a1b2c3d4",
+      "name": "office-gpu",
+      "ip": "192.168.1.42",
+      "status": "online",
+      "models": 2,
+      "cpu": 34.2,
+      "mem": 62.1,
+      "tasks_completed": 142,
+      "tokens": 1850000,
+      "requests": 156,
+      "cost": 0.42,
+      "uptime_s": 86400,
+      "hw": "AMD Ryzen 9 7950X"
+    }
+  ]
+}</code></pre>
+    </div>
+  </section>
+
+  <!-- Footer -->
+  <footer>
+    <p>HIVV.org — Autonomous Agent Governance &amp; High-Throughput Inference</p>
+    <p>
+      <a href="/">Playground</a> &middot;
+      <a href="/dashboard">Control Center</a> &middot;
+      <a href="/status">Status</a> &middot;
+      <a href="/docs">API Docs</a> &middot;
+      <a href="/account">Account</a>
+    </p>
+  </footer>
+
+</div>
+
+<!-- Shared JavaScript Utilities -->
+<script src="/js/shared.js"></script>
+</body>
+</html>

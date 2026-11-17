@@ -1,0 +1,688 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>My Bee HIVV! — HIVV.org</title>
+  <link rel="stylesheet" href="/css/shared.css">
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <style>
+    /* Bee-specific overrides */
+    .bee-page { min-height: 100vh; background: #07070c; }
+    .auth-section { display: none; }
+    .auth-section.visible { display: block; }
+    .logged-section { display: none; }
+    .logged-section.visible { display: block; }
+    .login-card-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; align-items: start; }
+    @media (max-width: 700px) { .login-card-grid { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body class="bee-page">
+<div class="container">
+
+  <!-- Unified Navigation -->
+  <nav class="site-nav">
+    <a href="/" class="brand" title="HIVV AI">HIVV.org</a>
+    <div class="nav-links">
+      <a href="/">Playground</a>
+      <a href="/dashboard">Control Center</a>
+      <a href="/status">Status</a>
+      <a href="/docs">API Docs</a>
+      <a href="/account" class="active">Account</a>
+    </div>
+  </nav>
+
+  <!-- Header -->
+  <div class="header" style="display:flex; justify-content:space-between; align-items:center; margin-bottom:24px;">
+    <h1>🐝 HIVV Account &amp; Key Vault</h1>
+    <div class="header-nav" style="display:flex; gap:10px; align-items:center;">
+      <a href="/admin.html" id="adminLink" style="display:none;" class="btn btn-sm btn-secondary">Admin</a>
+      <button class="btn btn-sm btn-danger" id="logoutBtn" style="display:none;" onclick="HIVV.logout();">Logout</button>
+    </div>
+  </div>
+
+  <!-- Auth Section -->
+  <div id="authSection" class="auth-section visible">
+    <div class="login-card-grid">
+
+      <!-- Login Form -->
+      <div class="auth-card card-accent-purple">
+        <h2>🔐 Login</h2>
+        <div id="loginError" class="error-msg"></div>
+        <div class="form-group">
+          <input type="text" id="loginUsername" placeholder="Username" autocomplete="username"
+                 onkeydown="if(event.key==='Enter')document.getElementById('loginPassword').focus()">
+        </div>
+        <div class="form-group">
+          <input type="password" id="loginPassword" placeholder="Password" autocomplete="current-password"
+                 onkeydown="if(event.key==='Enter')doLogin()">
+        </div>
+        <button class="btn btn-primary" style="width:100%" onclick="doLogin()" id="loginBtn">Login</button>
+        <p style="color:#666;margin-top:16px;text-align:center;font-size:0.9em;">
+          No account? <a href="#" onclick="showRegister();return false;" style="color:#74b9ff;">Register here</a>
+        </p>
+      </div>
+
+      <!-- Device Info -->
+      <div class="auth-card card-accent-blue">
+        <h2>🖥️ Your Connection</h2>
+        <div class="info-grid" style="margin-top:12px;">
+          <div class="info-box">
+            <div class="label">IP Address</div>
+            <div class="value green mono" id="infoIp">Detecting...</div>
+          </div>
+          <div class="info-box">
+            <div class="label">Location</div>
+            <div class="value" id="infoLocation">Detecting...</div>
+          </div>
+          <div class="info-box">
+            <div class="label">Browser</div>
+            <div class="value" id="infoBrowser">-</div>
+          </div>
+          <div class="info-box">
+            <div class="label">Device</div>
+            <div class="value" id="infoDevice">-</div>
+          </div>
+          <div class="info-box">
+            <div class="label">Screen</div>
+            <div class="value" id="infoScreen">-</div>
+          </div>
+          <div class="info-box">
+            <div class="label">Timezone</div>
+            <div class="value" id="infoTimezone">-</div>
+          </div>
+        </div>
+        <div style="margin-top:16px;padding-top:12px;border-top:1px solid #2a2a4e;">
+          <h3 style="color:#888;font-size:0.85em;margin-bottom:8px;">Last Login</h3>
+          <div id="lastLoginInfo" style="color:#888;font-size:0.85em;">No previous login</div>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- Register Form (hidden initially) -->
+    <div class="auth-card card-accent-green" id="registerCard" style="margin-top:20px;display:none;max-width:400px;">
+      <h2>✨ Create Account</h2>
+      <div id="registerError" class="error-msg"></div>
+      <div class="form-group">
+        <input type="text" id="regUsername" placeholder="Username (3-50 chars)" autocomplete="username"
+               onkeydown="if(event.key==='Enter')document.getElementById('regPassword').focus()">
+      </div>
+      <div class="form-group">
+        <input type="text" id="regDisplay" placeholder="Display name (optional)">
+      </div>
+      <div class="form-group">
+        <input type="password" id="regPassword" placeholder="Password (min 6 chars)" autocomplete="new-password"
+               onkeydown="if(event.key==='Enter')document.getElementById('regPassword2').focus()">
+      </div>
+      <div class="form-group">
+        <input type="password" id="regPassword2" placeholder="Confirm password" autocomplete="new-password"
+               onkeydown="if(event.key==='Enter')doRegister()">
+      </div>
+      <button class="btn btn-success" style="width:100%" onclick="doRegister()" id="regBtn">Create Account</button>
+      <p style="color:#666;margin-top:16px;text-align:center;font-size:0.9em;">
+        Already have an account? <a href="#" onclick="showLogin();return false;" style="color:#74b9ff;">Login here</a>
+      </p>
+    </div>
+  </div>
+
+  <!-- Logged In Section -->
+  <div id="loggedSection" class="logged-section">
+
+    <!-- Stats Row -->
+    <div class="stats-row" style="margin-bottom:20px;">
+      <div class="stat-box">
+        <div class="value" id="statKeys">0</div>
+        <div class="label">API Keys</div>
+      </div>
+      <div class="stat-box">
+        <div class="value" id="statRequests">0</div>
+        <div class="label">Requests Today</div>
+      </div>
+      <div class="stat-box">
+        <div class="value" id="statVisits">0</div>
+        <div class="label">Total Visits</div>
+      </div>
+    </div>
+
+    <div class="grid-2">
+      <!-- Device Info -->
+      <div class="card card-accent-purple">
+        <h2>🖥️ Device Info</h2>
+        <div class="info-grid" style="margin-top:12px;">
+          <div class="info-box">
+            <div class="label">IP Address</div>
+            <div class="value green" id="myIp">-</div>
+          </div>
+          <div class="info-box">
+            <div class="label">Location</div>
+            <div class="value" id="myLocation">-</div>
+          </div>
+          <div class="info-box">
+            <div class="label">Browser</div>
+            <div class="value" id="myBrowser">-</div>
+          </div>
+          <div class="info-box">
+            <div class="label">Device</div>
+            <div class="value" id="myDevice">-</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Security -->
+      <div class="card card-accent-blue">
+        <h2>🔒 Security</h2>
+        <div id="passwordSuccess" class="success-msg"></div>
+        <div id="passwordError" class="error-msg"></div>
+        <div id="passwordForm" style="display:none;">
+          <form onsubmit="changePassword(event)">
+            <div class="form-group">
+              <label>Current Password</label>
+              <input type="password" id="currentPassword" required>
+            </div>
+            <div class="form-group">
+              <label>New Password</label>
+              <input type="password" id="newPassword" minlength="6" required>
+            </div>
+            <div class="form-group">
+              <label>Confirm Password</label>
+              <input type="password" id="confirmPassword" minlength="6" required>
+            </div>
+            <button type="submit" class="btn btn-primary">Change Password</button>
+            <button type="button" class="btn btn-secondary" onclick="hidePasswordForm()">Cancel</button>
+          </form>
+        </div>
+        <button id="changePasswordBtn" class="btn btn-secondary" onclick="showPasswordForm()">Change Password</button>
+      </div>
+    </div>
+
+    <!-- Tabs -->
+    <div class="tabs">
+      <button class="tab active" data-tab="keys">🔑 My API Keys</button>
+      <button class="tab" data-tab="local">🌐 Local AI Setup</button>
+      <button class="tab" data-tab="usage">📊 Usage</button>
+    </div>
+
+    <!-- Keys Tab -->
+    <div id="tab-keys" class="tab-content active">
+      <div class="card card-accent-orange">
+        <h2>Add New API Key</h2>
+        <div style="background:#111118;padding:16px;border-radius:10px;margin-bottom:20px;">
+          <div class="form-row" style="margin-bottom:12px;">
+            <div class="form-group">
+              <label>Provider</label>
+              <select id="keyProvider" onchange="onProviderChange()">
+                <option value="">Select...</option>
+                <optgroup label="Cloud (needs API key)">
+                  <option value="openai">OpenAI (ChatGPT)</option>
+                  <option value="anthropic">Anthropic (Claude)</option>
+                  <option value="google">Google (Gemini)</option>
+                  <option value="minimax">MiniMax</option>
+                  <option value="groq">Groq</option>
+                  <option value="deepseek">DeepSeek</option>
+                </optgroup>
+                <optgroup label="Local Network">
+                  <option value="local">🌐 Scan Local Network</option>
+                </optgroup>
+                <optgroup label="Other">
+                  <option value="custom">Custom Endpoint</option>
+                </optgroup>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>Model <span id="modelOptional" style="color:#888">(optional)</span></label>
+              <input type="text" id="keyModel" placeholder="auto-detect">
+            </div>
+          </div>
+
+          <div id="localHostRow" style="display:none;margin-bottom:12px;">
+            <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+              <input type="text" id="keyHost" placeholder="localhost or IP (192.168.1.100)" style="flex:2;min-width:200px;">
+              <input type="text" id="keyPort" placeholder="Port (e.g. 1234)" style="width:100px;">
+              <button type="button" class="btn btn-sm btn-secondary" onclick="detectLocal()">🔍 Test</button>
+              <button type="button" class="btn btn-sm btn-secondary" onclick="scanPorts()">🌐 Scan</button>
+            </div>
+            <div id="detectStatus" style="font-size:0.85em;margin-top:8px;color:#888;"></div>
+            <div id="scanResults" style="display:none;margin-top:10px;"></div>
+          </div>
+
+          <div id="customEndpointRow" style="display:none;margin-bottom:12px;">
+            <input type="text" id="keyEndpoint" placeholder="http://localhost:1234/v1/chat/completions" style="width:100%;">
+          </div>
+
+          <div class="form-row">
+            <div class="form-group">
+              <label>API Key <span id="apiKeyOptional" style="color:#888"></span></label>
+              <input type="text" id="keyValue" placeholder="sk-... (leave empty for local)">
+            </div>
+            <div class="form-group">
+              <label>Notes (optional)</label>
+              <input type="text" id="keyNotes" placeholder="My work account">
+            </div>
+          </div>
+          <div id="addKeyResult" class="success-msg"></div>
+          <button class="btn btn-primary" onclick="addKey()" id="addKeyBtn">Add Key</button>
+        </div>
+
+        <h2 style="margin-top:20px;">Your Keys</h2>
+        <div id="keysList"></div>
+      </div>
+    </div>
+
+    <!-- Local AI Tab -->
+    <div id="tab-local" class="tab-content">
+      <div class="card card-accent-green">
+        <h2>🌐 Local AI Setup</h2>
+        <p style="color:#888;margin-bottom:16px;">Connect to AI running on your network. Enter an IP and scan for common ports.</p>
+
+        <div style="display:flex;gap:10px;margin-bottom:16px;">
+          <input type="text" id="scanHost" placeholder="192.168.1.100" value="localhost" style="flex:1;">
+          <button class="btn btn-secondary" onclick="fullScan()">🔍 Scan This IP</button>
+        </div>
+
+        <div id="fullScanResults"></div>
+      </div>
+    </div>
+
+    <!-- Usage Tab -->
+    <div id="tab-usage" class="tab-content">
+      <div class="card card-accent-blue">
+        <h2>📊 Usage History</h2>
+        <div id="usageContent">Loading...</div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- Unified Footer -->
+  <footer style="text-align:center; padding:30px 0 10px; color:#64748b; font-size:0.85rem; border-top:1px solid rgba(255,255,255,0.06); margin-top:40px;">
+    <p>HIVV.org — Autonomous Agent Governance &amp; Key Vault</p>
+    <p style="margin-top:6px;">
+      <a href="/" style="color:#94a3b8;text-decoration:none;margin:0 8px;">Playground</a> &middot;
+      <a href="/dashboard" style="color:#94a3b8;text-decoration:none;margin:0 8px;">Control Center</a> &middot;
+      <a href="/status" style="color:#94a3b8;text-decoration:none;margin:0 8px;">Status</a> &middot;
+      <a href="/docs" style="color:#94a3b8;text-decoration:none;margin:0 8px;">API Docs</a> &middot;
+      <a href="/account" style="color:#94a3b8;text-decoration:none;margin:0 8px;">Account</a>
+    </p>
+  </footer>
+</div>
+
+<script src="/js/shared.js"></script>
+<script>
+const $ = (s) => document.querySelector(s);
+const $$ = (s) => document.querySelectorAll(s);
+
+// ===== Init =====
+async function init() {
+  // Load gateway config first
+  await HIVV.loadConfig();
+
+  HIVV.initTabs();
+
+  // Load device info for login page
+  loadLoginPageInfo();
+
+  // Check if already logged in
+  const user = await HIVV.requireAuth();
+  if (user) {
+    showLoggedIn(user);
+  }
+}
+
+function showRegister() {
+  $$('.auth-card').forEach(c => c.style.display = 'none');
+  $('#registerCard').style.display = 'block';
+}
+
+function showLogin() {
+  $$('.auth-card').forEach(c => c.style.display = 'block');
+  $('#registerCard').style.display = 'none';
+}
+
+// ===== Device Info =====
+function loadLoginPageInfo() {
+  const info = HIVV.getDeviceInfo();
+  $('#infoBrowser').textContent = info.browser;
+  $('#infoDevice').textContent = info.device;
+  $('#infoScreen').textContent = info.screen;
+  $('#infoTimezone').textContent = info.timezone;
+
+  HIVV.fetchIPInfo().then(data => {
+    $('#infoIp').textContent = data.ip || 'Unavailable';
+    const loc = [data.city, data.region, data.postal].filter(Boolean).join(', ');
+    $('#infoLocation').textContent = loc || 'Unknown location';
+  });
+
+  const lastLogin = localStorage.getItem('hivv_last_login');
+  if (lastLogin) {
+    const info = JSON.parse(lastLogin);
+    const date = new Date(info.time).toLocaleString();
+    $('#lastLoginInfo').innerHTML = `
+      <div>${date}</div>
+      <div style="color:${info.success ? '#00ff88' : '#ff4757'};margin-top:4px;">
+        ${info.success ? '✓ Successful' : '✗ Failed: ' + (info.error || 'Unknown')}
+      </div>
+    `;
+  }
+}
+
+// ===== Auth =====
+async function doLogin() {
+  const username = $('#loginUsername').value.trim();
+  const password = $('#loginPassword').value;
+  const btn = $('#loginBtn');
+  const err = $('#loginError');
+
+  if (!username || !password) { err.style.display = 'block'; err.textContent = 'Username and password required'; return; }
+
+  btn.disabled = true; btn.textContent = 'Logging in...';
+  err.style.display = 'none';
+
+  try {
+    const data = await HIVV.login(username, password);
+
+    localStorage.setItem('hivv_last_login', JSON.stringify({
+      time: Date.now(), success: data.success, error: data.error || null, username
+    }));
+
+    if (data.success) {
+      const me = await HIVV.fetchMe();
+      showLoggedIn(me.user);
+    } else {
+      err.style.display = 'block'; err.textContent = data.error;
+    }
+  } catch (e) {
+    err.style.display = 'block'; err.textContent = e.message;
+  } finally {
+    btn.disabled = false; btn.textContent = 'Login';
+  }
+}
+
+async function doRegister() {
+  const username = $('#regUsername').value.trim();
+  const display = $('#regDisplay').value.trim();
+  const password = $('#regPassword').value;
+  const password2 = $('#regPassword2').value;
+  const btn = $('#regBtn');
+  const err = $('#registerError');
+
+  if (!username || !password) { err.style.display = 'block'; err.textContent = 'Required fields missing'; return; }
+  if (password !== password2) { err.style.display = 'block'; err.textContent = 'Passwords do not match'; return; }
+  if (password.length < 6) { err.style.display = 'block'; err.textContent = 'Password must be 6+ characters'; return; }
+
+  btn.disabled = true; btn.textContent = 'Creating...';
+
+  try {
+    const data = await HIVV.register(username, password, display);
+    if (data.success) {
+      const me = await HIVV.fetchMe();
+      showLoggedIn(me.user);
+    } else {
+      err.style.display = 'block'; err.textContent = data.error;
+    }
+  } catch (e) {
+    err.style.display = 'block'; err.textContent = e.message;
+  } finally {
+    btn.disabled = false; btn.textContent = 'Create Account';
+  }
+}
+
+function showLoggedIn(user) {
+  $('#authSection').classList.remove('visible');
+  $('#loggedSection').classList.add('visible');
+  $('#logoutBtn').style.display = 'inline-block';
+
+  if (user.role === 'admin' || user.role === 'owner') {
+    $('#adminLink').style.display = 'inline-block';
+  }
+
+  loadMyInfo();
+  loadKeys();
+  loadStats();
+}
+
+function loadMyInfo() {
+  const info = HIVV.getDeviceInfo();
+  $('#myBrowser').textContent = info.browser;
+  $('#myDevice').textContent = info.device;
+
+  HIVV.fetchIPInfo().then(data => {
+    $('#myIp').textContent = data.ip || 'Unavailable';
+    const loc = [data.city, data.region, data.postal].filter(Boolean).join(', ');
+    $('#myLocation').textContent = loc || 'Unknown';
+  });
+}
+
+// ===== Keys =====
+async function loadKeys() {
+  const { data } = await HIVV.get('/api/user/keys');
+  $('#statKeys').textContent = data.keys?.length || 0;
+
+  if (!data.keys?.length) {
+    $('#keysList').innerHTML = '<p style="color:#888;">No API keys yet. Add one above!</p>';
+    return;
+  }
+
+  $('#keysList').innerHTML = data.keys.map(k => `
+    <div style="background:#1a1a2e;padding:14px;border-radius:10px;margin-bottom:10px;display:flex;justify-content:space-between;align-items:center;">
+      <div>
+        <div style="color:#ff9f43;font-weight:600;">${HIVV.escapeHtml(k.provider)}</div>
+        <div style="color:#ffd93d;font-size:0.9em;">${HIVV.escapeHtml(k.model) || 'any model'}</div>
+        <div style="color:#666;font-size:0.8em;font-family:monospace;margin-top:4px;">${HIVV.escapeHtml(k.api_endpoint || '')}</div>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center;">
+        <span class="badge badge-${k.is_active ? 'active' : 'inactive'}">${k.is_active ? 'active' : 'inactive'}</span>
+        <button class="btn btn-sm btn-danger" onclick="deleteKey(${k.id})">Delete</button>
+      </div>
+    </div>
+  `).join('');
+}
+
+async function deleteKey(id) {
+  if (!confirm('Delete this key?')) return;
+  await HIVV.del(`/api/user/keys/${id}/delete`);
+  loadKeys();
+  loadStats();
+}
+
+// ===== Add Key =====
+function onProviderChange() {
+  const p = $('#keyProvider').value;
+  const localRow = $('#localHostRow');
+  const customRow = $('#customEndpointRow');
+  const apiOpt = $('#apiKeyOptional');
+
+  if (p === 'custom') {
+    customRow.style.display = 'block';
+    localRow.style.display = 'none';
+    apiOpt.textContent = '(optional)';
+  } else if (p === 'local') {
+    customRow.style.display = 'none';
+    localRow.style.display = 'block';
+    apiOpt.textContent = '(not needed)';
+    $('#keyHost').value = 'localhost';
+  } else if (HIVV.CLOUD_PROVIDERS.includes(p)) {
+    customRow.style.display = 'none';
+    localRow.style.display = 'none';
+    apiOpt.textContent = '(required)';
+  } else {
+    customRow.style.display = 'none';
+    localRow.style.display = 'none';
+    apiOpt.textContent = '';
+  }
+}
+
+async function detectLocal() {
+  const host = $('#keyHost').value.trim() || 'localhost';
+  const port = $('#keyPort').value.trim();
+  const status = $('#detectStatus');
+
+  if (!port) { status.style.color = '#ff4757'; status.textContent = 'Enter a port first'; return; }
+
+  status.textContent = '🔍 Testing...'; status.style.color = '#ffd93d';
+  const result = await HIVV.scanEndpoint(host, port);
+
+  if (result.success) {
+    status.textContent = `✓ Found! ${result.models.length} models detected`; status.style.color = '#00ff88';
+    if (result.models.length && !$('#keyModel').value) $('#keyModel').value = result.models[0];
+  } else {
+    status.textContent = '✗ Not reachable'; status.style.color = '#ff4757';
+  }
+}
+
+async function scanPorts() {
+  const host = $('#keyHost').value.trim() || 'localhost';
+  const status = $('#detectStatus');
+  const results = $('#scanResults');
+
+  status.textContent = '🔍 Scanning...'; results.style.display = 'none';
+  const found = await HIVV.scanHost(host);
+
+  if (!found.length) {
+    status.textContent = 'No AI endpoints found'; status.style.color = '#ff4757';
+    return;
+  }
+
+  status.textContent = `✓ Found ${found.length} endpoint(s)!`; status.style.color = '#00ff88';
+  results.style.display = 'block';
+  results.innerHTML = found.map((f, i) => `
+    <div style="background:#1a2a1a;padding:10px;border-radius:6px;margin-bottom:8px;border-left:3px solid #00ff88;">
+      <strong style="color:#00ff88;">${f.name}</strong> at port ${f.port}
+      <button class="btn btn-sm" style="margin-left:10px;" onclick="useEndpoint('${f.url}', ${f.port})">Use</button>
+    </div>
+  `).join('');
+  window._foundEndpoints = found;
+}
+
+function useEndpoint(url, port) {
+  const u = new URL(url);
+  $('#keyHost').value = u.hostname;
+  $('#keyPort').value = port;
+  detectLocal();
+}
+
+async function fullScan() {
+  const host = $('#scanHost').value.trim();
+  const results = $('#fullScanResults');
+  if (!host) { results.innerHTML = '<span style="color:#ff4757;">Enter an IP first</span>'; return; }
+
+  results.innerHTML = '<span style="color:#ffd93d;">Scanning...</span>';
+  const found = await HIVV.scanHost(host);
+
+  if (!found.length) {
+    results.innerHTML = '<span style="color:#ff4757;">No AI endpoints found</span>';
+    return;
+  }
+
+  results.innerHTML = found.map(f => `
+    <div style="background:#1a2a1a;padding:12px;border-radius:8px;margin-bottom:10px;border-left:3px solid #00ff88;">
+      <strong style="color:#00ff88;">${f.name}</strong> at ${f.url}
+      <button class="btn btn-sm btn-primary" style="margin-left:10px;" onclick="selectAndAdd('${f.url}')">Add to Keys</button>
+    </div>
+  `).join('');
+}
+
+function selectAndAdd(url) {
+  const u = new URL(url);
+  $('#keyProvider').value = 'local';
+  onProviderChange();
+  $('#keyHost').value = u.hostname;
+  $('#keyPort').value = u.port;
+  HIVV.initTabs();
+  document.querySelector('[data-tab="keys"]').click();
+  detectLocal();
+}
+
+async function addKey() {
+  const provider = $('#keyProvider').value;
+  const model = $('#keyModel').value.trim();
+  const endpoint = $('#keyEndpoint').value.trim();
+  const keyValue = $('#keyValue').value.trim();
+  const notes = $('#keyNotes').value.trim();
+  const host = $('#keyHost').value.trim();
+  const port = $('#keyPort').value.trim();
+  const btn = $('#addKeyBtn');
+  const result = $('#addKeyResult');
+
+  if (!provider) { result.style.display = 'block'; result.className = 'error-msg'; result.textContent = 'Select a provider'; return; }
+  if (HIVV.CLOUD_PROVIDERS.includes(provider) && !keyValue) { result.style.display = 'block'; result.className = 'error-msg'; result.textContent = 'API key required'; return; }
+
+  let apiEndpoint = null;
+  if (provider === 'custom') {
+    if (!endpoint) { result.style.display = 'block'; result.className = 'error-msg'; result.textContent = 'Endpoint required'; return; }
+    apiEndpoint = endpoint;
+  } else if (provider === 'local') {
+    apiEndpoint = `http://${host || 'localhost'}:${port || 8080}/v1/chat/completions`;
+  }
+
+  btn.disabled = true; btn.textContent = 'Adding...';
+  try {
+    const { data } = await HIVV.post('/api/user/keys', { provider, model, api_endpoint: apiEndpoint, key_value: keyValue, notes });
+    if (data.success) {
+      result.style.display = 'block'; result.className = 'success-msg'; result.textContent = '✓ Key added!';
+      $('#keyValue').value = ''; $('#keyNotes').value = '';
+      loadKeys(); loadStats();
+    } else {
+      result.style.display = 'block'; result.className = 'error-msg'; result.textContent = data.error;
+    }
+  } catch (e) {
+    result.style.display = 'block'; result.className = 'error-msg'; result.textContent = e.message;
+  } finally {
+    btn.disabled = false; btn.textContent = 'Add Key';
+  }
+}
+
+// ===== Stats =====
+async function loadStats() {
+  try {
+    const { data } = await HIVV.get('/api/usage/summary');
+    $('#statRequests').textContent = data.today?.requests || 0;
+    $('#statVisits').textContent = data.total?.requests || 0;
+  } catch (e) {}
+}
+
+// ===== Password =====
+function showPasswordForm() {
+  $('#passwordForm').style.display = 'block';
+  $('#changePasswordBtn').style.display = 'none';
+}
+
+function hidePasswordForm() {
+  $('#passwordForm').style.display = 'none';
+  $('#changePasswordBtn').style.display = 'inline-block';
+  $('#currentPassword').value = '';
+  $('#newPassword').value = '';
+  $('#confirmPassword').value = '';
+  $('#passwordSuccess').style.display = 'none';
+  $('#passwordError').style.display = 'none';
+}
+
+async function changePassword(e) {
+  e.preventDefault();
+  const current = $('#currentPassword').value;
+  const newPass = $('#newPassword').value;
+  const confirm = $('#confirmPassword').value;
+  const success = $('#passwordSuccess');
+  const error = $('#passwordError');
+
+  if (newPass !== confirm) { error.style.display = 'block'; error.textContent = 'Passwords do not match'; success.style.display = 'none'; return; }
+
+  try {
+    const { data } = await HIVV.put('/api/auth/password', { current_password: current, new_password: newPass });
+    if (data.success) {
+      success.style.display = 'block'; success.textContent = '✓ Password changed!'; error.style.display = 'none';
+      $('#currentPassword').value = ''; $('#newPassword').value = ''; $('#confirmPassword').value = '';
+    } else {
+      error.style.display = 'block'; error.textContent = data.error; success.style.display = 'none';
+    }
+  } catch (e) {
+    error.style.display = 'block'; error.textContent = e.message; success.style.display = 'none';
+  }
+}
+
+// Start
+init();
+</script>
+</body>
+</html>

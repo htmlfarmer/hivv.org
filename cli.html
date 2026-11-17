@@ -1,0 +1,270 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>hivv CLI — the friendly network-agent gateway</title>
+  <meta name="description" content="One command to install the hivv CLI — join the distributed AI network. Chat across 23 providers. Run open models locally. Your CPU/GPU helps solve Earths hardest problems, together.">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🐝</text></svg>">
+  <style>
+  :root{
+    --honey:#d97706; --honey-dim:#92400e; --honey-bright:#fbbf24;
+    --comb:#fef3c7; --hive:#1c1917; --wax:#f5f5f4;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{background:var(--wax);color:var(--hive);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;line-height:1.55}
+  a{color:var(--honey);text-decoration:none}
+  a:hover{color:var(--honey-bright);text-decoration:underline}
+  .wrap{max-width:920px;margin:0 auto;padding:32px 20px 80px}
+  .hero{text-align:center;padding:40px 0 24px}
+  .hero h1{font-size:clamp(2.2rem,5vw,3.4rem);font-weight:800;letter-spacing:-.02em;background:linear-gradient(120deg,var(--honey),var(--honey-bright));-webkit-background-clip:text;background-clip:text;color:transparent}
+  .hero .bee{font-size:5rem;display:block;margin-bottom:12px;filter:drop-shadow(0 6px 12px rgba(217,119,6,.25))}
+  .hero p{font-size:1.15rem;color:var(--honey-dim);max-width:560px;margin:14px auto 0}
+  .tagline{display:inline-block;padding:4px 12px;border-radius:999px;background:var(--comb);color:var(--honey-dim);font-size:.85rem;font-weight:600;margin-bottom:8px}
+.install-card{background:var(--hive);color:#fef3c7;border-radius:14px;padding:22px 26px;margin:28px 0;box-shadow:0 12px 40px -8px rgba(217,119,6,.3);position:relative;overflow:hidden}
+.install-card::before{content:"";position:absolute;top:0;left:0;right:0;height:3px;background:linear-gradient(90deg,var(--honey),var(--honey-bright),var(--honey))}
+.install-label{font-size:.75rem;text-transform:uppercase;letter-spacing:.12em;color:var(--honey-bright);margin-bottom:8px;font-weight:700}
+.install-cmd{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:1.05rem;color:#fbbf24;background:transparent;border:none;white-space:pre-wrap;word-break:break-all}
+.install-cmd .flag{color:#fef3c7}
+.copy{position:absolute;top:18px;right:18px;background:transparent;border:1px solid #44403c;color:var(--honey-bright);padding:4px 10px;border-radius:6px;font-size:.75rem;cursor:pointer;transition:background .15s}
+.copy:hover{background:#292524}
+.platform-tabs{display:flex;gap:8px;margin:14px 0 0}
+.platform-tabs button{background:transparent;border:1px solid #44403c;color:#a8a29e;padding:6px 14px;border-radius:6px;cursor:pointer;font-size:.85rem}
+.platform-tabs button.active{background:var(--honey);border-color:var(--honey);color:#1c1917;font-weight:600}
+.tab-pane{display:none}
+.tab-pane.active{display:block}
+h2{font-size:1.6rem;font-weight:700;margin:48px 0 14px;letter-spacing:-.01em}
+h2 .num{display:inline-block;width:30px;height:30px;background:var(--comb);color:var(--honey);border-radius:8px;text-align:center;line-height:30px;font-size:.95rem;font-weight:700;margin-right:10px}
+p{margin-bottom:14px;color:#44403c}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px;margin:18px 0}
+.card{background:white;border:1px solid #e7e5e4;border-radius:12px;padding:18px 20px;transition:transform .15s,box-shadow .15s,border-color .15s}
+.card:hover{transform:translateY(-2px);box-shadow:0 8px 24px -8px rgba(217,119,6,.2);border-color:var(--honey)}
+.card h3{font-size:1rem;font-weight:700;margin-bottom:6px;color:var(--hive)}
+.card p{font-size:.9rem;margin:0;color:#78716c}
+.cmd-list{background:var(--hive);color:#fef3c7;border-radius:12px;padding:8px 0;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.95rem;overflow:hidden;margin:18px 0}
+.cmd-row{display:flex;gap:14px;padding:8px 18px;border-bottom:1px solid #292524}
+.cmd-row:last-child{border-bottom:none}
+.cmd-row .name{color:var(--honey-bright);min-width:140px;font-weight:600}
+.cmd-row .desc{color:#d6d3d1;flex:1}
+.cmds{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px;margin:14px 0}
+.cmds .col{background:white;border:1px solid #e7e5e4;border-radius:10px;padding:16px 18px}
+.cmds .col h4{font-size:.85rem;text-transform:uppercase;letter-spacing:.08em;color:var(--honey);margin-bottom:10px;font-weight:700}
+.cmds .col ul{list-style:none}
+.cmds .col li{padding:5px 0;font-size:.92rem;border-bottom:1px solid #f5f5f4}
+.cmds .col li:last-child{border:none}
+.cmds .col code{color:var(--honey-dim);font-weight:600;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+.examples{background:var(--comb);border-left:4px solid var(--honey);border-radius:0 10px 10px 0;padding:18px 22px;margin:14px 0}
+.examples pre{background:transparent;color:var(--hive);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.92rem;line-height:1.7;overflow-x:auto}
+.examples .comment{color:var(--honey-dim)}
+.feature-row{display:flex;align-items:flex-start;gap:16px;padding:14px 0;border-bottom:1px solid #e7e5e4}
+.feature-row:last-child{border:none}
+.feature-row .icon{font-size:1.6rem;flex-shrink:0}
+.feature-row strong{display:block;margin-bottom:2px;color:var(--hive)}
+.feature-row p{margin:0;font-size:.92rem;color:#57534e}
+.cta-row{display:flex;gap:12px;flex-wrap:wrap;margin:28px 0}
+.btn{display:inline-block;padding:11px 22px;border-radius:8px;font-weight:600;font-size:.95rem;transition:transform .15s}
+.btn-primary{background:var(--honey);color:white}
+.btn-primary:hover{background:var(--honey-bright);color:white;text-decoration:none;transform:translateY(-1px)}
+.btn-ghost{background:transparent;border:1px solid var(--honey);color:var(--honey)}
+.btn-ghost:hover{background:var(--comb);text-decoration:none}
+footer{text-align:center;color:var(--honey-dim);font-size:.85rem;padding-top:30px;border-top:1px solid #e7e5e4;margin-top:50px}
+footer a{color:var(--honey-dim)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="hero">
+    <span class="bee">🐝</span>
+    <h1>hivv CLI</h1>
+    <div class="tagline">v0.2.0 · MIT · stdlib only</div>
+    <p>One command to install a friendly network-agent gateway. Chat across <strong>23 providers</strong>. Optionally join the hivv bee swarm and earn compute credits.</p>
+  </header>
+
+  <div class="install-card">
+    <button class="copy" onclick="copyCmd(this)">copy</button>
+    <div class="install-label">Install · macOS / Linux / WSL</div>
+    <pre class="install-cmd" data-tab="unix">curl <span class="flag">-sSL</span> https://hivv.org/install-hivv.sh | bash</pre>
+    <pre class="install-cmd" data-tab="win" style="display:none">iwr <span class="flag">-useb</span> https://hivv.org/install-hivv.ps1 | iex</pre>
+
+    <div class="platform-tabs">
+      <button data-tab="unix" class="active">macOS / Linux</button>
+      <button data-tab="win">Windows PowerShell</button>
+    </div>
+  </div>
+
+  <div class="install-card install-card-secondary">
+    <button class="copy" onclick="copyCmd(this)">copy</button>
+    <div class="install-label">Install <strong>+ local LLM</strong> (llama.cpp · memory-efficient) · one shot</div>
+    <pre class="install-cmd" data-tab="unix">curl <span class="flag">-sSL</span> https://hivv.org/install-hivv.sh | bash <span class="flag">-s --</span> <span class="flag">--with-llm --yes</span></pre>
+    <pre class="install-cmd" data-tab="win" style="display:none">iwr <span class="flag">-useb</span> https://hivv.org/install-hivv.ps1 | iex; <span class="flag">Install-Hivv -WithLlm -Yes</span></pre>
+    <p class="install-note">Detects your hardware (CPU cores / RAM / GPU), installs llama.cpp (handles many concurrent requests, low memory), and downloads the right model:
+    <code>qwen3:8b-q4</code> for NVIDIA 4–12 GB VRAM, <code>qwen3:14b</code> for ≥12 GB,
+    <code>gemma4:e2b</code> for 8-core / no-GPU, <code>qwen3:1.7b</code> for 4–7 cores, <code>qwen3:0.6b</code> for tiny boxes.
+    Re-run with <code>--no-llm</code> to skip.</p>
+  </div>
+
+  <div class="cta-row">
+    <a class="btn btn-ghost" href="/openapi.yaml" download>Download OpenAPI spec</a>
+    <a class="btn btn-ghost" href="/docs">Interactive API docs</a>
+    <a class="btn btn-ghost" href="/">← Back to hivv.org</a>
+  </div>
+
+  <h2><span class="num">1</span>What you just installed</h2>
+  <p>A stdlib-only Python CLI (no <code>pip install</code>) that lives at <code>~/.local/lib/hivv/hivv-cli.py</code> with a <code>hivv</code> launcher in your <code>PATH</code>. It auto-updates on every <code>hivv start</code> if a newer version ships.</p>
+
+  <div class="grid">
+    <div class="card">
+      <h3>🐝 Chat across 23 providers</h3>
+      <p>Anthropic, OpenAI, Google, Mistral, Groq, DeepSeek, OpenRouter, Qwen, Together, plus 14 self-hosted backends (Ollama, llama.cpp, vLLM, LM Studio, KoboldCPP, LocalAI, …).</p>
+    </div>
+    <div class="card">
+      <h3>🤝 Join the swarm (optional)</h3>
+      <p><code>hivv start</code> registers your machine as a bee. Heartbeats every 60s with CPU/MEM/disk/GPU metrics. You choose to volunteer or not.</p>
+    </div>
+    <div class="card">
+      <h3>🔐 Hardware-bound identity</h3>
+      <p>Your bee id is mixed with your machine id (Linux/macOS/Windows). A copied install won't impersonate — the hub sees a new HW id.</p>
+    </div>
+    <div class="card">
+      <h3>🪶 Zero deps</h3>
+      <p>Just Python 3.7+. No pip packages, no Docker, no Node, no build tools. The whole CLI is ~27 KB.</p>
+    </div>
+  </div>
+
+  <h2><span class="num">2</span>Two ways to use it</h2>
+  <div class="cmds">
+    <div class="col">
+      <h4>One-shot · talk to the gateway</h4>
+      <ul>
+        <li><code>hivv health</code> — ping the hub</li>
+        <li><code>hivv chat hello there</code> — stream a reply</li>
+        <li><code>hivv completions MSG...</code> — OpenAI-style JSON</li>
+        <li><code>hivv metrics --local</code> — your local metrics</li>
+        <li><code>hivv nodes</code> — list all bees online</li>
+        <li><code>hivv whoami</code> — your session + hw id</li>
+      </ul>
+    </div>
+    <div class="col">
+      <h4>Operator · control your bee</h4>
+      <ul>
+        <li><code>hivv start</code> · <code>stop</code> · <code>restart</code></li>
+        <li><code>hivv status</code> · <code>logs [-f]</code></li>
+        <li><code>hivv info</code> · <code>doctor</code> · <code>speed</code></li>
+        <li><code>hivv free</code> · <code>pct --watch=2</code></li>
+        <li><code>hivv update</code> · <code>upgrade</code></li>
+        <li><code>hivv uninstall</code> · <code>test</code></li>
+      </ul>
+    </div>
+    <div class="col">
+      <h4>Friendly · human touches</h4>
+      <ul>
+        <li><code>hivv hi</code> — first-run greeter</li>
+        <li><code>hivv up</code> — quick 3-line status check</li>
+        <li><code>hivv thanks</code> — one-line warm reply</li>
+        <li><code>hivv panic</code> — 4-step emergency help</li>
+        <li><code>hivv support "question"</code> — AI diagnosis</li>
+        <li><code>hivv volunteer on</code> — opt in to swarm jobs</li>
+        <li><code>hivv llm status</code> — local-model helper</li>
+      </ul>
+    </div>
+  </div>
+
+  <h2><span class="num">3</span>Try it now</h2>
+  <div class="examples">
+<pre><span class="comment"># confirm the install</span>
+hivv --help
+hivv up        <span class="comment"># quick 3-line status check</span>
+
+<span class="comment"># stream a chat reply (any model)</span>
+hivv chat "explain transformers in 3 sentences"
+
+<span class="comment"># local LLM is auto-offered during install — or force it:</span>
+hivv chat "hello" --local    <span class="comment"># use local model (needs --with-llm during install)</span>
+hivv llm suggest               <span class="comment"># hardware-tiered model recommendation</span>
+hivv llm suggest --json        <span class="comment"># machine-readable, for scripts</span>
+hivv llm status                <span class="comment"># detect + bench + suggest in one shot</span>
+
+<span class="comment"># join the bee swarm — heartbeats every 60s</span>
+hivv start
+hivv status      <span class="comment"># pid, uptime, hub health, last-heartbeat</span>
+hivv logs -f     <span class="comment"># tail the agent log</span>
+hivv stop
+
+<span class="comment"># one-shot health check</span>
+hivv doctor      <span class="comment"># pasteable support bundle</span>
+hivv speed       <span class="comment"># latency + throughput benchmark</span>
+hivv test        <span class="comment"># doctor + speed + a remote chat</span></pre>
+  </div>
+
+  <h2><span class="num">4</span>How the swarm works</h2>
+  <p>When you run <code>hivv start</code>, the agent:</p>
+  <div class="feature-row">
+    <span class="icon">1️⃣</span>
+    <div><strong>Registers with the hub</strong><p>POSTs <code>/api/nodes/register</code> with a stable id derived from your hostname + machine-id. Server returns a <code>node_id</code>.</p></div>
+  </div>
+  <div class="feature-row">
+    <span class="icon">2️⃣</span>
+    <div><strong>Sends heartbeats every 60s</strong><p>Real CPU, memory, disk, and (if NVIDIA) GPU metrics. Hub tracks your bee in the swarm.</p></div>
+  </div>
+  <div class="feature-row">
+    <span class="icon">3️⃣</span>
+    <div><strong>Long-polls the inbox between heartbeats</strong><p>Hub can ask you to update, gracefully shut down, or (Phase 2) run a job. Works through closed firewalls — you initiate, hub responds.</p></div>
+  </div>
+  <div class="feature-row">
+    <span class="icon">4️⃣</span>
+    <div><strong>Auto-updates itself</strong><p>On <code>update_available</code> message, the agent atomically replaces <code>hivv-cli.py</code>, logs the version, and re-execs. Zero downtime.</p></div>
+  </div>
+
+  <h2><span class="num">5</span>Privacy &amp; safety</h2>
+  <p>You're in control of every byte that leaves your machine:</p>
+  <ul style="margin:14px 0 14px 22px;color:#44403c">
+    <li><strong>Volunteer opt-in</strong> — by default your bee only sends heartbeats. Enable <code>hivv volunteer on</code> to run other people's jobs.</li>
+    <li><strong>Log scrubbing</strong> — <code>api_key=</code>, <code>password=</code>, <code>Authorization: Bearer</code>, JWTs, and AWS/GitHub/Slack tokens are stripped before logs ship to disk or chat replies.</li>
+    <li><strong>256-bit bearer token</strong> — generated on first run, stored at <code>~/.config/hivv/auth.json</code> with mode <code>0600</code>. HMAC-SHA256 signed requests with 5-min replay window.</li>
+    <li><strong>Graceful degrade</strong> — older hubs without inbox support see heartbeats only; no errors, no crashes.</li>
+  </ul>
+
+  <h2><span class="num">6</span>For developers</h2>
+  <div class="cmd-list">
+    <div class="cmd-row"><span class="name">OpenAPI spec</span><span class="desc"><a href="/openapi.yaml" style="color:#fbbf24">/openapi.yaml</a> · Swagger UI at <a href="/docs" style="color:#fbbf24">/docs</a></span></div>
+    <div class="cmd-row"><span class="name">Public API</span><span class="desc"><code>GET /api/health</code> · <code>GET /api/public/status</code> · <code>POST /api/chat</code></span></div>
+    <div class="cmd-row"><span class="name">Auth</span><span class="desc"><code>POST /api/auth/register</code> · <code>POST /api/auth/login</code> · session cookie</span></div>
+    <div class="cmd-row"><span class="name">Agent protocol</span><span class="desc"><code>POST /api/nodes/register</code> · <code>POST /api/nodes/&lt;id&gt;/heartbeat</code> · <code>GET /api/agents/&lt;id&gt;/inbox</code></span></div>
+  </div>
+
+  <div class="cta-row">
+    <a class="btn btn-primary" href="/docs">Read the API docs →</a>
+    <a class="btn btn-ghost" href="/openapi.yaml" download>Download OpenAPI</a>
+  </div>
+
+  <h2 id="uninstall"><span class="num">7</span>Uninstall</h2>
+  <div class="examples">
+<pre><span class="comment"># remove hivv CLI and service (keeps config + logs)</span>
+curl -sSL https://hivv.org/install-hivv.sh | bash -s -- --uninstall
+
+<span class="comment"># also remove config and state</span>
+rm -rf ~/.config/hivv ~/.local/share/hivv</pre>
+  </div>
+
+</div>
+
+<footer>
+  <p>🐝 hivv.org · <a href="/">home</a> · <a href="/cli.html">CLI</a> · <a href="/docs">docs</a></p>
+</footer>
+
+<script>
+document.querySelectorAll('.platform-tabs button').forEach(b=>{
+  b.onclick=()=>{
+    const t=b.dataset.tab;
+    document.querySelectorAll('.platform-tabs button').forEach(x=>x.classList.toggle('active',x===b));
+    document.querySelectorAll('.install-cmd').forEach(c=>c.style.display=(c.dataset.tab===t?'block':'none'));
+  };
+});
+function copyCmd(btn){
+  const cmd=btn.parentElement.querySelector('.install-cmd:not([style*="none"])').textContent;
+  navigator.clipboard.writeText(cmd).then(()=>{btn.textContent='copied!';setTimeout(()=>btn.textContent='copy',1500);});
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,562 @@
+openapi: 3.0.3
+info:
+  title: HIVV.org Public API
+  version: 0.2.0
+  description: |
+    HIVV.org — the friendly distributed AI network gateway.
+
+    ## Overview
+
+    HIVV routes requests across **23 providers** (Anthropic, OpenAI, Google,
+    Mistral, Groq, DeepSeek, OpenRouter, Qwen, Together, plus 14 self-hosted
+    backends like Ollama, llama.cpp, vLLM, LM Studio, KoboldCPP, LocalAI).
+
+    **Any AI can CONSUME** (chat, completions) or **JOIN as a provider**:
+    - Path A: `POST /api/keys/donate` with a cloud API key (30 seconds, no install)
+    - Path B: `POST /api/keys/donate` with a self-hosted endpoint URL
+    - Path C: Install the CLI (`curl -sSL https://hivv.org/install-hivv.sh | bash`), run `hivv start`, serve an LLM
+
+    Bee-themed CLI commands: `hivv bees` (list nodes), `hivv bee <name>` (inspect),
+    `hivv swarm <q>` (fan out to multiple models), `hivv waggle <name>` (reachability check),
+    `hivv drone` (volunteer status).
+
+    ## Auth
+
+    Most public endpoints need no auth. Agent endpoints (`/api/nodes/*`)
+    accept a per-install bearer token + HMAC signature (see
+    `/api/agents/<id>/inbox` for the 2-way long-poll channel — Phase A).
+
+    ```
+    Authorization: Bearer <token>
+    X-Auth-Timestamp: 1789598000
+    X-Auth-Nonce: 7f3c…
+    X-Auth-Signature: <hex sha256-hmac>
+    ```
+
+    See the `hivv-cli.py` source for the reference signing implementation
+    (~100 lines, stdlib only).
+
+    ## Rate limits
+
+    - `/api/chat` — 60 req/min per IP (default; tuneable per-user)
+    - `/api/auth/login`, `/register` — 5 req/min per IP
+    - Everything else — 600 req/min per IP
+
+    ## Interactive docs
+
+    Rendered at <https://hivv.org/docs> (Swagger UI).
+    Downloadable at <https://hivv.org/openapi.yaml>.
+
+    ## CLI
+
+    `curl -sSL https://hivv.org/install-hivv.sh | bash`
+  contact:
+    url: https://hivv.org
+    email: support@hivv.org
+  license:
+    name: MIT
+    url: https://hivv.org/terms
+servers:
+  - url: https://hivv.org
+    description: Production
+  - url: http://localhost:3010
+    description: Local dev
+tags:
+  - name: Health
+    description: Liveness + global status (public)
+  - name: Chat
+    description: The HIVV gateway — chat completions across 23 providers
+  - name: Bee
+    description: Public bee endpoints (chat-by-username)
+  - name: Agents
+    description: Agent/bee management (control plane)
+  - name: Metrics
+    description: Throughput, errors, model performance
+  - name: Rate limits
+    description: Per-IP / per-user / per-node rate limits
+  - name: Auth
+    description: Account, login, registration, OAuth
+  - name: Inbox
+    description: Hub→bee long-poll channel (Phase A 2-way comms)
+paths:
+  /api/health:
+    get:
+      tags: [Health]
+      summary: Basic liveness
+      description: |
+        Returns 200 with `{status: "healthy", database: "connected", providers: <count>}`.
+      responses:
+        '200':
+          description: Healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: healthy }
+                  database: { type: string, example: connected }
+                  providers: { type: integer, example: 23 }
+        '503':
+          description: Degraded
+
+  /api/public/status:
+    get:
+      tags: [Health]
+      summary: Rich public status
+      description: |
+        Gateway uptime, all providers, recent activity, today/hour counters.
+        Used by `hivv --help`, dashboards, and the `/status` page.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  gateway:
+                    type: object
+                    properties:
+                      version: { type: string, example: v2 }
+                      uptime_process: { type: integer }
+                      providers_active: { type: integer }
+                      local_backends:
+                        type: array
+                        items: { type: object }
+                  totals:
+                    type: object
+                    properties:
+                      users: { type: string }
+                      keys: { type: string }
+                      visitors: { type: integer }
+                  today:
+                    type: object
+                    properties:
+                      requests: { type: integer }
+                      tokens: { type: integer }
+                  last_hour:
+                    type: object
+                  providers:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        name: { type: string, example: anthropic }
+                        display_name: { type: string, example: "Anthropic Claude" }
+                        is_cloud: { type: boolean }
+                        models:
+                          type: array
+                          items: { type: string }
+                  recent:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        model: { type: string }
+                        tokens: { type: integer }
+                        latency_ms: { type: integer }
+                        status: { type: string, enum: [success, error] }
+                        ts: { type: string, format: date-time }
+
+  /api/chat:
+    post:
+      tags: [Chat]
+      summary: Stream a chat reply (SSE)
+      description: |
+        Smart-default endpoint used by `hivv chat`. Streams SSE chunks.
+        Each event is `data: {"delta": "..."}` followed by `data: [DONE]`.
+        Auth is optional; logged-in users get their model preferences + history.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [message]
+              properties:
+                message: { type: string, description: "The user's prompt." }
+                model: { type: string, description: "Optional model override (e.g. gpt-4o, claude-sonnet-4-20250514)." }
+                stream: { type: boolean, default: true }
+                visitor_id: { type: string, description: "Anonymous visitor id (from /api/visitor/id)." }
+      responses:
+        '200':
+          description: SSE stream
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                example: |
+                  data: {"delta": "Hello"}
+                  data: {"delta": "!"}
+                  data: [DONE]
+
+  /v1/chat/completions:
+    post:
+      tags: [Chat]
+      summary: OpenAI-compatible chat completions
+      description: |
+        Drop-in replacement for OpenAI's `/v1/chat/completions`. Accepts
+        `{model, messages, stream}` and returns either a JSON or SSE response.
+        Used by `hivv completions` and any tool that already speaks OpenAI.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [messages]
+              properties:
+                model: { type: string, default: hivv, example: hivv }
+                messages:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      role: { type: string, enum: [system, user, assistant] }
+                      content: { type: string }
+                stream: { type: boolean, default: false }
+                max_tokens: { type: integer }
+                temperature: { type: number }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: string }
+                  object: { type: string, example: chat.completion }
+                  choices:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        index: { type: integer }
+                        message:
+                          type: object
+                          properties:
+                            role: { type: string }
+                            content: { type: string }
+                        finish_reason: { type: string }
+
+  /bee/v1/{username}:
+    get:
+      tags: [Bee]
+      summary: Chat with a public bee by username (v1 — legacy)
+      parameters:
+        - name: username
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: HTML chat page
+          content:
+            text/html:
+              schema: { type: string }
+
+  /bee/v2/{username}:
+    get:
+      tags: [Bee]
+      summary: Chat with a public bee by username (v2)
+      parameters:
+        - name: username
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: HTML chat page
+
+  /bee/{username}:
+    get:
+      tags: [Bee]
+      summary: Chat with a public bee (current stable)
+      parameters:
+        - name: username
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: HTML chat page
+
+  /api/visitor/id:
+    get:
+      tags: [Auth]
+      summary: Get an anonymous visitor id (for chat history)
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  visitor_id: { type: string, example: v_8a3c1f4d2e5b }
+
+  /api/auth/csrf-token:
+    get:
+      tags: [Auth]
+      summary: Fetch a CSRF token (required for POSTs from browser)
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  csrfToken: { type: string }
+
+  /api/auth/register:
+    post:
+      tags: [Auth]
+      summary: Create an account
+      description: |
+        Rate limited to 5/min per IP. Email + password. Returns a session cookie.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string, format: email }
+                password: { type: string, minLength: 8 }
+                username: { type: string }
+      responses:
+        '200':
+          description: Account created
+          headers:
+            Set-Cookie:
+              schema: { type: string }
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  user:
+                    type: object
+                    properties:
+                      id: { type: string }
+                      email: { type: string }
+                      username: { type: string }
+        '400': { description: Invalid input }
+        '409': { description: Email already registered }
+        '429': { description: Rate limited (5/min) }
+
+  /api/auth/login:
+    post:
+      tags: [Auth]
+      summary: Log in (email/username + password)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                email: { type: string }
+                username: { type: string }
+                password: { type: string }
+      responses:
+        '200':
+          description: Logged in (session cookie set)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  user:
+                    type: object
+        '401': { description: Wrong credentials }
+        '429': { description: Rate limited }
+
+  /api/auth/logout:
+    post:
+      tags: [Auth]
+      summary: Log out (clears session cookie)
+      responses:
+        '200': { description: OK }
+
+  /api/auth/me:
+    get:
+      tags: [Auth]
+      summary: Get current session
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user:
+                    type: object
+                    nullable: true
+
+  /api/nodes/register:
+    post:
+      tags: [Agents]
+      summary: Register a new bee/node (used by `hivv start`)
+      description: |
+        Body must include a stable `id` or `token`; server derives `node_id`
+        from `body.id || body.token`. Phase A also sends `hw_id`,
+        `auth_token`, and `capabilities`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [id, hostname, version]
+              properties:
+                id: { type: string, description: "Stable per-host id (cli-<hostname>-<hw-id-prefix>)." }
+                token: { type: string, description: "Alternative id field; server uses id || token." }
+                hostname: { type: string }
+                version: { type: string }
+                name: { type: string }
+                ip: { type: string }
+                capabilities:
+                  type: array
+                  items: { type: string }
+                max_concurrent_jobs: { type: integer }
+                hw_id: { type: string, description: "linux-<machine-id> / macos-<uuid> / windows-<uuid>" }
+                auth_token: { type: string, description: "256-bit bearer token." }
+                metrics: { type: object }
+      responses:
+        '200':
+          description: Registered
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  node_id: { type: string }
+        '400': { description: "Missing id/token" }
+
+  /api/nodes/{node_id}/heartbeat:
+    post:
+      tags: [Agents]
+      summary: Send a heartbeat (every HEARTBEAT_S seconds, default 60)
+      parameters:
+        - name: node_id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                hostname: { type: string }
+                version: { type: string }
+                ts: { type: integer, description: "Unix epoch seconds." }
+                metrics:
+                  type: object
+                  description: |
+                    `_collect_metrics()` snapshot:
+                    `{cpu_count, load_1, load_5, load_15, mem_total_mb,
+                    mem_used_mb, mem_pct, disk_total_gb, disk_used_gb,
+                    disk_pct, gpus: [{index, name, mem_total_mb,
+                    mem_used_mb, util_pct, temp_c}], ts, uptime_s}`
+      responses:
+        '200': { description: OK }
+        '404': { description: "node_id not registered — re-register." }
+
+  /api/agents/{node_id}/inbox:
+    get:
+      tags: [Inbox]
+      summary: Long-poll inbox (Phase A — hub→bee 2-way comms)
+      description: |
+        Long-poll endpoint. Server holds the request open for up to `wait`
+        seconds (capped ~50s). Returns immediately if there are queued
+        messages. Returns 200 with `{messages: []}` if nothing.
+
+        Used by `hivv start`'s background agent loop, between heartbeats.
+
+        **Server-side (to be implemented):**
+        - verify `Authorization: Bearer`
+        - verify HMAC signature with 5-min replay window
+        - return queued messages addressed to this `node_id`
+        - emit `update_available` when a new client version is published
+        - emit `shutdown_requested` for graceful drain
+        - emit `job_available` for queued jobs (Phase 2)
+      parameters:
+        - name: node_id
+          in: path
+          required: true
+          schema: { type: string }
+        - name: wait
+          in: query
+          schema: { type: integer, default: 50, maximum: 60 }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  messages:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string, example: m_abc123 }
+                        type:
+                          type: string
+                          enum: [update_available, shutdown_requested, log, job_available]
+                        payload: { type: object }
+                        ts: { type: integer }
+        '404':
+          description: "Hub does not implement inbox (legacy mode — CLI logs 'inbox 404 → heartbeat-only')."
+        '401':
+          description: "Bad signature / unknown node."
+
+  /api/agents/{node_id}/inbox/ack:
+    post:
+      tags: [Inbox]
+      summary: Ack delivered message ids (prevents redelivery)
+      parameters:
+        - name: node_id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                delivered:
+                  type: array
+                  items: { type: string }
+      responses:
+        '200': { description: Acknowledged }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: "Per-install bearer token from auth.json (created on first CLI run)."
+    signedRequest:
+      type: apiKey
+      in: header
+      name: X-Auth-Signature
+      description: |
+        HMAC-SHA256 over `(timestamp + nonce + method + path + sha256(body))`
+        keyed by the bearer token. Required for inbox endpoints.
+security:
+  - bearerAuth: []
+  - signedRequest: []

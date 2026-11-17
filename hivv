@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+# hivv — minimal launcher for the HIVV.org client CLI.
+# Downloads + installs the client on first run, then execs it.
+# Self-heals: re-downloads if the local CLI is missing, corrupted,
+# or not even Python (e.g. a CDN served an HTML error page).
+#
+# Usage:
+#   hivv --help
+#   hivv start
+#   hivv chat "hello world"
+#
+# This file is served at https://hivv.org/hivv and is the canonical
+# way to invoke the CLI. It is also installed by install-hivv.sh.
+#
+# NOTE: the CLI is exec'd directly (not captured), so chat streams tokens
+# live and exit codes propagate. HIVV_FORCE_DOWNLOAD=1 refreshes first.
+set -euo pipefail
+
+SELF="${BASH_SOURCE[0]:-$0}"
+if [[ -L "$SELF" ]]; then SELF="$(readlink -f "$SELF" 2>/dev/null || readlink "$SELF")"; fi
+SELF_DIR="$(cd "$(dirname "$SELF")" 2>/dev/null && pwd || echo "$(dirname "$SELF")")"
+
+case "$SELF_DIR" in
+    */bin) PARENT_LIB="${SELF_DIR%/bin}/lib/hivv" ;;
+    *)     PARENT_LIB="$SELF_DIR" ;;
+esac
+
+CLIENT_URL="${HIVV_CLIENT_URL:-https://hivv.org/hivv-cli.py}"
+CLIENT_FILE="${HIVV_CLIENT_FILE:-$PARENT_LIB/hivv-cli.py}"
+
+need_python() {
+    if ! command -v python3 >/dev/null 2>&1; then
+        echo "[hivv] python3 not found. install it (apt install python3 / brew install python3 / winget install Python.Python.3.12)" >&2
+        exit 1
+    fi
+}
+
+need_curl_or_wget() {
+    if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
+        echo "[hivv] need curl or wget to download the client" >&2
+        exit 1
+    fi
+}
+
+download_client() {
+    need_curl_or_wget
+    mkdir -p "$(dirname "$CLIENT_FILE")" 2>/dev/null || {
+        echo "[hivv] cannot write to $(dirname "$CLIENT_FILE")" >&2
+        echo "[hivv] try: curl -sSL https://hivv.org/install-hivv.sh | bash" >&2
+        exit 1
+    }
+    echo "[hivv] fetching fresh client from $CLIENT_URL" >&2
+    local tmp
+    tmp=$(mktemp "${TMPDIR:-/tmp}/hivv-dl.XXXXXX")
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL "$CLIENT_URL" -o "$tmp" || { rm -f "$tmp"; echo "[hivv] download failed" >&2; exit 1; }
+    else
+        wget -qO "$tmp" "$CLIENT_URL" || { rm -f "$tmp"; echo "[hivv] download failed" >&2; exit 1; }
+    fi
+    if head -1 "$tmp" 2>/dev/null | grep -qiE "<!DOCTYPE|<html"; then
+        rm -f "$tmp"
+        echo "[hivv] server returned an HTML page, not the CLI — try again later" >&2
+        exit 1
+    fi
+    mv "$tmp" "$CLIENT_FILE"
+    chmod 0755 "$CLIENT_FILE"
+}
+
+# cheap integrity check: must start like Python source and actually compile
+cli_is_healthy() {
+    head -1 "$CLIENT_FILE" 2>/dev/null | grep -qE "^#!.*/(env )?python" || return 1
+    python3 - "$CLIENT_FILE" <<'PYEOF' 2>/dev/null || return 1
+import sys
+try:
+    compile(open(sys.argv[1], encoding="utf-8").read(), sys.argv[1], "exec")
+except Exception:
+    sys.exit(1)
+PYEOF
+    return 0
+}
+
+need_python
+
+if [[ "${HIVV_FORCE_DOWNLOAD:-0}" == "1" ]] || [[ ! -f "$CLIENT_FILE" ]]; then
+    download_client
+elif ! cli_is_healthy; then
+    echo "[hivv] local CLI looks broken — re-downloading fresh copy..." >&2
+    download_client
+fi
+
+exec python3 "$CLIENT_FILE" "$@"

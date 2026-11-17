@@ -1,0 +1,21 @@
+// Merge into ~/.config/opencode/opencode.jsonc (global) or a project opencode.jsonc.
+// HIVV_API_KEY optional — leave unset for anonymous tier. `hivv setup` generates this for you.
+{
+  "$schema": "https://opencode.ai/config.json",
+  "providers": {
+    "hivv": {
+      "name": "HIVV",
+      "env": ["HIVV_API_KEY"],
+      "package": "@opencode/ai/providers/openai-compatible",
+      "settings": { "baseURL": "https://hivv.org/v1" },
+      "models": {
+        "auto":    { "name": "HIVV Auto", "capabilities": { "tools": true } },
+        "smart":   { "modelID": "auto", "name": "HIVV Smart", "body": { "route": { "mode": "quality" } }, "capabilities": { "tools": true } },
+        "fast":    { "modelID": "auto", "name": "HIVV Fast", "body": { "route": { "mode": "fast" } }, "capabilities": { "tools": true } },
+        "cheap":   { "modelID": "auto", "name": "HIVV Cheap", "body": { "route": { "mode": "cost" } }, "capabilities": { "tools": true } },
+        "private": { "modelID": "auto", "name": "HIVV Private", "body": { "route": { "mode": "private" } }, "capabilities": { "tools": true } }
+      }
+    }
+  },
+  "model": "hivv/auto"
+}

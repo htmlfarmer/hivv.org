@@ -1,0 +1,33 @@
+# hivv llama.cpp unit — USER SCOPE (non-root), one model per unit, foreground.
+#
+# Install (as your own user, no sudo):
+#   mkdir -p ~/.config/systemd/user
+#   cp llama-gemma.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now llama-gemma.service
+#   loginctl enable-linger $USER          # start at boot without a login session
+#
+# Rules that prevent crash loops:
+#   1. NEVER run the same model/port under BOTH system and user scope — the loser
+#      spins forever on "couldn't bind HTTP server socket". One scope only.
+#   2. One llama-server process per unit, in the foreground. No wrapper script with
+#      `&` + `wait` — systemd can't track children, so you get 90s start timeouts,
+#      all-or-nothing restarts, and "address already in use" races.
+#   3. Restart=on-failure (not always): a config error stays visible instead of looping.
+#   4. --host 127.0.0.1: keyless llama-server must not sit on a public interface.
+#      To serve peers use `hivv firewall --apply --mode lan` (or tailscale), not 0.0.0.0.
+
+[Unit]
+Description=llama-server - Gemma 4 E2B (:8080)
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/home/asher/llama.cpp/build/bin/llama-server --host 127.0.0.1 --port 8080 -m /home/asher/models/gemma-4-Q4_K_M/gemma-4-E2B-it-Q4_K_M.gguf -sm none -ngl 99 -t 8 -c 65536 --context-shift --keep 1024
+Restart=on-failure
+RestartSec=5
+StandardOutput=append:/home/asher/llama-server.log
+StandardError=append:/home/asher/llama-server.log
+
+[Install]
+WantedBy=default.target

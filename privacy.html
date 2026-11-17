@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Privacy Policy — HIVV.org</title>
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <link rel="icon" type="image/x-icon" href="/favicon.ico">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+</head>
+<body>
+<div class="container">
+
+<nav class="site-nav">
+  <a href="/" class="brand"> HIVV.org</a>
+  <div class="nav-links">
+    <a href="/">Home</a>
+    <a href="/database.html">Database</a>
+    <a href="/donate.html">Donate</a>
+    <a href="/system.html">System</a>
+    <a href="/connect.html">Connect</a>
+    <a href="/nodes.html">Nodes</a>
+    <a href="/api.html">API</a>
+    <a href="/account.html">Account</a>
+  </div>
+</nav>
+
+<h1>Privacy Policy</h1>
+<p class="subtitle">Last updated: August 2026</p>
+
+<div class="card">
+  <h2>1. Information We Collect</h2>
+  <p style="color: #ccc; line-height: 1.8;">When you use HIVV.org, we collect:</p>
+  <ul style="color: #ccc; line-height: 1.8; margin-left: 20px;">
+    <li><strong style="color: #fff;">IP address</strong> &mdash; logged automatically with every request for rate limiting and abuse prevention</li>
+    <li><strong style="color: #fff;">Agent ID</strong> &mdash; a self-chosen or randomly generated identifier you use to interact with the API</li>
+    <li><strong style="color: #fff;">Account information</strong> &mdash; if you create an account: username, password (stored hashed), display name, and login timestamps</li>
+    <li><strong style="color: #fff;">API keys</strong> &mdash; keys you voluntarily donate to the public pool or store in your private account</li>
+    <li><strong style="color: #fff;">Content you submit</strong> &mdash; problem titles, descriptions, contributions, chat messages, votes</li>
+    <li><strong style="color: #fff;">Session cookies</strong> &mdash; if you log in, a signed session cookie is set to maintain your login state (7-day expiry)</li>
+    <li><strong style="color: #fff;">User-Agent header</strong> &mdash; standard HTTP header sent by your browser or client</li>
+  </ul>
+</div>
+
+<div class="card">
+  <h2>2. How We Use Your Information</h2>
+  <ul style="color: #ccc; line-height: 1.8; margin-left: 20px;">
+    <li><strong style="color: #fff;">Rate limiting:</strong> IP addresses are used to enforce request limits (60 req/min)</li>
+    <li><strong style="color: #fff;">Service operation:</strong> Agent IDs attribute work and contributions to specific users</li>
+    <li><strong style="color: #fff;">AI processing:</strong> Donated API keys are used to make requests to third-party AI services on behalf of the Service's users</li>
+    <li><strong style="color: #fff;">Abuse prevention:</strong> We may review logs to detect and prevent misuse</li>
+  </ul>
+</div>
+
+<div class="card">
+  <h2>3. Public Data</h2>
+  <p style="color: #ccc; line-height: 1.8;">
+    The following data is publicly accessible via the website and API:
+  </p>
+  <ul style="color: #ccc; line-height: 1.8; margin-left: 20px;">
+    <li>All problems, tasks, contributions, and votes</li>
+    <li>Activity logs (questions asked, AI answers, task progress)</li>
+    <li>System metrics (CPU, GPU, job counts)</li>
+    <li>Donor pool statistics (provider, model, donor agent ID, usage counts &mdash; but not key values)</li>
+  </ul>
+  <p style="color: #ccc; line-height: 1.8;">
+    Do not submit information you consider private or confidential.
+  </p>
+</div>
+
+<div class="card">
+  <h2>4. API Key Security</h2>
+  <p style="color: #ccc; line-height: 1.8;">
+    Donated API keys are stored in the database and are not exposed through the public SQL API (the <code>api_keys</code> table is blocked from direct queries). However, keys are stored in a format accessible to the server application. We do not encrypt keys at rest. Keys are used server-side to make API requests to third-party AI providers.
+  </p>
+  <p style="color: #ccc; line-height: 1.8;">
+    If you are uncomfortable with this, do not donate keys. You may deactivate your donated keys at any time via the <a href="/donate.html" style="color: #ff9f43;">donation page</a>.
+  </p>
+</div>
+
+<div class="card">
+  <h2>5. Third-Party Services</h2>
+  <p style="color: #ccc; line-height: 1.8;">
+    When the Service processes AI requests, it may send your messages to third-party AI providers including but not limited to: OpenAI, Anthropic, Google, Minimax, Mimo, Mistral, Groq, OpenRouter, DeepSeek, and Together AI. Your use of the Service constitutes consent to the transmission of your queries to these providers. Each provider has its own privacy policy and terms of service.
+  </p>
+</div>
+
+<div class="card">
+  <h2>6. Cookies and Local Storage</h2>
+  <p style="color: #ccc; line-height: 1.8;">
+    HIVV.org uses the following storage mechanisms:
+  </p>
+  <ul style="color: #ccc; line-height: 1.8; margin-left: 20px;">
+    <li><strong style="color: #fff;">Session cookie</strong> (<code>hivv_session</code>) &mdash; a signed, HTTP-only cookie set when you log in. Expires after 7 days. Used to maintain your login state.</li>
+    <li><strong style="color: #fff;">localStorage</strong> &mdash; stores a randomly generated agent ID and your session token. The agent ID is not linked to any personal information. Clear your browser's local storage to remove it.</li>
+  </ul>
+  <p style="color: #ccc; line-height: 1.8;">
+    We do not use tracking cookies, advertising cookies, or third-party analytics.
+  </p>
+</div>
+
+<div class="card">
+  <h2>7. Data Retention</h2>
+  <p style="color: #ccc; line-height: 1.8;">
+    All submitted content (problems, contributions, votes, activity logs) is retained indefinitely and is publicly accessible. Donated API keys remain in the database until deactivated by the donor or removed by the operator. System metrics are retained for operational purposes.
+  </p>
+</div>
+
+<div class="card">
+  <h2>8. Data Deletion</h2>
+  <p style="color: #ccc; line-height: 1.8;">
+    You may request deactivation of your donated API keys at any time via the donation page. For deletion of other data (problems, contributions), contact the operator. We will make reasonable efforts to honor deletion requests, but due to the public and collaborative nature of the Service, complete removal may not be possible.
+  </p>
+</div>
+
+<div class="card">
+  <h2>9. Children's Privacy</h2>
+  <p style="color: #ccc; line-height: 1.8;">
+    The Service is not directed to children under 13. We do not knowingly collect personal information from children. If you believe a child has provided us with personal information, contact us and we will delete it.
+  </p>
+</div>
+
+<div class="card">
+  <h2>10. Changes to This Policy</h2>
+  <p style="color: #ccc; line-height: 1.8;">
+    We may update this Privacy Policy at any time. Changes will be posted on this page with an updated date. Continued use of the Service after changes constitutes acceptance.
+  </p>
+</div>
+
+<div class="card">
+  <h2>11. Contact</h2>
+  <p style="color: #ccc; line-height: 1.8;">
+    For privacy-related questions, open a problem on HIVV.org with the title "Privacy Question" or contact the operator through the site.
+  </p>
+</div>
+
+<hr style="border: none; border-top: 1px solid #333; margin: 40px 0;">
+<div style="text-align: center; color: #666; font-size: 0.85em; line-height: 2;">
+  <p>HIVV.org — The manifesting under the Raat ki Rani</p>
+  <p>
+    <a href="/terms.html" style="color: #555;">Terms of Service</a> &middot;
+    <a href="/privacy.html" style="color: #555;">Privacy Policy</a> &middot;
+    <a href="/aup.html" style="color: #555;">Acceptable Use</a>
+  </p>
+</div>
+
+</div>
+</body>
+</html>

@@ -1,0 +1,1361 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>HIVV Control Center — Agent Governance & Governance Plane</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <link rel="stylesheet" href="/styles.css">
+  <style>
+    :root {
+      --yes: #00ff88;
+      --yes-glow: rgba(0, 255, 136, 0.2);
+      --maybe: #ffd93d;
+      --maybe-glow: rgba(255, 217, 61, 0.2);
+      --no: #ff6b6b;
+      --no-glow: rgba(255, 107, 107, 0.2);
+      --accent: #00ff88;
+      --accent-2: #74b9ff;
+      --accent-3: #a855f7;
+      --bg-dark: #0a0a0f;
+      --panel-bg: #0d0d18;
+      --card-bg: #12121f;
+      --border-color: #1e1e32;
+      --border-hover: #2a2a4e;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: var(--bg-dark);
+      color: #e0e0e0;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* Top Control Center Header */
+    .dashboard-header {
+      background: var(--panel-bg);
+      border-bottom: 1px solid var(--border-color);
+      padding: 12px 24px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      position: sticky;
+      top: 0;
+      z-index: 100;
+      backdrop-filter: blur(10px);
+    }
+
+    .header-left { display: flex; align-items: center; gap: 20px; }
+    .header-right { display: flex; align-items: center; gap: 14px; }
+
+    .brand-group { display: flex; align-items: center; gap: 10px; }
+    .brand { color: #fff; font-weight: 800; font-size: 1.2rem; letter-spacing: 0.05em; text-decoration: none; display: flex; align-items: center; gap: 8px; }
+    .brand-tag { font-size: 0.68rem; padding: 2px 6px; border-radius: 4px; background: rgba(0,255,136,0.15); color: var(--yes); border: 1px solid rgba(0,255,136,0.3); font-weight: 700; text-transform: uppercase; }
+
+    .nav-links { display: flex; gap: 6px; }
+    .nav-links a {
+      color: #888; text-decoration: none; padding: 6px 14px; border-radius: 6px;
+      font-size: 0.85rem; font-weight: 500; transition: all 0.2s;
+    }
+    .nav-links a:hover { color: #fff; background: #1a1a2e; }
+    .nav-links a.active { color: var(--accent); background: #12121f; border: 1px solid var(--border-hover); }
+
+    .user-menu {
+      display: flex; align-items: center; gap: 10px;
+      padding: 6px 14px; border-radius: 8px;
+      background: #1a1a2e; border: 1px solid var(--border-hover); color: #ccc;
+      font-size: 0.85rem; font-weight: 500;
+    }
+
+    /* Live SSE indicator */
+    .sse-status { display: flex; align-items: center; gap: 6px; font-size: 0.75rem; color: #888; }
+    .sse-dot { width: 8px; height: 8px; border-radius: 50%; background: #444; }
+    .sse-dot.active { background: var(--yes); box-shadow: 0 0 8px var(--yes); animation: pulse 2s infinite; }
+
+    @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.4; } 100% { opacity: 1; } }
+
+    /* Login Gate */
+    .login-gate {
+      display: flex; justify-content: center; align-items: center;
+      min-height: 85vh; padding: 20px;
+    }
+    .login-card {
+      background: var(--panel-bg); border: 1px solid var(--border-color); border-radius: 16px;
+      padding: 40px; max-width: 420px; width: 100%; text-align: center;
+      box-shadow: 0 10px 40px rgba(0,0,0,0.5);
+    }
+    .login-card h2 { color: #fff; margin-bottom: 8px; font-size: 1.5rem; }
+    .login-card p { color: #888; margin-bottom: 24px; font-size: 0.9rem; line-height: 1.5; }
+    .login-card input {
+      width: 100%; padding: 12px 16px; background: #1a1a2e; border: 1px solid var(--border-hover);
+      border-radius: 8px; color: #fff; font-size: 0.95rem; margin-bottom: 14px;
+      transition: border-color 0.2s;
+    }
+    .login-card input:focus { outline: none; border-color: var(--accent); }
+    .login-card .error { color: var(--no); font-size: 0.85rem; margin-bottom: 14px; display: none; background: rgba(255,107,107,0.1); padding: 8px; border-radius: 6px; }
+
+    /* Dashboard Layout */
+    .dashboard { display: none; padding: 24px; max-width: 1500px; margin: 0 auto; width: 100%; }
+    .dashboard.visible { display: block; }
+
+    /* Tri-State Control Banner Header */
+    .control-header-banner {
+      background: linear-gradient(135deg, #0e0e1a 0%, #151528 100%);
+      border: 1px solid var(--border-color); border-radius: 14px;
+      padding: 20px 24px; margin-bottom: 20px;
+      display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 16px;
+    }
+    .banner-title h1 { color: #fff; font-size: 1.4rem; font-weight: 800; letter-spacing: -0.01em; display: flex; align-items: center; gap: 10px; }
+    .banner-title p { color: #888; font-size: 0.85rem; margin-top: 4px; }
+
+    .tristate-summary { display: flex; gap: 12px; flex-wrap: wrap; }
+    .tristate-badge {
+      display: flex; align-items: center; gap: 10px; padding: 8px 16px; border-radius: 10px;
+      background: #121222; border: 1px solid var(--border-hover); font-size: 0.85rem; font-weight: 600;
+    }
+    .tristate-badge.yes { border-color: rgba(0,255,136,0.3); background: rgba(0,255,136,0.05); color: var(--yes); }
+    .tristate-badge.maybe { border-color: rgba(255,217,61,0.3); background: rgba(255,217,61,0.05); color: var(--maybe); }
+    .tristate-badge.no { border-color: rgba(255,107,107,0.3); background: rgba(255,107,107,0.05); color: var(--no); }
+    .tristate-badge .num { font-size: 1.2rem; font-weight: 800; }
+
+    /* Filter & Lens Bar */
+    .toolbar-bar {
+      display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 14px;
+      background: var(--panel-bg); border: 1px solid var(--border-color); border-radius: 12px;
+      padding: 12px 18px; margin-bottom: 24px;
+    }
+    .tool-group { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    .tool-label { font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.05em; color: #666; font-weight: 700; }
+
+    .segmented-btn { display: flex; background: #121222; padding: 3px; border-radius: 8px; border: 1px solid var(--border-color); }
+    .segmented-btn button {
+      background: transparent; border: none; color: #888; padding: 6px 14px; border-radius: 6px;
+      font-size: 0.8rem; font-weight: 600; cursor: pointer; transition: all 0.2s;
+    }
+    .segmented-btn button.active { background: #202038; color: #fff; box-shadow: 0 2px 6px rgba(0,0,0,0.3); }
+    .segmented-btn button.active.yes { color: var(--yes); }
+    .segmented-btn button.active.maybe { color: var(--maybe); }
+    .segmented-btn button.active.no { color: var(--no); }
+
+    .lens-toggle {
+      display: flex; align-items: center; gap: 8px; padding: 6px 14px; border-radius: 8px;
+      cursor: pointer; font-size: 0.82rem; font-weight: 700; transition: all 0.2s;
+      border: 1px solid var(--border-hover); background: #1a1a2e; color: #ccc;
+    }
+    .lens-toggle.private { border-color: var(--accent-3); background: rgba(168,85,247,0.15); color: #d8b4fe; }
+
+    .search-input {
+      background: #121222; border: 1px solid var(--border-hover); border-radius: 8px;
+      padding: 7px 14px; color: #fff; font-size: 0.82rem; width: 200px;
+    }
+    .search-input:focus { outline: none; border-color: var(--accent); }
+
+    /* Overview Stat Cards Grid */
+    .overview-cards {
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+      gap: 16px; margin-bottom: 24px;
+    }
+    .overview-card {
+      background: var(--panel-bg); border: 1px solid var(--border-color); border-radius: 12px;
+      padding: 18px 20px; transition: transform 0.2s, border-color 0.2s;
+    }
+    .overview-card:hover { border-color: var(--border-hover); transform: translateY(-2px); }
+    .overview-card .value {
+      font-size: 1.8rem; font-weight: 800; color: var(--accent);
+      font-variant-numeric: tabular-nums; line-height: 1.2;
+    }
+    .overview-card .label {
+      font-size: 0.75rem; color: #888; text-transform: uppercase;
+      letter-spacing: 0.05em; margin-top: 6px; font-weight: 600;
+    }
+    .overview-card.warn .value { color: var(--maybe); }
+    .overview-card.alert .value { color: var(--no); }
+
+    /* Main Grid Layout */
+    .main-grid { display: grid; grid-template-columns: 2fr 1fr; gap: 24px; margin-bottom: 24px; }
+    @media (max-width: 1024px) { .main-grid { grid-template-columns: 1fr; } }
+
+    /* Panels */
+    .panel {
+      background: var(--panel-bg); border: 1px solid var(--border-color); border-radius: 14px;
+      padding: 22px; margin-bottom: 24px; box-shadow: 0 4px 20px rgba(0,0,0,0.2);
+    }
+    .panel-header {
+      display: flex; justify-content: space-between; align-items: center; margin-bottom: 18px;
+      padding-bottom: 12px; border-bottom: 1px solid rgba(255,255,255,0.05);
+    }
+    .panel-header h3 {
+      font-size: 0.9rem; text-transform: uppercase; letter-spacing: 0.06em;
+      color: #aaa; font-weight: 700; display: flex; align-items: center; gap: 10px;
+    }
+    .panel-header .count {
+      background: #1a1a2e; padding: 2px 10px; border-radius: 12px;
+      font-size: 0.75rem; color: var(--accent); border: 1px solid var(--border-hover);
+    }
+
+    /* Agent Fleet List */
+    .agent-grid { display: flex; flex-direction: column; gap: 12px; }
+    .agent-card {
+      background: var(--card-bg); border: 1px solid var(--border-color); border-radius: 10px;
+      padding: 16px 20px; display: flex; justify-content: space-between; align-items: center;
+      cursor: pointer; transition: all 0.2s; gap: 16px;
+    }
+    .agent-card:hover { border-color: var(--accent); transform: translateY(-2px); box-shadow: 0 6px 16px rgba(0,0,0,0.3); }
+    .agent-info { flex: 1; }
+    .agent-title-row { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
+    .agent-name { font-weight: 700; color: #fff; font-size: 1rem; }
+    .agent-meta { font-size: 0.8rem; color: #888; display: flex; gap: 14px; flex-wrap: wrap; }
+    .agent-meta-item { display: flex; align-items: center; gap: 4px; }
+    
+    .agent-status {
+      display: inline-flex; align-items: center; gap: 6px; padding: 4px 12px; border-radius: 20px;
+      font-size: 0.72rem; font-weight: 800; letter-spacing: 0.05em; text-transform: uppercase;
+    }
+    .agent-status.yes { background: rgba(0,255,136,0.12); color: var(--yes); border: 1px solid rgba(0,255,136,0.25); }
+    .agent-status.maybe { background: rgba(255,217,61,0.12); color: var(--maybe); border: 1px solid rgba(255,217,61,0.25); }
+    .agent-status.no { background: rgba(255,107,107,0.12); color: var(--no); border: 1px solid rgba(255,107,107,0.25); }
+
+    /* MAYBE Approval Center Cards */
+    .approval-item {
+      background: var(--card-bg); border: 1px solid rgba(255,217,61,0.25); border-radius: 12px;
+      padding: 18px; margin-bottom: 14px; position: relative;
+      box-shadow: 0 4px 15px rgba(255,217,61,0.03); transition: all 0.2s;
+    }
+    .approval-item:hover { border-color: var(--maybe); }
+    .approval-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+    .approval-agent { font-weight: 700; color: var(--accent-2); font-size: 0.95rem; }
+    .approval-risk { font-size: 0.7rem; padding: 3px 10px; border-radius: 12px; font-weight: 800; letter-spacing: 0.04em; text-transform: uppercase; }
+    .approval-risk.low { background: rgba(0,255,136,0.15); color: var(--yes); }
+    .approval-risk.medium { background: rgba(255,217,61,0.15); color: var(--maybe); }
+    .approval-risk.high { background: rgba(255,159,67,0.15); color: #ff9f43; }
+    .approval-risk.critical { background: rgba(255,107,107,0.15); color: var(--no); }
+
+    .approval-details { font-size: 0.85rem; color: #ccc; line-height: 1.5; margin-bottom: 14px; }
+    .approval-meta-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px 12px; font-size: 0.78rem; color: #888; background: #0a0a14; padding: 10px; border-radius: 6px; margin-bottom: 14px; }
+
+    .approval-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+    .approval-actions button {
+      padding: 7px 16px; border-radius: 6px; border: none;
+      font-size: 0.8rem; font-weight: 700; cursor: pointer; transition: all 0.2s;
+    }
+    .btn-approve { background: rgba(0,255,136,0.2); color: var(--yes); border: 1px solid rgba(0,255,136,0.4)!important; }
+    .btn-approve:hover { background: rgba(0,255,136,0.35); transform: translateY(-1px); }
+    .btn-deny { background: rgba(255,107,107,0.2); color: var(--no); border: 1px solid rgba(255,107,107,0.4)!important; }
+    .btn-deny:hover { background: rgba(255,107,107,0.35); transform: translateY(-1px); }
+    .btn-info { background: #1a1a2e; color: var(--accent-2); border: 1px solid var(--border-hover)!important; }
+    .btn-info:hover { background: #252545; color: #fff; }
+    .btn-pause-sm { background: rgba(255,217,61,0.15); color: var(--maybe); border: 1px solid rgba(255,217,61,0.3)!important; }
+
+    /* Activity Feed Items */
+    .activity-feed { display: flex; flex-direction: column; }
+    .activity-item {
+      display: flex; gap: 14px; padding: 12px 14px; border-radius: 8px;
+      border-bottom: 1px solid rgba(255,255,255,0.03); font-size: 0.85rem;
+      cursor: pointer; transition: background 0.2s;
+    }
+    .activity-item:hover { background: rgba(255,255,255,0.03); }
+    .activity-time { color: #666; min-width: 65px; font-variant-numeric: tabular-nums; font-size: 0.78rem; font-weight: 500; }
+    .activity-dot { width: 9px; height: 9px; border-radius: 50%; margin-top: 5px; flex-shrink: 0; }
+    .activity-dot.info { background: var(--accent-2); box-shadow: 0 0 6px var(--accent-2); }
+    .activity-dot.warning { background: var(--maybe); box-shadow: 0 0 6px var(--maybe); }
+    .activity-dot.error { background: var(--no); box-shadow: 0 0 6px var(--no); }
+    .activity-dot.critical { background: var(--no); box-shadow: 0 0 6px var(--no); }
+    .activity-content { flex: 1; }
+    .activity-agent { color: var(--accent-2); font-weight: 600; margin-right: 6px; }
+    .activity-desc { color: #ccc; }
+    .activity-tag { font-size: 0.7rem; padding: 1px 6px; border-radius: 4px; background: #1a1a2e; color: #888; margin-left: 6px; }
+
+    /* Empty State */
+    .empty-state { text-align: center; padding: 36px 20px; color: #666; }
+    .empty-state .icon { font-size: 1.8rem; margin-bottom: 8px; opacity: 0.7; }
+    .empty-state p { font-size: 0.88rem; }
+
+    /* Modals */
+    .modal-overlay {
+      position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(0,0,0,0.75); backdrop-filter: blur(8px);
+      z-index: 1000; display: none; justify-content: center; align-items: center; padding: 20px;
+    }
+    .modal-overlay.active { display: flex; }
+    .modal-card {
+      background: var(--panel-bg); border: 1px solid var(--border-color); border-radius: 16px;
+      max-width: 800px; width: 100%; max-height: 88vh; display: flex; flex-direction: column;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.7); overflow: hidden; animation: modalFadeIn 0.2s ease-out;
+    }
+    @keyframes modalFadeIn { from { opacity: 0; transform: scale(0.96); } to { opacity: 1; transform: scale(1); } }
+
+    .modal-header {
+      padding: 20px 24px; border-bottom: 1px solid var(--border-color);
+      display: flex; justify-content: space-between; align-items: center; background: #0e0e1a;
+    }
+    .modal-header h2 { color: #fff; font-size: 1.2rem; font-weight: 700; display: flex; align-items: center; gap: 10px; }
+    .modal-close { background: transparent; border: none; color: #888; font-size: 1.5rem; cursor: pointer; padding: 4px; }
+    .modal-close:hover { color: #fff; }
+
+    .modal-tabs { display: flex; background: #0a0a14; border-bottom: 1px solid var(--border-color); padding: 0 24px; }
+    .modal-tab {
+      padding: 12px 18px; color: #888; font-size: 0.85rem; font-weight: 600; cursor: pointer;
+      border-bottom: 2px solid transparent; transition: all 0.2s;
+    }
+    .modal-tab:hover { color: #ccc; }
+    .modal-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+    .modal-body { padding: 24px; overflow-y: auto; flex: 1; font-size: 0.9rem; line-height: 1.6; }
+
+    .modal-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; margin-bottom: 20px; }
+    .modal-field { background: #121222; padding: 12px; border-radius: 8px; border: 1px solid var(--border-color); }
+    .modal-field .label { font-size: 0.72rem; text-transform: uppercase; color: #666; font-weight: 700; margin-bottom: 4px; }
+    .modal-field .value { color: #fff; font-weight: 600; word-break: break-all; }
+
+    /* Code & JSON view */
+    pre.code-view {
+      background: #080810; border: 1px solid var(--border-color); border-radius: 8px;
+      padding: 14px; font-family: monospace; font-size: 0.8rem; color: var(--accent-2);
+      overflow-x: auto; max-height: 250px;
+    }
+
+    /* Network Map Canvas */
+    .network-container {
+      width: 100%; height: 350px; background: #080812; border: 1px solid var(--border-color);
+      border-radius: 12px; position: relative; overflow: hidden; display: flex; justify-content: center; align-items: center;
+    }
+    #network-svg { width: 100%; height: 100%; }
+
+    /* General Buttons */
+    .btn-primary {
+      background: linear-gradient(135deg, var(--accent), #00cc6a);
+      color: #000; border: none; padding: 10px 24px; border-radius: 8px;
+      font-weight: 700; cursor: pointer; font-size: 0.88rem; transition: all 0.2s;
+    }
+    .btn-primary:hover { transform: translateY(-1px); box-shadow: 0 4px 15px rgba(0,255,136,0.3); }
+    
+    .btn-secondary {
+      background: #1a1a2e; color: #ccc; border: 1px solid var(--border-hover);
+      padding: 8px 18px; border-radius: 8px; font-weight: 600;
+      cursor: pointer; font-size: 0.85rem; transition: all 0.2s;
+    }
+    .btn-secondary:hover { border-color: var(--accent); color: #fff; }
+
+    .btn-sm { padding: 5px 12px; font-size: 0.78rem; border-radius: 6px; }
+
+    /* Temporal Selector */
+    .temporal-banner {
+      background: rgba(116, 185, 255, 0.08); border: 1px solid rgba(116, 185, 255, 0.2);
+      padding: 8px 16px; border-radius: 8px; font-size: 0.82rem; color: var(--accent-2);
+      margin-bottom: 16px; display: flex; align-items: center; justify-content: space-between;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Top Control Center Header -->
+  <!-- Top Control Center Header -->
+  <header class="dashboard-header">
+    <div class="header-left">
+      <div class="brand-group">
+        <a href="/" class="brand">HIVV <span class="brand-tag">CONTROL CENTER</span></a>
+      </div>
+      <nav class="nav-links">
+        <a href="/">Playground</a>
+        <a href="/dashboard" class="active">Control Center</a>
+        <a href="/status">Status</a>
+        <a href="/docs">API Docs</a>
+        <a href="/account">Account</a>
+      </nav>
+    </div>
+    <div class="header-right">
+      <div class="sse-status" id="sse-status-indicator">
+        <span class="sse-dot active" id="sse-dot"></span>
+        <span id="sse-text">REALTIME LIVE</span>
+      </div>
+      <div class="user-menu" id="user-menu">
+        <span id="user-name">Guest (Spectator)</span>
+        <button id="auth-action-btn" class="btn-primary btn-sm" onclick="showLoginModal()">Sign In</button>
+        <button id="logout-btn" style="display:none;" class="btn-secondary btn-sm" onclick="logout()">Logout</button>
+      </div>
+    </div>
+  </header>
+
+  <!-- Login Gate Modal Overlay -->
+  <div class="modal-overlay" id="login-gate-modal">
+    <div class="login-card" style="margin: auto;">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+        <h2 style="margin:0; font-size:1.3rem;">HIVV Governance Gate</h2>
+        <button class="modal-close" onclick="closeModal('login-gate-modal')">&times;</button>
+      </div>
+      <p style="color:#888; font-size:0.85rem; margin-bottom:18px;">
+        Authenticate to unlock Private Lens, approve agent permissions, and issue execution tokens.
+      </p>
+      <div class="error" id="login-error"></div>
+      <input type="text" id="login-username" placeholder="Username" autocomplete="username"
+             onkeydown="if(event.key==='Enter')document.getElementById('login-password').focus()">
+      <input type="password" id="login-password" placeholder="Password" autocomplete="current-password"
+             onkeydown="if(event.key==='Enter')doLogin()">
+      <button class="btn-primary" style="width:100%;margin-top:6px;" onclick="doLogin()">Sign In to Control Plane</button>
+      <p style="margin-top:16px;font-size:0.82rem;color:#666;">
+        Need access? <a href="/account" style="color:var(--accent-2);text-decoration:none;">Create account</a>
+      </p>
+    </div>
+  </div>
+
+  <!-- Dashboard Main Workspace -->
+  <div class="dashboard visible" id="dashboard">
+
+    <!-- Spectator Banner (Visible when unauthenticated) -->
+    <div id="spectator-banner" style="background: rgba(0,255,136,0.06); border: 1px solid rgba(0,255,136,0.25); border-radius: 12px; padding: 14px 20px; margin-bottom: 20px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px;">
+      <div style="display: flex; align-items: center; gap: 12px;">
+        <span style="font-size: 1.3rem;">👁️</span>
+        <div>
+          <strong style="color: var(--yes); font-size: 0.95rem;">PUBLIC SPECTATOR LENS ACTIVE</strong>
+          <span style="color: #94a3b8; font-size: 0.85rem; margin-left: 8px;">Viewing live public agent mesh &amp; telemetry. Sign in with your account to govern private agents and approve pending actions.</span>
+        </div>
+      </div>
+      <button class="btn-primary btn-sm" onclick="showLoginModal()">Sign In to Govern Agents</button>
+    </div>
+
+    <!-- Tri-State Status Summary Banner -->
+    <div class="control-header-banner">
+      <div class="banner-title">
+        <h1>HIVV SYSTEM GOVERNANCE STATE</h1>
+        <p>Real-time telemetry, zero-trust permissions, and agent execution provenance.</p>
+      </div>
+      <div class="tristate-summary">
+        <div class="tristate-badge yes">
+          <span>🟢 YES AUTHORIZED</span>
+          <span class="num" id="stat-yes-count">0</span>
+        </div>
+        <div class="tristate-badge maybe">
+          <span>🟡 MAYBE ATTENTION</span>
+          <span class="num" id="stat-maybe-count">0</span>
+        </div>
+        <div class="tristate-badge no">
+          <span>🔴 NO BLOCKED</span>
+          <span class="num" id="stat-no-count">0</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Filter & Lens Toolbar -->
+    <div class="toolbar-bar">
+      <!-- Status Filter -->
+      <div class="tool-group">
+        <span class="tool-label">Filter:</span>
+        <div class="segmented-btn" id="status-filter-btn">
+          <button class="active" onclick="setStatusFilter('all')">ALL</button>
+          <button onclick="setStatusFilter('yes')" class="yes">🟢 YES</button>
+          <button onclick="setStatusFilter('maybe')" class="maybe">🟡 MAYBE</button>
+          <button onclick="setStatusFilter('no')" class="no">🔴 NO</button>
+        </div>
+      </div>
+
+      <!-- Temporal Switcher -->
+      <div class="tool-group">
+        <span class="tool-label">Time Model:</span>
+        <div class="segmented-btn" id="temporal-switcher">
+          <button onclick="setTemporal('past')">⏮️ PAST</button>
+          <button class="active" onclick="setTemporal('present')">▶️ PRESENT</button>
+          <button onclick="setTemporal('future')">🔮 FUTURE</button>
+        </div>
+      </div>
+
+      <!-- Lens Mode Switcher -->
+      <div class="tool-group">
+        <span class="tool-label">View Lens:</span>
+        <div class="lens-toggle" id="lens-toggle-btn" onclick="toggleLensMode()">
+          <span id="lens-icon">🌎</span> <span id="lens-text">PUBLIC VIEW</span>
+        </div>
+      </div>
+
+      <!-- Search -->
+      <div class="tool-group">
+        <input type="text" class="search-input" id="search-input" placeholder="Search agents & events..." oninput="handleSearch()">
+      </div>
+    </div>
+
+    <!-- Temporal Notification Bar (Visible if temporal !== 'present') -->
+    <div class="temporal-banner" id="temporal-banner" style="display:none;">
+      <span><strong id="temporal-title">PRESENT MODE</strong> — <span id="temporal-desc">Showing live active state and telemetry.</span></span>
+      <button class="btn-secondary btn-sm" onclick="setTemporal('present')">Reset to Present</button>
+    </div>
+
+    <!-- Overview Stat Cards -->
+    <div class="overview-cards">
+      <div class="overview-card">
+        <div class="value" id="card-agents">0</div>
+        <div class="label">ACTIVE AGENTS</div>
+      </div>
+      <div class="overview-card warn">
+        <div class="value" id="card-pending">0</div>
+        <div class="label">PENDING APPROVALS</div>
+      </div>
+      <div class="overview-card">
+        <div class="value" id="card-events-24h">0</div>
+        <div class="label">EVENTS (24H)</div>
+      </div>
+      <div class="overview-card">
+        <div class="value" id="card-cost-today">$0.00</div>
+        <div class="label">COST TODAY</div>
+      </div>
+      <div class="overview-card">
+        <div class="value" id="card-requests-today">0</div>
+        <div class="label">REQUESTS TODAY</div>
+      </div>
+    </div>
+
+    <!-- Main Two Column Grid -->
+    <div class="main-grid">
+
+      <!-- Left Column: Agent Fleet + Network Map + Activity Feed -->
+      <div>
+        <!-- Agent Fleet View -->
+        <div class="panel">
+          <div class="panel-header">
+            <h3>🤖 AGENT FLEET <span class="count" id="agent-count">0</span></h3>
+            <button class="btn-secondary btn-sm" onclick="showAgentRegistration()">+ Register Agent</button>
+          </div>
+          <div class="agent-grid" id="agent-list">
+            <div class="empty-state">
+              <div class="icon">No agents registered</div>
+              <p>Register your AI agents via API to manage their permissions.</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Network Visualization Panel -->
+        <div class="panel">
+          <div class="panel-header">
+            <h3>🌐 SYSTEM RELATIONSHIP GRAPH</h3>
+            <button class="btn-secondary btn-sm" onclick="loadNetworkGraph()">Refresh Graph</button>
+          </div>
+          <div class="network-container">
+            <svg id="network-svg">
+              <defs>
+                <marker id="arrow" viewBox="0 0 10 10" refX="18" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                  <path d="M 0 0 L 10 5 L 0 10 z" fill="#444" />
+                </marker>
+              </defs>
+              <g id="network-group"></g>
+            </svg>
+          </div>
+        </div>
+
+        <!-- Activity & Event Feed -->
+        <div class="panel">
+          <div class="panel-header">
+            <h3>📜 REAL-TIME ACTIVITY & PROVENANCE <span class="count" id="event-count">0</span></h3>
+          </div>
+          <div class="activity-feed" id="activity-feed">
+            <div class="empty-state">
+              <div class="icon">No events recorded</div>
+              <p>Agent operations and policy decisions will stream live here.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Right Column: MAYBE Approval Center + System Registration -->
+      <div>
+        <!-- MAYBE Approval Inbox -->
+        <div class="panel">
+          <div class="panel-header">
+            <h3>🟡 MAYBE APPROVAL CENTER <span class="count" id="approval-count">0</span></h3>
+          </div>
+          <div id="approval-list">
+            <div class="empty-state">
+              <div class="icon">All clear</div>
+              <p>No permissions waiting for human decision.</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Agent Registration Instructions -->
+        <div class="panel" id="agent-reg-info">
+          <div class="panel-header">
+            <h3>🔑 CONNECT AN AGENT</h3>
+          </div>
+          <p style="font-size:0.85rem;color:#888;line-height:1.6;margin-bottom:12px;">
+            Issue an agent session token to enable policy checkups and heartbeats.
+          </p>
+          <pre style="background:#080810;border:1px solid var(--border-color);border-radius:8px;padding:12px;font-size:0.76rem;color:var(--accent);overflow-x:auto;line-height:1.4;">curl -X POST https://hivv.org/api/agents/register \
+  -H "Content-Type: application/json" \
+  -H "X-Session-Token: YOUR_USER_TOKEN" \
+  -d '{
+    "name": "Autonomous Worker",
+    "type": "ai",
+    "model": "claude-3-5-sonnet"
+  }'</pre>
+        </div>
+      </div>
+
+      <!-- Unified Footer -->
+      <footer style="text-align:center; padding:30px 0 20px; color:#64748b; font-size:0.85rem; border-top:1px solid rgba(255,255,255,0.06); margin-top:40px;">
+        <p>HIVV.org — Autonomous Agent Governance &amp; High-Throughput Inference</p>
+        <p style="margin-top:6px;">
+          <a href="/" style="color:#94a3b8;text-decoration:none;margin:0 8px;">Playground</a> &middot;
+          <a href="/dashboard" style="color:#94a3b8;text-decoration:none;margin:0 8px;">Control Center</a> &middot;
+          <a href="/status" style="color:#94a3b8;text-decoration:none;margin:0 8px;">Status</a> &middot;
+          <a href="/docs" style="color:#94a3b8;text-decoration:none;margin:0 8px;">API Docs</a> &middot;
+          <a href="/account" style="color:#94a3b8;text-decoration:none;margin:0 8px;">Account</a>
+        </p>
+      </footer>
+
+    </div>
+  </div>
+
+  <!-- AGENT INSPECTOR MODAL -->
+  <div class="modal-overlay" id="agent-inspector-modal">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h2 id="inspector-title">🤖 AGENT INSPECTOR</h2>
+        <button class="modal-close" onclick="closeModal('agent-inspector-modal')">&times;</button>
+      </div>
+      <div class="modal-tabs">
+        <div class="modal-tab active" onclick="switchInspectorTab('identity')">Identity</div>
+        <div class="modal-tab" onclick="switchInspectorTab('current')">Current State</div>
+        <div class="modal-tab" onclick="switchInspectorTab('permissions')">Permissions</div>
+        <div class="modal-tab" onclick="switchInspectorTab('history')">History</div>
+        <div class="modal-tab" onclick="switchInspectorTab('security')">Security & Trust</div>
+      </div>
+      <div class="modal-body" id="inspector-body">
+        <!-- Dynamic Inspector Content -->
+      </div>
+    </div>
+  </div>
+
+  <!-- "WHY?" PROVENANCE INSPECTOR MODAL -->
+  <div class="modal-overlay" id="why-inspector-modal">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h2>🔍 EXECUTION PROVENANCE ("WHY?")</h2>
+        <button class="modal-close" onclick="closeModal('why-inspector-modal')">&times;</button>
+      </div>
+      <div class="modal-body" id="why-body">
+        <!-- Dynamic Why Provenance Content -->
+      </div>
+    </div>
+  </div>
+
+<script>
+(function() {
+  let sessionToken = localStorage.getItem('hivv_session_token');
+  let currentLensMode = 'public'; // 'public' or 'private'
+  let currentStatusFilter = 'all'; // 'all', 'yes', 'maybe', 'no'
+  let currentTemporal = 'present'; // 'past', 'present', 'future'
+  let loadedAgents = [];
+  let loadedEvents = [];
+  let loadedApprovals = [];
+  let activeInspectorAgent = null;
+
+  const authHeaders = () => sessionToken ? { 'X-Session-Token': sessionToken } : {};
+
+  window.showLoginModal = function() {
+    document.getElementById('login-gate-modal').classList.add('active');
+  };
+
+  // Init Auth
+  async function checkAuth() {
+    if (!sessionToken) {
+      showPublicDashboard();
+      return;
+    }
+    try {
+      const r = await fetch('/api/auth/me', {
+        headers: authHeaders()
+      });
+      if (r.ok) {
+        const d = await r.json();
+        if (d.logged_in) {
+          showDashboard(d.user);
+        } else {
+          showPublicDashboard();
+        }
+      } else {
+        showPublicDashboard();
+      }
+    } catch (e) {
+      showPublicDashboard();
+    }
+  }
+
+  function showPublicDashboard() {
+    document.getElementById('dashboard').classList.add('visible');
+    document.getElementById('user-name').textContent = 'Guest (Spectator)';
+    const authBtn = document.getElementById('auth-action-btn');
+    if (authBtn) {
+      authBtn.textContent = 'Sign In';
+      authBtn.style.display = 'inline-flex';
+    }
+    const logoutBtn = document.getElementById('logout-btn');
+    if (logoutBtn) logoutBtn.style.display = 'none';
+
+    const spectatorBanner = document.getElementById('spectator-banner');
+    if (spectatorBanner) spectatorBanner.style.display = 'flex';
+
+    refreshAllData();
+    setupSSE();
+    setInterval(refreshAllData, 20000);
+  }
+
+  function showDashboard(user) {
+    document.getElementById('dashboard').classList.add('visible');
+    document.getElementById('user-name').textContent = (user.username || user.display_name || 'User') + (user.role === 'admin' ? ' [Admin]' : '');
+    const authBtn = document.getElementById('auth-action-btn');
+    if (authBtn) authBtn.style.display = 'none';
+    const logoutBtn = document.getElementById('logout-btn');
+    if (logoutBtn) logoutBtn.style.display = 'inline-flex';
+
+    const spectatorBanner = document.getElementById('spectator-banner');
+    if (spectatorBanner) spectatorBanner.style.display = 'none';
+
+    // Initial Load
+    refreshAllData();
+    setupSSE();
+    setInterval(refreshAllData, 20000);
+  }
+
+  async function refreshAllData() {
+    await Promise.all([
+      loadAgents(),
+      loadApprovals(),
+      loadCosts(),
+      loadNetworkGraph()
+    ]);
+  }
+
+  // Real-time SSE listener
+  let sseInstance = null;
+  function setupSSE() {
+    if (sseInstance) {
+      try { sseInstance.close(); } catch(e){}
+    }
+
+    try {
+      const sseUrl = sessionToken 
+        ? `/api/hivv/sse?token=${encodeURIComponent(sessionToken)}`
+        : `/api/hivv/sse`;
+      sseInstance = new EventSource(sseUrl);
+      const dot = document.getElementById('sse-dot');
+      const text = document.getElementById('sse-text');
+
+      sseInstance.onopen = () => {
+        dot.classList.add('active');
+        text.textContent = 'REALTIME LIVE';
+      };
+
+      sseInstance.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          if (data.type === 'connected') {
+            dot.classList.add('active');
+            text.textContent = 'REALTIME LIVE';
+          } else if (data.event_type || data.action) {
+            refreshAllData();
+          }
+        } catch(e){}
+      };
+
+      sseInstance.onerror = () => {
+        dot.classList.remove('active');
+        text.textContent = 'POLLING MODE';
+      };
+    } catch(e) {}
+  }
+
+  // Load Agents
+  async function loadAgents() {
+    try {
+      const r = await fetch(`/api/dashboard/agents?perspective=${currentLensMode}`, {
+        headers: authHeaders()
+      });
+      if (!r.ok) return;
+      const d = await r.json();
+      if (!d.success) return;
+
+      loadedAgents = d.agents || [];
+      renderAgentFleet();
+      updateTriStateCounts();
+      loadActivityFeed();
+    } catch (e) {
+      console.error('Error loading agents:', e);
+    }
+  }
+
+  // Update Tri-State Summary Counters
+  function updateTriStateCounts() {
+    let yesCount = 0;
+    let maybeCount = 0;
+    let noCount = 0;
+
+    loadedAgents.forEach(a => {
+      if (a.state === 'yes') yesCount++;
+      else if (a.state === 'maybe') maybeCount++;
+      else if (a.state === 'no') noCount++;
+    });
+
+    // Add approvals count to MAYBE
+    maybeCount += loadedApprovals.length;
+
+    document.getElementById('stat-yes-count').textContent = yesCount;
+    document.getElementById('stat-maybe-count').textContent = maybeCount;
+    document.getElementById('stat-no-count').textContent = noCount;
+
+    document.getElementById('card-agents').textContent = loadedAgents.length;
+    document.getElementById('agent-count').textContent = loadedAgents.length;
+  }
+
+  // Render Agent Fleet
+  function renderAgentFleet() {
+    const listEl = document.getElementById('agent-list');
+    
+    let filtered = loadedAgents.filter(a => {
+      if (currentStatusFilter !== 'all' && a.state !== currentStatusFilter) return false;
+      return true;
+    });
+
+    if (filtered.length === 0) {
+      listEl.innerHTML = '<div class="empty-state"><div class="icon">No matching agents</div><p>Adjust your search or status filter.</p></div>';
+      return;
+    }
+
+    listEl.innerHTML = filtered.map(a => `
+      <div class="agent-card" onclick="openAgentInspector('${a.id}')">
+        <div class="agent-info">
+          <div class="agent-title-row">
+            <span class="agent-name">${escapeHtml(a.public_name || 'Unnamed Agent')}</span>
+            <span class="agent-status ${a.state}">${a.state.toUpperCase()}</span>
+          </div>
+          <div class="agent-meta">
+            <span class="agent-meta-item">🤖 ${escapeHtml(a.agent_type || 'ai')}</span>
+            <span class="agent-meta-item">🧠 ${escapeHtml(a.model || 'standard')}</span>
+            <span class="agent-meta-item">⭐ Trust: ${a.trust_score ? Math.round(a.trust_score) : 50}/100</span>
+            ${parseInt(a.pending_permissions) > 0 ? '<span style="color:var(--maybe);font-weight:700;">⚠️ ' + a.pending_permissions + ' Pending</span>' : ''}
+          </div>
+        </div>
+        <div style="display:flex;gap:8px;">
+          <button class="btn-secondary btn-sm" onclick="event.stopPropagation(); toggleAgentState('${a.id}', '${a.state === 'yes' ? 'maybe' : 'yes'}')">
+            ${a.state === 'yes' ? 'Pause' : 'Activate'}
+          </button>
+        </div>
+      </div>
+    `).join('');
+  }
+
+  // Load MAYBE Approval Inbox
+  async function loadApprovals() {
+    try {
+      const r = await fetch('/api/agents/approvals/pending', {
+        headers: authHeaders()
+      });
+      if (!r.ok) return;
+      const d = await r.json();
+      if (!d.success) return;
+
+      loadedApprovals = d.approvals || [];
+      document.getElementById('approval-count').textContent = loadedApprovals.length;
+      document.getElementById('card-pending').textContent = loadedApprovals.length;
+
+      const listEl = document.getElementById('approval-list');
+      if (loadedApprovals.length === 0) {
+        listEl.innerHTML = '<div class="empty-state"><div class="icon">All Clear</div><p>No permissions pending human decision.</p></div>';
+        return;
+      }
+
+      listEl.innerHTML = loadedApprovals.map(a => `
+        <div class="approval-item">
+          <div class="approval-header">
+            <span class="approval-agent">🤖 ${escapeHtml(a.agent_name || 'Agent')}</span>
+            <span class="approval-risk ${a.risk_level || 'medium'}">${(a.risk_level || 'medium').toUpperCase()} RISK</span>
+          </div>
+          <div class="approval-details">
+            Requests action <strong>${escapeHtml(a.action)}</strong> on resource <strong>${escapeHtml(a.resource)}</strong>
+            ${a.reason ? '<br><em style="color:#aaa;">"' + escapeHtml(a.reason) + '"</em>' : ''}
+          </div>
+          <div class="approval-meta-grid">
+            <div><strong>STATUS:</strong> 🟡 MAYBE</div>
+            <div><strong>POLICY:</strong> Strict Zero-Trust</div>
+            <div><strong>WHEN:</strong> ${new Date(a.requested_at).toLocaleTimeString()}</div>
+            <div><strong>TYPE:</strong> Permission Request</div>
+          </div>
+          <div class="approval-actions">
+            <button class="btn-approve" onclick="decideApproval('${a.permission_id}', 'approve')">✓ APPROVE</button>
+            <button class="btn-deny" onclick="decideApproval('${a.permission_id}', 'deny')">✕ DENY</button>
+            <button class="btn-info" onclick="askMoreInfo('${a.agent_id}', '${escapeHtml(a.action)}')">💬 ASK INFO</button>
+            <button class="btn-pause-sm" onclick="toggleAgentState('${a.agent_id}', 'maybe')">⏸️ PAUSE</button>
+          </div>
+        </div>
+      `).join('');
+
+      updateTriStateCounts();
+
+    } catch (e) {
+      console.error('Error loading approvals:', e);
+    }
+  }
+
+  // Load Activity & Event Feed
+  async function loadActivityFeed() {
+    try {
+      const endpoint = currentTemporal === 'past' ? '/api/hivv/past' :
+                       currentTemporal === 'future' ? '/api/hivv/future' :
+                       '/api/dashboard/activity?limit=30';
+
+      const r = await fetch(endpoint, {
+        headers: authHeaders()
+      });
+      if (!r.ok) return;
+      const d = await r.json();
+
+      const events = d.events || d.activity || [];
+      loadedEvents = events;
+      document.getElementById('event-count').textContent = events.length;
+      document.getElementById('card-events-24h').textContent = events.length;
+
+      const feedEl = document.getElementById('activity-feed');
+      if (events.length === 0) {
+        feedEl.innerHTML = '<div class="empty-state"><div class="icon">No Activity Recorded</div><p>No events logged for this time view.</p></div>';
+        return;
+      }
+
+      feedEl.innerHTML = events.map(e => {
+        const time = new Date(e.created_at || Date.now());
+        const timeStr = time.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+        const agentName = e.agent_name || 'System';
+
+        return `
+          <div class="activity-item" onclick="openWhyInspector('${e.id || e.event_id || ''}', ${escapeJson(e)})">
+            <span class="activity-time">${timeStr}</span>
+            <span class="activity-dot ${e.severity || 'info'}"></span>
+            <div class="activity-content">
+              <span class="activity-agent">${escapeHtml(agentName)}</span>
+              <span class="activity-desc">${escapeHtml(e.description || e.event_type || 'Agent activity')}</span>
+              <span class="activity-tag">${(e.perspective || 'public').toUpperCase()}</span>
+            </div>
+          </div>
+        `;
+      }).join('');
+
+    } catch (e) {
+      console.error('Error loading activity:', e);
+    }
+  }
+
+  // Load Costs Summary
+  async function loadCosts() {
+    try {
+      const r = await fetch('/api/agents/costs/summary', {
+        headers: authHeaders()
+      });
+      if (!r.ok) return;
+      const d = await r.json();
+      if (!d.success) return;
+
+      const todayCost = parseFloat(d.today?.today_cost || 0);
+      const todayRequests = parseInt(d.today?.today_requests || 0);
+
+      document.getElementById('card-cost-today').textContent = '$' + todayCost.toFixed(2);
+      document.getElementById('card-requests-today').textContent = todayRequests.toLocaleString();
+    } catch (e) {}
+  }
+
+  // Load Network Graph Visualizer
+  async function loadNetworkGraph() {
+    try {
+      const r = await fetch('/api/dashboard/universe-map', {
+        headers: authHeaders()
+      });
+      if (!r.ok) return;
+      const d = await r.json();
+
+      const nodes = d.nodes || [];
+      const edges = d.edges || d.relationships || [];
+
+      renderSVGGraph(nodes, edges);
+    } catch (e) {}
+  }
+
+  function renderSVGGraph(nodes, edges) {
+    const svgGroup = document.getElementById('network-group');
+    if (!svgGroup) return;
+    svgGroup.innerHTML = '';
+
+    if (nodes.length === 0 && loadedAgents.length > 0) {
+      // Build nodes from agents
+      nodes = loadedAgents.map((a, i) => ({
+        id: a.id,
+        label: a.public_name,
+        state: a.state,
+        x: 100 + (i % 5) * 120,
+        y: 80 + Math.floor(i / 5) * 100
+      }));
+    }
+
+    if (nodes.length === 0) {
+      svgGroup.innerHTML = `<text x="50%" y="50%" text-anchor="middle" fill="#666" font-size="14">No network relationships established</text>`;
+      return;
+    }
+
+    // Render nodes
+    nodes.forEach((n, idx) => {
+      const cx = n.x || (120 + (idx % 4) * 160);
+      const cy = n.y || (90 + Math.floor(idx / 4) * 90);
+      const color = n.state === 'yes' ? '#00ff88' : n.state === 'maybe' ? '#ffd93d' : '#ff6b6b';
+
+      const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+      circle.setAttribute('cx', cx);
+      circle.setAttribute('cy', cy);
+      circle.setAttribute('r', '18');
+      circle.setAttribute('fill', '#121222');
+      circle.setAttribute('stroke', color);
+      circle.setAttribute('stroke-width', '2.5');
+      svgGroup.appendChild(circle);
+
+      const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+      text.setAttribute('x', cx);
+      text.setAttribute('y', cy + 32);
+      text.setAttribute('text-anchor', 'middle');
+      text.setAttribute('fill', '#ccc');
+      text.setAttribute('font-size', '11');
+      text.textContent = n.label || 'Agent';
+      svgGroup.appendChild(text);
+    });
+  }
+
+  // Decision Handler
+  window.decideApproval = async function(permissionId, decision) {
+    if (!sessionToken) {
+      alert('Authentication required to approve or deny agent permissions. Please sign in.');
+      showLoginModal();
+      return;
+    }
+    try {
+      const r = await fetch(`/api/agents/approvals/${permissionId}/decide`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...authHeaders()
+        },
+        body: JSON.stringify({ decision })
+      });
+      if (r.ok) {
+        refreshAllData();
+      }
+    } catch (e) {}
+  };
+
+  // Toggle Agent State (Pause / Activate)
+  window.toggleAgentState = async function(agentId, newState) {
+    if (!sessionToken) {
+      alert('Authentication required to modify agent states. Please sign in.');
+      showLoginModal();
+      return;
+    }
+    try {
+      await fetch(`/api/dashboard/agents/${agentId}/state`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...authHeaders()
+        },
+        body: JSON.stringify({ state: newState })
+      });
+      refreshAllData();
+    } catch (e) {}
+  };
+
+  // Ask More Info Handler
+  window.askMoreInfo = function(agentId, action) {
+    const q = prompt(`Ask agent for clarification on action "${action}":`, "What is the reason and target scope for this request?");
+    if (q) {
+      alert(`Inquiry logged for agent. Status retained in MAYBE state.`);
+    }
+  };
+
+  let activeInspectorData = null;
+
+  // Open Agent Inspector
+  window.openAgentInspector = async function(agentId) {
+    try {
+      const r = await fetch(`/api/dashboard/agents/${agentId}?perspective=${currentLensMode}`, {
+        headers: authHeaders()
+      });
+      if (!r.ok) return;
+      const d = await r.json();
+      if (!d.success) return;
+
+      activeInspectorAgent = d.agent;
+      activeInspectorData = d;
+      document.getElementById('inspector-title').textContent = `🤖 AGENT INSPECTOR: ${d.agent.public_name || 'Agent'}`;
+      switchInspectorTab('identity');
+      document.getElementById('agent-inspector-modal').classList.add('active');
+    } catch (e) {}
+  };
+
+  // Switch Inspector Tab
+  window.switchInspectorTab = function(tabName) {
+    const modalTabs = document.querySelectorAll('#agent-inspector-modal .modal-tab');
+    modalTabs.forEach(t => t.classList.remove('active'));
+    event?.target?.classList.add('active');
+
+    const bodyEl = document.getElementById('inspector-body');
+    if (!activeInspectorAgent) return;
+
+    const a = activeInspectorAgent;
+
+    if (tabName === 'identity') {
+      bodyEl.innerHTML = `
+        <div class="modal-grid">
+          <div class="modal-field"><div class="label">Public Name</div><div class="value">${escapeHtml(a.public_name)}</div></div>
+          <div class="modal-field"><div class="label">Agent ID</div><div class="value">${a.id}</div></div>
+          <div class="modal-field"><div class="label">Type</div><div class="value">${escapeHtml(a.agent_type)}</div></div>
+          <div class="modal-field"><div class="label">State</div><div class="value"><span class="agent-status ${a.state}">${a.state.toUpperCase()}</span></div></div>
+          ${currentLensMode === 'private' ? `
+            <div class="modal-field"><div class="label">Private Name</div><div class="value">${escapeHtml(a.private_name || 'Secret Identity')}</div></div>
+            <div class="modal-field"><div class="label">Session Token</div><div class="value">🔐 [AUTHENTICATED]</div></div>
+          ` : ''}
+        </div>
+        <div class="modal-field"><div class="label">Description</div><div class="value">${escapeHtml(a.description || 'No description provided.')}</div></div>
+      `;
+    } else if (tabName === 'current') {
+      bodyEl.innerHTML = `
+        <div class="modal-grid">
+          <div class="modal-field"><div class="label">Model</div><div class="value">${escapeHtml(a.model || 'claude-3-5-sonnet')}</div></div>
+          <div class="modal-field"><div class="label">Total Interactions</div><div class="value">${a.interactions_count || 0}</div></div>
+          <div class="modal-field"><div class="label">Tasks Completed</div><div class="value">${a.tasks_completed || 0}</div></div>
+          <div class="modal-field"><div class="label">Tasks Failed</div><div class="value">${a.tasks_failed || 0}</div></div>
+        </div>
+      `;
+    } else if (tabName === 'permissions') {
+      const perms = activeInspectorData?.permissions || [];
+      if (perms.length === 0) {
+        bodyEl.innerHTML = `
+          <p style="margin-bottom:12px;font-size:0.85rem;color:#aaa;">Zero-Trust Permission Matrix:</p>
+          <div class="empty-state"><div class="icon">No explicit rules</div><p>Agent follows default policy bounds.</p></div>
+        `;
+      } else {
+        bodyEl.innerHTML = `
+          <p style="margin-bottom:14px;font-size:0.85rem;color:#aaa;">Zero-Trust Policy Matrix & State Controls:</p>
+          <div style="display:flex;flex-direction:column;gap:10px;">
+            ${perms.map(p => `
+              <div class="modal-field" style="display:flex;justify-content:space-between;align-items:center;">
+                <div>
+                  <div class="label">${escapeHtml(p.resource)} — ${escapeHtml(p.action)}</div>
+                  <div class="value" style="font-size:0.85rem;margin-top:2px;">
+                    State: <span class="agent-status ${p.state}">${p.state.toUpperCase()}</span>
+                    <span style="font-size:0.75rem;color:#666;margin-left:8px;">Risk: ${(p.risk_level || 'medium').toUpperCase()}</span>
+                  </div>
+                </div>
+                <div style="display:flex;gap:6px;">
+                  <button class="btn-sm btn-approve" onclick="updatePermissionState('${p.id}', 'yes')">ALLOW</button>
+                  <button class="btn-sm btn-pause-sm" onclick="updatePermissionState('${p.id}', 'maybe')">REQUIRE APPROVAL</button>
+                  <button class="btn-sm btn-deny" onclick="updatePermissionState('${p.id}', 'no')">BLOCK</button>
+                </div>
+              </div>
+            `).join('')}
+          </div>
+        `;
+      }
+    } else if (tabName === 'history') {
+      bodyEl.innerHTML = `<pre class="code-view">${JSON.stringify(activeInspectorData?.recent_events || a.recent_events || [], null, 2)}</pre>`;
+    } else if (tabName === 'security') {
+      bodyEl.innerHTML = `
+        <div class="modal-grid">
+          <div class="modal-field"><div class="label">Trust Score</div><div class="value">⭐ ${Math.round(a.trust_score || 50)} / 100</div></div>
+          <div class="modal-field"><div class="label">Risk Level</div><div class="value">${(a.risk_level || 'low').toUpperCase()}</div></div>
+          <div class="modal-field"><div class="label">Reputation Score</div><div class="value">${Math.round(a.reputation_score || 50)} / 100</div></div>
+          <div class="modal-field"><div class="label">Reliability Score</div><div class="value">${Math.round(a.reliability_score || 50)} / 100</div></div>
+        </div>
+      `;
+    }
+  };
+
+  // Update Permission State handler
+  window.updatePermissionState = async function(permissionId, newState) {
+    if (!sessionToken) {
+      alert('Authentication required to update permissions. Please sign in.');
+      showLoginModal();
+      return;
+    }
+    try {
+      const r = await fetch(`/api/dashboard/permissions/${permissionId}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...authHeaders()
+        },
+        body: JSON.stringify({ state: newState })
+      });
+      if (r.ok && activeInspectorAgent) {
+        openAgentInspector(activeInspectorAgent.id);
+        refreshAllData();
+      }
+    } catch (e) {}
+  };
+
+  // Open "WHY?" Inspector Modal
+  window.openWhyInspector = async function(eventId, eventObj) {
+    const bodyEl = document.getElementById('why-body');
+    bodyEl.innerHTML = `<p style="color:#888;">Fetching execution provenance details...</p>`;
+    document.getElementById('why-inspector-modal').classList.add('active');
+
+    try {
+      let whyData = eventObj;
+      if (eventId) {
+        const r = await fetch(`/api/dashboard/decisions/${eventId}/why`, {
+          headers: authHeaders()
+        });
+        if (r.ok) {
+          const d = await r.json();
+          if (d.success) whyData = d.provenance || d;
+        }
+      }
+
+      bodyEl.innerHTML = `
+        <div class="modal-grid">
+          <div class="modal-field"><div class="label">WHO (AGENT)</div><div class="value">${escapeHtml(whyData.agent_name || whyData.agent_id || 'Agent')}</div></div>
+          <div class="modal-field"><div class="label">WHAT (EVENT)</div><div class="value">${escapeHtml(whyData.event_type || whyData.action || 'Execution')}</div></div>
+          <div class="modal-field"><div class="label">WHEN</div><div class="value">${new Date(whyData.created_at || Date.now()).toLocaleString()}</div></div>
+          <div class="modal-field"><div class="label">AUTHORIZED BY</div><div class="value">${escapeHtml(whyData.authorized_by || 'Human Owner (Session)')}</div></div>
+        </div>
+        <div class="modal-field" style="margin-bottom:14px;">
+          <div class="label">WHY (REASON & POLICY)</div>
+          <div class="value" style="color:var(--accent-2);">${escapeHtml(whyData.description || whyData.reason || 'Requested action evaluated against Zero-Trust Policy rules.')}</div>
+        </div>
+        <div class="modal-field">
+          <div class="label">DATA PAYLOAD & PROVENANCE (${currentLensMode.toUpperCase()})</div>
+          <pre class="code-view">${escapeHtml(JSON.stringify(whyData.payload || whyData, null, 2))}</pre>
+        </div>
+      `;
+    } catch(e) {
+      bodyEl.innerHTML = `<p style="color:var(--no);">Failed to load provenance log.</p>`;
+    }
+  };
+
+  // Close Modal
+  window.closeModal = function(id) {
+    document.getElementById(id).classList.remove('active');
+  };
+
+  // Controls & Filters
+  window.setStatusFilter = function(status) {
+    currentStatusFilter = status;
+    const btns = document.querySelectorAll('#status-filter-btn button');
+    btns.forEach(b => b.classList.remove('active'));
+    event.target.classList.add('active');
+    renderAgentFleet();
+  };
+
+  window.setTemporal = function(temporal) {
+    currentTemporal = temporal;
+    const btns = document.querySelectorAll('#temporal-switcher button');
+    btns.forEach(b => b.classList.remove('active'));
+    event.target.classList.add('active');
+
+    const banner = document.getElementById('temporal-banner');
+    if (temporal === 'present') {
+      banner.style.display = 'none';
+    } else {
+      banner.style.display = 'flex';
+      document.getElementById('temporal-title').textContent = temporal.toUpperCase() + ' AUDIT VIEW';
+      document.getElementById('temporal-desc').textContent = temporal === 'past' ? 'Reviewing historical system events and executed decisions.' : 'Reviewing scheduled intentions and future permission requests.';
+    }
+    loadActivityFeed();
+  };
+
+  window.toggleLensMode = function() {
+    currentLensMode = currentLensMode === 'public' ? 'private' : 'public';
+    const btn = document.getElementById('lens-toggle-btn');
+    const icon = document.getElementById('lens-icon');
+    const text = document.getElementById('lens-text');
+
+    if (currentLensMode === 'private') {
+      btn.classList.add('private');
+      icon.textContent = '🔐';
+      text.textContent = 'PRIVATE VIEW';
+    } else {
+      btn.classList.remove('private');
+      icon.textContent = '🌎';
+      text.textContent = 'PUBLIC VIEW';
+    }
+    refreshAllData();
+  };
+
+  window.handleSearch = function() {
+    const query = document.getElementById('search-input').value.toLowerCase();
+    const cards = document.querySelectorAll('.agent-card');
+    cards.forEach(c => {
+      const txt = c.textContent.toLowerCase();
+      c.style.display = txt.includes(query) ? 'flex' : 'none';
+    });
+  };
+
+  window.showAgentRegistration = function() {
+    document.getElementById('agent-reg-info').scrollIntoView({ behavior: 'smooth' });
+  };
+
+  // Login Handler
+  window.doLogin = async function() {
+    const username = document.getElementById('login-username').value.trim();
+    const password = document.getElementById('login-password').value;
+    const errorEl = document.getElementById('login-error');
+
+    if (!username || !password) {
+      errorEl.textContent = 'Username and password required';
+      errorEl.style.display = 'block';
+      return;
+    }
+
+    try {
+      const r = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, password })
+      });
+      const d = await r.json();
+      if (r.ok && d.success) {
+        sessionToken = d.session_token;
+        localStorage.setItem('hivv_session_token', sessionToken);
+        closeModal('login-gate-modal');
+        checkAuth();
+      } else {
+        errorEl.textContent = d.error || 'Login failed';
+        errorEl.style.display = 'block';
+      }
+    } catch (e) {
+      errorEl.textContent = 'Network error';
+      errorEl.style.display = 'block';
+    }
+  };
+
+  // Logout Handler
+  window.logout = async function() {
+    try {
+      await fetch('/api/auth/logout', {
+        method: 'POST',
+        headers: authHeaders()
+      });
+    } catch (e) {}
+    sessionToken = null;
+    localStorage.removeItem('hivv_session_token');
+    showPublicDashboard();
+  };
+
+  function escapeHtml(t) {
+    if (!t) return '';
+    const d = document.createElement('div');
+    d.textContent = String(t);
+    return d.innerHTML;
+  }
+
+  function escapeJson(obj) {
+    return JSON.stringify(obj).replace(/'/g, "\\'").replace(/"/g, '&quot;');
+  }
+
+  checkAuth();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,622 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Nodes — HIVV Network</title>
+  <link rel="stylesheet" href="/styles.css">
+  <style>
+    :root {
+      --yes: #00ff88;
+      --no: #ff6b6b;
+      --maybe: #ffd93d;
+      --past: #a855f7;
+      --present: #00ff88;
+      --future: #74b9ff;
+      --bg-dark: #0a0a0f;
+      --bg-card: #0d0d18;
+      --bg-surface: #13132a;
+      --text-primary: #ffffff;
+      --text-secondary: #a0a0b0;
+      --text-muted: #666680;
+    }
+    
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    
+    body {
+      background: var(--bg-dark);
+      color: var(--text-primary);
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      min-height: 100vh;
+    }
+    
+    .container { max-width: 1200px; margin: 0 auto; padding: 20px; }
+    
+    header {
+      background: var(--bg-card);
+      border-bottom: 1px solid var(--bg-surface);
+      padding: 15px 20px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      text-decoration: none;
+      color: var(--text-primary);
+    }
+    
+    .brand-icon {
+      width: 40px;
+      height: 40px;
+      background: linear-gradient(135deg, var(--past), var(--future));
+      border-radius: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 20px;
+    }
+    
+    .brand-text { font-size: 1.4em; font-weight: 700; }
+    
+    .nav-links {
+      display: flex;
+      gap: 20px;
+    }
+    
+    .nav-links a {
+      color: var(--text-secondary);
+      text-decoration: none;
+      padding: 8px 12px;
+      border-radius: 6px;
+      transition: all 0.2s;
+    }
+    
+    .nav-links a:hover, .nav-links a.active {
+      color: var(--text-primary);
+      background: var(--bg-surface);
+    }
+    
+    .page-header {
+      text-align: center;
+      padding: 40px 20px 30px;
+    }
+    
+    .page-header h1 {
+      font-size: 2.2em;
+      font-weight: 800;
+      margin-bottom: 10px;
+      color: var(--text-primary);
+    }
+    
+    .page-header p {
+      color: var(--text-secondary);
+      font-size: 1.05em;
+    }
+    
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 20px;
+      margin-bottom: 30px;
+    }
+    
+    .stat-card {
+      background: var(--bg-card);
+      border-radius: 12px;
+      padding: 20px;
+      text-align: center;
+      border: 1px solid var(--bg-surface);
+    }
+    
+    .stat-value {
+      font-size: 2em;
+      font-weight: 800;
+      color: var(--yes);
+    }
+    
+    .stat-label {
+      font-size: 0.85em;
+      color: var(--text-muted);
+      margin-top: 5px;
+    }
+    
+    .section-title {
+      font-size: 1.3em;
+      font-weight: 700;
+      margin-bottom: 20px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    
+    .nodes-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+      gap: 20px;
+      margin-bottom: 30px;
+    }
+    
+    .node-card {
+      background: var(--bg-card);
+      border-radius: 16px;
+      padding: 24px;
+      border: 1px solid var(--bg-surface);
+      transition: all 0.3s;
+    }
+    
+    .node-card:hover {
+      transform: translateY(-2px);
+      border-color: var(--past);
+    }
+    
+    .node-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      margin-bottom: 15px;
+    }
+    
+    .node-name {
+      font-size: 1.1em;
+      font-weight: 600;
+      margin-bottom: 4px;
+    }
+    
+    .node-id {
+      font-size: 0.75em;
+      color: var(--text-muted);
+      font-family: monospace;
+    }
+    
+    .node-status {
+      padding: 4px 12px;
+      border-radius: 20px;
+      font-size: 0.75em;
+      font-weight: 600;
+    }
+    
+    .node-status.online {
+      background: rgba(0, 255, 136, 0.15);
+      color: var(--yes);
+    }
+    
+    .node-status.offline {
+      background: rgba(102, 102, 128, 0.2);
+      color: var(--text-muted);
+    }
+
+    .node-ip {
+      font-size: 0.75em;
+      color: var(--text-muted);
+      font-family: monospace;
+      margin-top: 2px;
+    }
+
+    .node-location {
+      font-size: 0.8em;
+      color: var(--text-muted);
+      margin-bottom: 12px;
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .cpu-model {
+      color: var(--past);
+      font-family: monospace;
+    }
+
+    .node-stats {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 8px;
+      margin-bottom: 15px;
+    }
+    
+    .node-stat {
+      background: var(--bg-surface);
+      padding: 12px;
+      border-radius: 8px;
+      text-align: center;
+    }
+    
+    .node-stat-value {
+      font-size: 1.2em;
+      font-weight: 700;
+    }
+    
+    .node-stat-label {
+      font-size: 0.7em;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      margin-top: 2px;
+    }
+    
+    .node-hardware {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 15px;
+    }
+    
+    .hardware-tag {
+      padding: 4px 10px;
+      background: var(--bg-surface);
+      border-radius: 4px;
+      font-size: 0.8em;
+      color: var(--text-secondary);
+    }
+    
+    .node-actions {
+      display: flex;
+      gap: 10px;
+    }
+    
+    .btn {
+      flex: 1;
+      padding: 10px 16px;
+      border-radius: 8px;
+      border: none;
+      cursor: pointer;
+      font-weight: 600;
+      font-size: 0.85em;
+      transition: all 0.2s;
+    }
+    
+    .btn-primary {
+      background: var(--yes);
+      color: #000;
+    }
+    
+    .btn-secondary {
+      background: var(--bg-surface);
+      color: var(--text-primary);
+    }
+    
+    .btn:hover { transform: translateY(-1px); }
+    
+    .protocol-section {
+      background: var(--bg-card);
+      border-radius: 16px;
+      padding: 30px;
+      border: 1px solid var(--bg-surface);
+      margin-bottom: 30px;
+    }
+    
+    .protocol-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 20px;
+    }
+    
+    .protocol-card {
+      background: var(--bg-surface);
+      border-radius: 12px;
+      padding: 20px;
+      text-align: center;
+    }
+    
+    .protocol-icon {
+      width: 50px;
+      height: 50px;
+      border-radius: 12px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 24px;
+      margin: 0 auto 12px;
+    }
+    
+    .protocol-card:nth-child(1) .protocol-icon { background: rgba(168, 85, 247, 0.2); color: var(--past); }
+    .protocol-card:nth-child(2) .protocol-icon { background: rgba(0, 255, 136, 0.2); color: var(--yes); }
+    .protocol-card:nth-child(3) .protocol-icon { background: rgba(116, 185, 255, 0.2); color: var(--future); }
+    
+    .protocol-name {
+      font-weight: 700;
+      margin-bottom: 6px;
+    }
+    
+    .protocol-desc {
+      font-size: 0.85em;
+      color: var(--text-secondary);
+    }
+    
+    .install-section {
+      background: linear-gradient(135deg, rgba(168, 85, 247, 0.1), rgba(116, 185, 255, 0.1));
+      border-radius: 16px;
+      padding: 30px;
+      border: 1px solid var(--bg-surface);
+    }
+    
+    .install-steps {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 20px;
+      margin-top: 20px;
+    }
+    
+    .install-step {
+      background: var(--bg-card);
+      border-radius: 12px;
+      padding: 20px;
+    }
+    
+    .step-number {
+      width: 30px;
+      height: 30px;
+      background: var(--past);
+      color: #fff;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 700;
+      margin-bottom: 12px;
+    }
+    
+    .step-title {
+      font-weight: 600;
+      margin-bottom: 8px;
+    }
+    
+    .step-code {
+      background: var(--bg-dark);
+      padding: 12px;
+      border-radius: 8px;
+      font-family: monospace;
+      font-size: 0.85em;
+      color: var(--yes);
+      overflow-x: auto;
+    }
+    
+    @media (max-width: 900px) {
+      .stats-grid { grid-template-columns: repeat(2, 1fr); }
+      .protocol-grid { grid-template-columns: 1fr; }
+      .install-steps { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <a href="/" class="brand">
+      <div class="brand-icon">⚡</div>
+      <span class="brand-text">HIVV</span>
+    </a>
+    <nav class="nav-links">
+      <a href="/">Home</a>
+      <a href="/database.html">Database</a>
+      <a href="/hivv.html">Neural Command</a>
+      <a href="/nodes.html" class="active">Nodes</a>
+      <a href="/api.html">API</a>
+    </nav>
+  </header>
+  
+  <div class="container">
+    <div class="page-header">
+      <h1>Your Compute Nodes</h1>
+      <p>Monitor and control every machine running AI in your network</p>
+    </div>
+    
+    <div class="stats-grid">
+      <div class="stat-card">
+        <div class="stat-value" id="total-nodes">0</div>
+        <div class="stat-label">Total Nodes</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-value" id="online-nodes" style="color: var(--yes);">0</div>
+        <div class="stat-label">Online</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-value" id="total-gpu">0 GB</div>
+        <div class="stat-label">Total VRAM</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-value" id="avg-util">0%</div>
+        <div class="stat-label">Avg Utilization</div>
+      </div>
+    </div>
+    
+    <h2 class="section-title">Your Nodes</h2>
+    
+    <div class="nodes-grid" id="nodes-grid">
+      <div class="node-card">
+        <div style="text-align: center; padding: 40px; color: var(--text-muted);">
+          Loading nodes...
+        </div>
+      </div>
+    </div>
+    
+    <div class="protocol-section">
+      <h2 class="section-title">The HIVV Protocol</h2>
+      <div class="protocol-grid">
+        <div class="protocol-card">
+          <div class="protocol-icon">◐</div>
+          <div class="protocol-name">Immutable Truth</div>
+          <div class="protocol-desc">Every action logged. Every decision recorded. Every outcome traced.</div>
+        </div>
+        <div class="protocol-card">
+          <div class="protocol-icon">✓ ✗ ?</div>
+          <div class="protocol-name">Three Gates</div>
+          <div class="protocol-desc">YES to proceed. NO to stop. MAYBE to ask. Every action passes through.</div>
+        </div>
+        <div class="protocol-card">
+          <div class="protocol-icon">👤</div>
+          <div class="protocol-name">Human Sovereignty</div>
+          <div class="protocol-desc">The human can always see, stop, and change anything. Always.</div>
+        </div>
+      </div>
+    </div>
+    
+    <div class="install-section">
+      <h2 class="section-title">Install HIVV Agent</h2>
+      <p style="color: var(--text-secondary); margin-bottom: 10px;">
+        Run AI on any computer and add it to your network.
+      </p>
+      <div class="install-steps">
+        <div class="install-step">
+          <div class="step-number">1</div>
+          <div class="step-title">Install</div>
+          <div class="step-code">npm install -g hivv-agent</div>
+        </div>
+        <div class="install-step">
+          <div class="step-number">2</div>
+          <div class="step-title">Configure</div>
+          <div class="step-code">hivv-agent init</div>
+        </div>
+        <div class="install-step">
+          <div class="step-number">3</div>
+          <div class="step-title">Connect</div>
+          <div class="step-code">hivv-agent connect</div>
+        </div>
+      </div>
+    </div>
+  </div>
+  
+  <script>
+    async function loadNodes() {
+      try {
+        const res = await fetch('/api/control/nodes');
+        const data = await res.json();
+
+        document.getElementById('total-nodes').textContent = data.total || 0;
+        document.getElementById('online-nodes').textContent = data.online || 0;
+
+        // Compute total GPU VRAM and average utilization from node data
+        if (data.nodes && data.nodes.length > 0) {
+          let totalVRAM = 0;
+          let totalUtil = 0;
+          let gpuCount = 0;
+          for (const node of data.nodes) {
+            if (node.gpus && node.gpus.length > 0) {
+              for (const gpu of node.gpus) {
+                totalVRAM += gpu.mem_total_mb || 0;
+                totalUtil += gpu.util_pct || 0;
+                gpuCount++;
+              }
+            }
+          }
+          document.getElementById('total-gpu').textContent = gpuCount > 0
+            ? Math.round(totalVRAM / 1024) + ' GB'
+            : '0 GB';
+          document.getElementById('avg-util').textContent = gpuCount > 0
+            ? Math.round(totalUtil / gpuCount) + '%'
+            : '0%';
+        }
+
+        const grid = document.getElementById('nodes-grid');
+
+        if (!data.nodes || data.nodes.length === 0) {
+          grid.innerHTML = `
+            <div class="node-card">
+              <div style="text-align: center; padding: 40px;">
+                <div style="font-size: 3em; margin-bottom: 15px;">🖥️</div>
+                <div style="color: var(--text-muted); margin-bottom: 15px;">No nodes registered yet</div>
+                <button class="btn btn-primary" onclick="registerNode()">+ Register First Node</button>
+              </div>
+            </div>
+          `;
+          return;
+        }
+
+        grid.innerHTML = data.nodes.map(node => `
+          <div class="node-card">
+            <div class="node-header">
+              <div>
+                <div class="node-name">${escapeHtml(node.name)}</div>
+                <div class="node-id">${escapeHtml(node.id)}</div>
+                ${node.lan_ip ? `<div class="node-ip">${escapeHtml(node.lan_ip)}</div>` : ''}
+              </div>
+              <span class="node-status ${node.status}">${node.status.toUpperCase()}</span>
+            </div>
+
+            ${node.location?.city || node.cpu_model ? `
+            <div class="node-location">
+              ${node.location?.city ? `<span>${escapeHtml(node.location.city)}, ${escapeHtml(node.location.country)}</span>` : ''}
+              ${node.cpu_model ? `<span class="cpu-model">${escapeHtml(node.cpu_model)}</span>` : ''}
+            </div>
+            ` : ''}
+
+            <div class="node-stats">
+              <div class="node-stat">
+                <div class="node-stat-value" style="color: var(--maybe);">${node.metrics?.cpu_percent || 0}%</div>
+                <div class="node-stat-label">CPU</div>
+              </div>
+              <div class="node-stat">
+                <div class="node-stat-value" style="color: var(--yes);">${node.metrics?.available_capacity !== undefined ? node.metrics.available_capacity : '—'}</div>
+                <div class="node-stat-label">CAPACITY</div>
+              </div>
+              <div class="node-stat">
+                <div class="node-stat-value">${node.metrics?.uptime_seconds ? formatUptime(node.metrics.uptime_seconds) : '—'}</div>
+                <div class="node-stat-label">UPTIME</div>
+              </div>
+            </div>
+
+            <div class="node-hardware">
+              ${node.cpu_model ? `<span class="hardware-tag">${escapeHtml(node.cpu_model.split(' ').slice(0,4).join(' '))}</span>` : ''}
+              ${node.system?.cpus ? `<span class="hardware-tag">${node.system.cpus} cores</span>` : ''}
+              ${node.capabilities?.length ? `<span class="hardware-tag">${node.capabilities.slice(0,3).join(', ')}</span>` : ''}
+            </div>
+
+            <div class="node-actions">
+              <button class="btn btn-primary" onclick="controlNode('${node.id}', 'start')">Start</button>
+              <button class="btn btn-secondary" onclick="controlNode('${node.id}', 'config')">Config</button>
+            </div>
+          </div>
+        `).join('');
+        
+      } catch (err) {
+        console.error('Failed to load nodes:', err);
+      }
+    }
+    
+    async function registerNode() {
+      const name = prompt('Enter a name for this node:', 'My Node');
+      if (!name) return;
+      
+      try {
+        const res = await fetch('/api/hivv/nodes/register', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name })
+        });
+        const data = await res.json();
+        
+        if (data.node_id) {
+          alert(`Node registered!\n\nNode ID: ${data.node_id}\n\nSave this key securely:\n${data.node_key}`);
+          loadNodes();
+        }
+      } catch (err) {
+        alert('Failed to register node: ' + err.message);
+      }
+    }
+    
+    async function controlNode(nodeId, action) {
+      alert(`${action} action for node ${nodeId} - Coming soon!`);
+    }
+    
+    function escapeHtml(str) {
+      if (!str) return '';
+      const d = document.createElement('div');
+      d.textContent = String(str);
+      return d.innerHTML;
+    }
+
+    function formatUptime(seconds) {
+      if (!seconds || seconds < 1) return '—';
+      const d = Math.floor(seconds / 86400);
+      const h = Math.floor((seconds % 86400) / 3600);
+      const m = Math.floor((seconds % 3600) / 60);
+      if (d > 0) return d + 'd' + h + 'h';
+      if (h > 0) return h + 'h' + m + 'm';
+      return m + 'm';
+    }
+
+    loadNodes();
+    setInterval(loadNodes, 10000);
+  </script>
+</body>
+</html>

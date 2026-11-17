@@ -1,0 +1,20 @@
+# hivv llama.cpp unit — second model server (:8081), USER SCOPE (non-root).
+# Optional: only enable this once the GGUF below actually exists on your box.
+# Install: cp to ~/.config/systemd/user/, then
+#   systemctl --user daemon-reload && systemctl --user enable --now llama-qwen.service
+# (See llama-gemma.service header for the full anti-crash-loop rules.)
+
+[Unit]
+Description=llama-server - Qwen (:8081)
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/home/asher/llama.cpp/build/bin/llama-server --host 127.0.0.1 --port 8081 -m /home/asher/models/qwen/Qwen2.5-0.5B-Instruct-Q8_0.gguf -ngl 99 -c 4096
+Restart=on-failure
+RestartSec=5
+StandardOutput=append:/home/asher/llama-qwen.log
+StandardError=append:/home/asher/llama-qwen.log
+
+[Install]
+WantedBy=default.target

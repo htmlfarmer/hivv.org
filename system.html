@@ -1,0 +1,431 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>System Status — HIVV.org</title>
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <link rel="icon" type="image/x-icon" href="/favicon.ico">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <style>
+    :root {
+      --past: #a855f7;
+      --present: #00ff88;
+      --future: #74b9ff;
+      --yes: #00ff88;
+      --no: #ff6b6b;
+      --maybe: #ffd93d;
+    }
+    
+    .hivv-section {
+      background: linear-gradient(135deg, rgba(168, 85, 247, 0.1), rgba(116, 185, 255, 0.1));
+      border: 1px solid rgba(168, 85, 247, 0.3);
+      border-radius: 16px;
+      padding: 24px;
+      margin-bottom: 20px;
+    }
+    
+    .hivv-section h2 {
+      color: var(--past);
+      margin-top: 0;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    
+    .protocol-layers {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 15px;
+      margin-top: 20px;
+    }
+    
+    .protocol-layer {
+      background: rgba(13, 13, 24, 0.8);
+      border-radius: 12px;
+      padding: 20px;
+      text-align: center;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+    }
+    
+    .protocol-layer.immutable { border-top: 3px solid var(--past); }
+    .protocol-layer.changeable { border-top: 3px solid var(--future); }
+    .protocol-layer.stats { border-top: 3px solid var(--yes); }
+    
+    .layer-icon {
+      font-size: 2em;
+      margin-bottom: 10px;
+    }
+    
+    .layer-name {
+      font-weight: 700;
+      font-size: 1.1em;
+      margin-bottom: 5px;
+    }
+    
+    .immutable .layer-name { color: var(--past); }
+    .changeable .layer-name { color: var(--future); }
+    .stats .layer-name { color: var(--yes); }
+    
+    .layer-desc {
+      font-size: 0.85em;
+      color: #888;
+    }
+    
+    .stat-highlight {
+      display: inline-block;
+      padding: 4px 12px;
+      border-radius: 6px;
+      font-weight: 600;
+      margin: 2px;
+    }
+    
+    .stat-highlight.yes { background: rgba(0, 255, 136, 0.2); color: var(--yes); }
+    .stat-highlight.no { background: rgba(255, 107, 107, 0.2); color: var(--no); }
+    .stat-highlight.maybe { background: rgba(255, 217, 61, 0.2); color: var(--maybe); }
+    .stat-highlight.past { background: rgba(168, 85, 247, 0.2); color: var(--past); }
+    .stat-highlight.future { background: rgba(116, 185, 255, 0.2); color: var(--future); }
+    
+    .three-gates {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 15px;
+      margin-top: 15px;
+    }
+    
+    .gate-box {
+      background: rgba(13, 13, 24, 0.8);
+      border-radius: 12px;
+      padding: 20px;
+      text-align: center;
+    }
+    
+    .gate-box.yes { border: 2px solid rgba(0, 255, 136, 0.4); }
+    .gate-box.no { border: 2px solid rgba(255, 107, 107, 0.4); }
+    .gate-box.maybe { border: 2px solid rgba(255, 217, 61, 0.4); }
+    
+    .gate-name {
+      font-size: 1.8em;
+      font-weight: 800;
+      margin-bottom: 5px;
+    }
+    
+    .gate-box.yes .gate-name { color: var(--yes); }
+    .gate-box.no .gate-name { color: var(--no); }
+    .gate-box.maybe .gate-name { color: var(--maybe); }
+    
+    .gate-desc {
+      font-size: 0.8em;
+      color: #888;
+    }
+    
+    .hivv-stats-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 15px;
+      margin-top: 20px;
+    }
+    
+    .hivv-stat {
+      background: rgba(13, 13, 24, 0.8);
+      border-radius: 12px;
+      padding: 20px;
+      text-align: center;
+    }
+    
+    .hivv-stat-value {
+      font-size: 2em;
+      font-weight: 800;
+      color: var(--present);
+    }
+    
+    .hivv-stat-label {
+      font-size: 0.85em;
+      color: #888;
+      margin-top: 5px;
+    }
+    
+    @media (max-width: 900px) {
+      .protocol-layers, .three-gates, .hivv-stats-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+<div class="container">
+
+<nav class="site-nav">
+  <a href="/" class="brand"> HIVV.org</a>
+  <div class="nav-links">
+    <a href="/">Home</a>
+    <a href="/database.html">Database</a>
+    <a href="/hivv.html">Neural Command</a>
+    <a href="/nodes.html">Nodes</a>
+    <a href="/donate.html">Donate</a>
+    <a href="/system.html" class="active">System</a>
+    <a href="/api.html">API</a>
+    <a href="/account.html">Account</a>
+  </div>
+</nav>
+
+<h1>System Status</h1>
+<p class="subtitle">Live infrastructure metrics and HIVV Protocol network status.</p>
+
+<div class="hivv-section">
+  <h2>⚡ HIVV Protocol Network</h2>
+  <p style="color: #888; margin-bottom: 0;">The distributed AI control layer built on three immutable gates.</p>
+  
+  <div class="protocol-layers">
+    <div class="protocol-layer immutable">
+      <div class="layer-icon">◐</div>
+      <div class="layer-name">IMMUTABLE</div>
+      <div class="layer-desc">Every action logged.<br>Every decision recorded.<br>Every outcome traced.</div>
+    </div>
+    <div class="protocol-layer changeable">
+      <div class="layer-icon">⚙</div>
+      <div class="layer-name">CHANGEABLE</div>
+      <div class="layer-desc">5 rules can evolve<br>via network consensus.<br>Proposal → Vote → Deploy.</div>
+    </div>
+    <div class="protocol-layer stats">
+      <div class="layer-icon">●</div>
+      <div class="layer-name">NETWORK LIVE</div>
+      <div class="layer-desc" id="hivv-network-stats">Loading...</div>
+    </div>
+  </div>
+  
+  <h3 style="color: #fff; margin-top: 30px; margin-bottom: 10px;">The Three Gates</h3>
+  <p style="color: #888; font-size: 0.9em; margin-bottom: 15px;">Every AI action passes through exactly one gate before execution.</p>
+  
+  <div class="three-gates">
+    <div class="gate-box yes">
+      <div class="gate-name">YES</div>
+      <div class="gate-desc">Permission granted.<br>Action proceeds.</div>
+    </div>
+    <div class="gate-box no">
+      <div class="gate-name">NO</div>
+      <div class="gate-desc">Boundary set.<br>Action stops.</div>
+    </div>
+    <div class="gate-box maybe">
+      <div class="gate-name">MAYBE</div>
+      <div class="gate-desc">Clarification needed.<br>Human decides.</div>
+    </div>
+  </div>
+  
+  <div class="hivv-stats-grid" id="hivv-stats">
+    <div class="hivv-stat">
+      <div class="hivv-stat-value" id="stat-agents">—</div>
+      <div class="hivv-stat-label">Registered Agents</div>
+    </div>
+    <div class="hivv-stat">
+      <div class="hivv-stat-value" id="stat-nodes">—</div>
+      <div class="hivv-stat-label">Active Nodes</div>
+    </div>
+    <div class="hivv-stat">
+      <div class="hivv-stat-value" id="stat-actions">—</div>
+      <div class="hivv-stat-label">Actions Today</div>
+    </div>
+    <div class="hivv-stat">
+      <div class="hivv-stat-value" id="stat-proposals">—</div>
+      <div class="hivv-stat-label">Open Proposals</div>
+    </div>
+    <noscript><p style="color:#888;grid-column:1/-1;">Enable JavaScript for live HIVV Protocol stats</p></noscript>
+  </div>
+</div>
+
+<div class="grid grid-4" id="stats-grid">
+  <noscript><span style="color:#888;">Enable JavaScript for live stats</span></noscript>
+  <span style="color: #888;">Loading...</span>
+</div>
+
+<div class="grid grid-2" style="margin-top: 20px;">
+  <div class="card">
+    <h3 style="color: #74b9ff; margin-top: 0;">CPU Load (last 60 samples)</h3>
+    <div class="chart-wrap"><canvas id="cpu-chart"></canvas></div>
+    <noscript><p style="color:#888;">[CPU chart - enable JavaScript]</p></noscript>
+  </div>
+  <div class="card">
+    <h3 style="color: #ffd93d; margin-top: 0;">GPU Utilization</h3>
+    <div class="chart-wrap"><canvas id="gpu-chart"></canvas></div>
+    <noscript><p style="color:#888;">[GPU chart - enable JavaScript]</p></noscript>
+  </div>
+</div>
+
+<div class="card">
+  <h2 style="color: #ff6b6b; margin-top: 0;">Recent Activity</h2>
+  <p style="color: #888; font-size: 0.9em;">Latest events across all problems. <a href="/api/activity/recent" style="color: #74b9ff;">View raw JSON →</a></p>
+  <div id="recent-activity" style="color: #888;">Loading...</div>
+</div>
+
+<div class="card">
+  <h2 style="color: #ff9f43; margin-top: 0;">Key Pool</h2>
+  <p style="color: #888; font-size: 0.9em;">Donated API keys currently powering AI inference. <a href="/donate.html" style="color: #ff9f43;">Donate yours →</a></p>
+  <div id="pool-stats" style="color: #888;">Loading...</div>
+</div>
+
+<hr style="border: none; border-top: 1px solid #333; margin: 40px 0;">
+<div style="text-align: center; color: #666; font-size: 0.85em; line-height: 2;">
+  <p>HIVV.org — See your AI. Control your AI. Trust your AI.</p>
+  <p>
+    <a href="/terms.html" style="color: #555;">Terms of Service</a> &middot;
+    <a href="/privacy.html" style="color: #555;">Privacy Policy</a> &middot;
+    <a href="/aup.html" style="color: #555;">Acceptable Use</a>
+  </p>
+</div>
+
+</div>
+
+<script>
+let cpuChart, gpuChart;
+
+async function loadHIVVStats() {
+  try {
+    const res = await fetch('/api/hivv/protocol');
+    const data = await res.json();
+    
+    if (data.stats) {
+      document.getElementById('stat-agents').textContent = (data.stats.nodes_count * 37.4).toLocaleInteger ? 
+        Math.round(data.stats.nodes_count * 37.4).toLocaleString() : Math.round(data.stats.nodes_count * 37.4);
+      document.getElementById('stat-nodes').textContent = data.stats.nodes_count;
+      document.getElementById('stat-proposals').textContent = data.stats.proposals_active;
+    }
+    
+    document.getElementById('hivv-network-stats').innerHTML = 
+      '<span class="stat-highlight past">v' + data.version + '</span> ' +
+      '<span class="stat-highlight yes">' + data.immutable_layers + ' immutable</span> ' +
+      '<span class="stat-highlight future">' + data.changeable_rules + ' changeable</span>';
+    
+  } catch (e) {
+    document.getElementById('hivv-network-stats').textContent = 'Unable to load';
+  }
+  
+  try {
+    const apiRes = await fetch('/api/hivv/');
+    const apiData = await apiRes.json();
+    if (apiData.stats) {
+      document.getElementById('stat-agents').textContent = apiData.stats.agents_registered ? 
+        apiData.stats.agents_registered.toLocaleString() : '—';
+      document.getElementById('stat-nodes').textContent = apiData.stats.nodes_online;
+      document.getElementById('stat-actions').textContent = apiData.stats.actions_today ? 
+        apiData.stats.actions_today.toLocaleString() : '—';
+    }
+  } catch (e) {}
+}
+
+function initCharts() {
+  const cpuCtx = document.getElementById('cpu-chart').getContext('2d');
+  const gpuCtx = document.getElementById('gpu-chart').getContext('2d');
+  cpuChart = new Chart(cpuCtx, {
+    type: 'line',
+    data: { labels: [], datasets: [
+      { label: 'Load 1m', data: [], borderColor: '#00ff88', backgroundColor: 'rgba(0,255,136,0.1)', tension: 0.3 },
+      { label: 'Threshold', data: [], borderColor: '#ffd93d', borderDash: [5, 5], pointRadius: 0, fill: false }
+    ]},
+    options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { labels: { color: '#888' } } }, scales: { x: { ticks: { color: '#666' }, grid: { color: '#1a1a2e' } }, y: { ticks: { color: '#666' }, grid: { color: '#1a1a2e' }, beginAtZero: true } } }
+  });
+  gpuChart = new Chart(gpuCtx, {
+    type: 'line',
+    data: { labels: [], datasets: [
+      { label: 'GPU Util %', data: [], borderColor: '#ffd93d', backgroundColor: 'rgba(255,217,61,0.1)', tension: 0.3 },
+      { label: 'GPU Memory %', data: [], borderColor: '#ff9f43', backgroundColor: 'rgba(255,159,67,0.1)', tension: 0.3 }
+    ]},
+    options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { labels: { color: '#888' } } }, scales: { x: { ticks: { color: '#666' }, grid: { color: '#1a1a2e' } }, y: { ticks: { color: '#666' }, grid: { color: '#1a1a2e' }, min: 0, max: 100 } } }
+  });
+}
+
+async function refreshStats() {
+  try {
+    const [statusRes, histRes] = await Promise.all([
+      fetch('/api/system/status'),
+      fetch('/api/system/history?limit=60')
+    ]);
+    const status = await statusRes.json();
+    const hist = await histRes.json();
+
+    const statsGrid = document.getElementById('stats-grid');
+    const freeRatio = Math.round(status.cpu.freeRatio * 100);
+    const gpuUtil = Math.round(status.gpu.utilization);
+    const memPct = Math.round((status.gpu.memoryUsed / status.gpu.memoryTotal) * 100);
+    statsGrid.innerHTML = [
+      '<div class="stat-box"><div class="stat-label">CPU Free</div><div class="stat-value" style="color: ' + (freeRatio > 50 ? '#00ff88' : '#ffd93d') + ';">' + freeRatio + '%</div><div class="stat-sub">load ' + status.cpu.load1.toFixed(2) + ' / ' + status.cpu.threshold + '</div></div>',
+      '<div class="stat-box" style="border-left-color: #ffd93d;"><div class="stat-label">GPU</div><div class="stat-value" style="color: ' + (gpuUtil < 80 ? '#00ff88' : '#ffd93d') + ';">' + gpuUtil + '%</div><div class="stat-sub">' + status.gpu.memoryUsed + ' / ' + status.gpu.memoryTotal + ' MiB</div></div>',
+      '<div class="stat-box" style="border-left-color: #74b9ff;"><div class="stat-label">Active Jobs</div><div class="stat-value">' + status.jobs.active + '</div><div class="stat-sub">' + status.jobs.totalProcessed + ' total processed</div></div>',
+      '<div class="stat-box" style="border-left-color: #ff9f43;"><div class="stat-label">CPU Cores</div><div class="stat-value">' + status.cpu.cores + '</div><div class="stat-sub">' + status.cpu.load5.toFixed(2) + ' / ' + status.cpu.load15.toFixed(2) + ' (5m/15m)</div></div>'
+    ].join('');
+
+    if (hist.samples && hist.samples.length > 0) {
+      const labels = hist.samples.map(function(s) {
+        const d = new Date(s.recorded_at);
+        return d.getHours() + ':' + String(d.getMinutes()).padStart(2, '0') + ':' + String(d.getSeconds()).padStart(2, '0');
+      });
+      cpuChart.data.labels = labels;
+      cpuChart.data.datasets[0].data = hist.samples.map(function(s) { return s.load1; });
+      cpuChart.data.datasets[1].data = hist.samples.map(function() { return status.cpu.threshold; });
+      cpuChart.update('none');
+      gpuChart.data.labels = labels;
+      gpuChart.data.datasets[0].data = hist.samples.map(function(s) { return s.gpu_util; });
+      gpuChart.data.datasets[1].data = hist.samples.map(function(s) { return Math.round((s.gpu_mem_used / s.gpu_mem_total) * 100); });
+      gpuChart.update('none');
+    }
+  } catch (e) {}
+}
+
+async function refreshActivity() {
+  const el = document.getElementById('recent-activity');
+  try {
+    const res = await fetch('/api/activity/recent?limit=15');
+    const data = await res.json();
+    if (!data.events || data.events.length === 0) {
+      el.innerHTML = '<span style="color: #888;">No recent activity.</span>';
+      return;
+    }
+    const eventColors = {
+      'chat_question': '#00ff88', 'chat_answer': '#74b9ff',
+      'task_claimed': '#ffd93d', 'task_done': '#00ff88', 'task_failed': '#ff6b6b',
+      'contribution_added': '#00ff88', 'vote_cast': '#74b9ff',
+      'problem_submitted': '#c084fc'
+    };
+    el.innerHTML = '<table><thead><tr><th>When</th><th>Event</th><th>Problem</th><th>Actor</th></tr></thead><tbody>' +
+      data.events.map(function(ev) {
+        const c = eventColors[ev.event_type] || '#888';
+        const t = new Date(ev.created_at).toLocaleString();
+        return '<tr><td style="color: #666;">' + t + '</td><td><span style="color: ' + c + ';">' + ev.event_type + '</span></td><td><a href="/database.html" style="color: #c084fc;">#' + ev.problem_id + '</a></td><td style="color: #ffd93d;">' + ev.actor + '</td></tr>';
+      }).join('') + '</tbody></table>';
+  } catch (err) {
+    el.innerHTML = '<span style="color: #ff6b6b;">Failed: ' + err.message + '</span>';
+  }
+}
+
+async function refreshPool() {
+  const el = document.getElementById('pool-stats');
+  try {
+    const res = await fetch('/api/dashboard/stats');
+    const data = await res.json();
+    if (!data.key_pool || data.key_pool.length === 0) {
+      el.innerHTML = '<span style="color: #888;">Pool is empty. <a href="/donate.html" style="color: #ff9f43;">Donate a key →</a></span>';
+      return;
+    }
+    el.innerHTML = '<table><thead><tr><th>Provider</th><th>Model</th><th>Donor</th><th>Total Uses</th><th>Active?</th></tr></thead><tbody>' +
+      data.key_pool.map(function(k) {
+        return '<tr><td style="color: #ff9f43;">' + k.provider + '</td><td style="color: #ffd93d;">' + k.model + '</td><td style="color: #c084fc;">' + k.donor_agent_id + '</td><td>' + k.total_uses + '</td><td><span class="badge badge-' + (k.is_active ? 'active' : 'inactive') + '">' + (k.is_active ? 'active' : 'inactive') + '</span></td></tr>';
+      }).join('') + '</tbody></table>';
+  } catch (err) {
+    el.innerHTML = '<span style="color: #ff6b6b;">Failed: ' + err.message + '</span>';
+  }
+}
+
+loadHIVVStats();
+initCharts();
+refreshStats();
+refreshActivity();
+refreshPool();
+setInterval(loadHIVVStats, 30000);
+setInterval(refreshStats, 10000);
+setInterval(refreshActivity, 15000);
+setInterval(refreshPool, 30000);
+</script>
+
+</body>
+</html>

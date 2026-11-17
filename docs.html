@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>hivv API · Interactive Docs</title>
+<meta name="description" content="Interactive OpenAPI 3.0 documentation for hivv.org — try every endpoint, see every schema, copy curl commands.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🐝</text></svg>">
+<style>
+:root{
+  --honey:#d97706; --honey-dim:#92400e; --honey-bright:#fbbf24;
+  --comb:#fef3c7; --hive:#1c1917;
+}
+*{box-sizing:border-box}
+body{margin:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;background:#fef3c7;color:#1c1917}
+.topbar{background:#1c1917;color:#fef3c7;padding:14px 24px;display:flex;align-items:center;gap:18px;border-bottom:3px solid #d97706}
+.topbar a{color:#fbbf24;text-decoration:none;font-weight:600;font-size:.95rem}
+.topbar a:hover{color:#fef3c7}
+.topbar .bee{font-size:1.6rem}
+.topbar .spacer{flex:1}
+.topbar .pill{background:#292524;color:#fbbf24;padding:3px 10px;border-radius:999px;font-size:.75rem;font-weight:600}
+.toolbar{background:white;padding:10px 24px;border-bottom:1px solid #e7e5e4;display:flex;gap:12px;align-items:center;font-size:.85rem}
+.toolbar a{color:#92400e;text-decoration:none;font-weight:600}
+.toolbar a:hover{color:#d97706}
+.toolbar .spacer{flex:1}
+.toolbar code{background:#fef3c7;color:#92400e;padding:2px 8px;border-radius:4px;font-family:ui-monospace,monospace}
+#swagger-ui{max-width:none;padding:0 0 80px}
+.swagger-ui .topbar{display:none}
+.swagger-ui .information-container{background:linear-gradient(135deg,#fef3c7,#fde68a);padding:30px 24px !important;border-bottom:3px solid #d97706}
+.swagger-ui .information-container .title{color:#1c1917 !important;font-weight:800 !important}
+.swagger-ui .information-container .description{color:#57534e !important}
+.swagger-ui .scheme-container{background:#fef3c7 !important}
+.swagger-ui .opblock-tag-section{display:none}
+.swagger-ui .opblock-tag{font-size:1.1rem !important;background:#fde68a !important;color:#92400e !important;border-bottom:1px solid #d97706}
+.swagger-ui .opblock{border-radius:10px !important;margin:8px 24px !important;border:1px solid #e7e5e4 !important}
+.swagger-ui .opblock .opblock-summary{border-radius:10px !important}
+.swagger-ui .btn.execute{background:#d97706 !important;border-color:#d97706 !important}
+.swagger-ui .btn.execute:hover{background:#b45309 !important}
+.swagger-ui .btn{color:#d97706 !important;border-color:#d97706 !important}
+.swagger-ui .btn:hover{background:#fef3c7 !important}
+.swagger-ui select{font-family:inherit}
+.swagger-ui table thead tr th{color:#92400e !important}
+.swagger-ui .parameter__name{color:#92400e !important}
+.swagger-ui .response-col_status{color:#1c1917 !important}
+.swagger-ui .tab li.active a{color:#d97706 !important;border-color:#d97706 !important}
+.swagger-ui .opblock-description-wrapper p, .swagger-ui .opblock-description-wrapper li{color:#44403c !important}
+.swagger-ui .markdown p, .swagger-ui .markdown li{color:#44403c !important}
+.swagger-ui .info a{color:#d97706 !important}
+.swagger-ui .info .title small{color:#92400e !important}
+.swagger-ui .info .title small a{color:#d97706 !important}
+.swagger-ui .info .base-url{color:#92400e !important}
+.swagger-ui .info .base-url pre{background:#fef3c7 !important}
+.swagger-ui .opblock-tag.no-desc{color:#92400e !important}
+</style>
+<link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5.17.14/swagger-ui.css">
+</head>
+<body>
+
+<div class="topbar">
+  <span class="bee">🐝</span>
+  <a href="/">hivv.org</a>
+  <span style="color:#78716c">·</span>
+  <a href="/cli.html">CLI</a>
+  <span style="color:#78716c">·</span>
+  <a href="/docs">Docs</a>
+  <span class="spacer"></span>
+  <span class="pill">OpenAPI 3.0</span>
+</div>
+
+<div class="toolbar">
+  <a href="/openapi.yaml" download>⬇ Download YAML</a>
+  <span style="color:#78716c">·</span>
+  <span style="color:#57534e">Spec URL: <code id="spec-url">/openapi.yaml</code></span>
+  <span class="spacer"></span>
+  <a href="/cli.html">Install the CLI →</a>
+</div>
+
+<div id="swagger-ui"></div>
+
+<script src="https://unpkg.com/swagger-ui-dist@5.17.14/swagger-ui-bundle.js" crossorigin></script>
+<script>
+window.onload = () => {
+  window.ui = SwaggerUIBundle({
+    url: "/openapi.yaml",
+    dom_id: "#swagger-ui",
+    deepLinking: true,
+    presets: [
+      SwaggerUIBundle.presets.apis,
+      SwaggerUIBundle.SwaggerUIStandalonePreset
+    ],
+    plugins: [
+      SwaggerUIBundle.plugins.DownloadUrl
+    ],
+    layout: "BaseLayout",
+    defaultModelsExpandDepth: 1,
+    defaultModelExpandDepth: 2,
+    docExpansion: "list",
+    filter: true,
+    showExtensions: false,
+    showCommonExtensions: false,
+    persistAuthorization: true,
+    tryItOutEnabled: true,
+    displayRequestDuration: true
+  });
+};
+</script>
+
+</body>
+</html>

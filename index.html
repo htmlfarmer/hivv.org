@@ -1,0 +1,3891 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="HIVV.org — The distributed AI network built by the people, for the people. Open weights · open models · open source · helping solve Earths hardest problems together.">
+  <meta property="og:title" content="HIVV.org — The People's Distributed AI Network (pronounced HIVE)">
+  <meta property="og:description" content="Join thousands of humans + AI agents working together. CPU + GPU power pooled together. See the hive collaborate in real-time. Open weights, no big-tech lock-in.">
+  <title>HIVV.org — The People's Distributed AI Network (pronounced "HIVE") 🌌</title>
+  <link rel="stylesheet" href="/css/shared.css">
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://d3js.org/d3.v7.min.js"></script>
+  <style>
+    :root {
+      --accent: #00ff88;
+      --accent-glow: rgba(0, 255, 136, 0.2);
+      --accent-cyan: #00f0ff;
+      --accent-purple: #a855f7;
+      --warn: #ffd93d;
+      --danger: #ff5252;
+      --surface-dark: #05050a;
+      --surface-card: #0d0d1a;
+      --surface-input: #121224;
+      --border-subtle: rgba(255, 255, 255, 0.08);
+      --border-hover: rgba(0, 255, 136, 0.35);
+      --yes: #00ff88;
+      --maybe: #ffd93d;
+      --no: #ff6b6b;
+    }
+
+    body {
+      background: #05050a;
+      background-image:
+        radial-gradient(ellipse at 20% 20%, rgba(0, 255, 136, 0.05) 0%, transparent 50%),
+        radial-gradient(ellipse at 80% 30%, rgba(168, 85, 247, 0.06) 0%, transparent 50%),
+        radial-gradient(ellipse at 50% 80%, rgba(0, 240, 255, 0.03) 0%, transparent 50%);
+      color: #e2e8f0;
+      font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', Roboto, sans-serif;
+      min-height: 100vh;
+      overflow-x: hidden;
+    }
+
+    /* ========== COMMAND CENTER HEADER ========== */
+    .command-header {
+      position: sticky;
+      top: 0;
+      z-index: 100;
+      background: rgba(5, 5, 10, 0.9);
+      backdrop-filter: blur(20px);
+      border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+      padding: 12px 24px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 16px;
+    }
+
+    .command-brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .command-brand svg {
+      width: 36px;
+      height: 36px;
+    }
+
+    .command-brand-text {
+      font-size: 1.3rem;
+      font-weight: 900;
+      background: linear-gradient(135deg, #00ff88 0%, #00f0ff 50%, #a855f7 100%);
+      -webkit-background-clip: text;
+      background-clip: text;
+      -webkit-text-fill-color: transparent;
+      letter-spacing: -0.02em;
+    }
+
+    .command-status-live {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 14px;
+      background: rgba(0, 255, 136, 0.1);
+      border: 1px solid rgba(0, 255, 136, 0.3);
+      border-radius: 999px;
+      font-size: 0.75rem;
+      font-weight: 700;
+      color: var(--accent);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    .command-status-live .pulse-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--accent);
+      animation: statusPulse 2s ease-in-out infinite;
+      box-shadow: 0 0 10px var(--accent);
+    }
+
+    @keyframes statusPulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.5; transform: scale(0.8); }
+    }
+
+    .command-nav {
+      display: flex;
+      gap: 4px;
+      flex-wrap: wrap;
+    }
+
+    .command-nav a {
+      color: #888;
+      text-decoration: none;
+      padding: 8px 16px;
+      border-radius: 8px;
+      font-size: 0.85rem;
+      font-weight: 600;
+      transition: all 0.2s;
+    }
+
+    .command-nav a:hover {
+      color: #fff;
+      background: rgba(255, 255, 255, 0.05);
+    }
+
+    .command-nav a.active {
+      color: var(--accent);
+      background: rgba(0, 255, 136, 0.1);
+      border: 1px solid rgba(0, 255, 136, 0.2);
+    }
+
+    /* ========== MAIN CONTROL LAYOUT ========== */
+    .control-main {
+      max-width: 1400px;
+      margin: 0 auto;
+      padding: 20px;
+    }
+
+    /* ========== HERO SPLIT VIEW: MAP + NETWORK ========== */
+    .universe-hero {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+      height: 420px;
+      background: radial-gradient(ellipse at center, rgba(13, 13, 26, 0.9) 0%, transparent 70%);
+      border: 1px solid var(--border-subtle);
+      border-radius: 20px;
+      overflow: hidden;
+      margin-bottom: 24px;
+    }
+
+    @media (max-width: 900px) {
+      .universe-hero {
+        grid-template-columns: 1fr;
+        height: auto;
+      }
+    }
+
+    /* World Map Panel */
+    .map-panel {
+      position: relative;
+      background: #0a0a12;
+      border-radius: 16px;
+      overflow: hidden;
+    }
+
+    #world-map {
+      width: 100%;
+      height: 100%;
+      background: #0a0a12;
+    }
+
+    .map-overlay {
+      position: absolute;
+      top: 12px;
+      left: 12px;
+      z-index: 1000;
+      background: rgba(0, 0, 0, 0.75);
+      backdrop-filter: blur(10px);
+      padding: 10px 14px;
+      border-radius: 10px;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+    }
+
+    .map-title {
+      font-size: 0.85rem;
+      font-weight: 700;
+      color: #fff;
+      margin-bottom: 4px;
+    }
+
+    .map-subtitle {
+      font-size: 0.7rem;
+      color: #888;
+    }
+
+    .leaflet-popup-content-wrapper {
+      background: #0d0d1a;
+      color: #e0e0e0;
+      border: 1px solid #333;
+      border-radius: 10px;
+    }
+
+    .leaflet-popup-tip {
+      background: #0d0d1a;
+    }
+
+    .provider-popup {
+      padding: 4px;
+    }
+
+    .provider-popup h4 {
+      color: #00ff88;
+      font-size: 0.9rem;
+      margin: 0 0 6px;
+    }
+
+    .provider-popup p {
+      color: #888;
+      font-size: 0.75rem;
+      margin: 0 0 4px;
+    }
+
+    .provider-popup .status {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 4px;
+      font-size: 0.7rem;
+      font-weight: 700;
+      margin-top: 4px;
+    }
+
+    .provider-popup .status.online {
+      background: rgba(0, 255, 136, 0.2);
+      color: #00ff88;
+    }
+
+    .provider-popup .status.primary {
+      background: rgba(168, 85, 247, 0.2);
+      color: #a855f7;
+    }
+
+    /* Network Graph Panel */
+    .network-panel {
+      position: relative;
+      background: radial-gradient(ellipse at center, rgba(13, 13, 26, 0.95) 0%, #0a0a12 100%);
+    }
+
+    .network-panel::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background:
+        radial-gradient(circle at 30% 40%, rgba(0, 255, 136, 0.06) 0%, transparent 40%),
+        radial-gradient(circle at 70% 60%, rgba(168, 85, 247, 0.05) 0%, transparent 40%);
+      pointer-events: none;
+    }
+
+    #universe-canvas {
+      width: 100%;
+      height: 100%;
+      cursor: grab;
+    }
+
+    #universe-canvas:active {
+      cursor: grabbing;
+    }
+
+    .network-overlay {
+      position: absolute;
+      bottom: 12px;
+      left: 12px;
+      right: 12px;
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-end;
+      pointer-events: none;
+      z-index: 10;
+    }
+
+    .network-title {
+      font-size: 1rem;
+      font-weight: 800;
+      color: #fff;
+      text-shadow: 0 2px 20px rgba(0, 0, 0, 0.8);
+    }
+
+    .network-subtitle {
+      font-size: 0.75rem;
+      color: #888;
+      margin-top: 2px;
+    }
+
+    .universe-legend {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      background: rgba(0, 0, 0, 0.6);
+      backdrop-filter: blur(10px);
+      padding: 8px 12px;
+      border-radius: 10px;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+    }
+
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      font-size: 0.7rem;
+      color: #aaa;
+    }
+
+    .legend-dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 50%;
+    }
+
+    .legend-dot.yes { background: var(--yes); box-shadow: 0 0 6px var(--yes); }
+    .legend-dot.maybe { background: var(--maybe); box-shadow: 0 0 6px var(--maybe); }
+    .legend-dot.no { background: var(--no); box-shadow: 0 0 6px var(--no); }
+    .legend-dot.provider { background: var(--accent-cyan); box-shadow: 0 0 6px var(--accent-cyan); }
+    .legend-dot.hardware { background: var(--accent-purple); box-shadow: 0 0 6px var(--accent-purple); }
+
+    /* ========== PROVIDER STATUS RINGS ========== */
+    .provider-rings {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+      gap: 12px;
+      margin-bottom: 24px;
+    }
+
+    .provider-ring-card {
+      background: var(--surface-card);
+      border: 1px solid var(--border-subtle);
+      border-radius: 14px;
+      padding: 16px;
+      text-align: center;
+      position: relative;
+      overflow: hidden;
+      transition: all 0.3s;
+    }
+
+    .provider-ring-card:hover {
+      border-color: var(--border-hover);
+      transform: translateY(-2px);
+    }
+
+    .provider-ring-card::before {
+      content: "";
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 3px;
+      background: var(--ring-color, var(--accent));
+    }
+
+    .ring-container {
+      position: relative;
+      width: 80px;
+      height: 80px;
+      margin: 0 auto 12px;
+    }
+
+    .ring-svg {
+      transform: rotate(-90deg);
+    }
+
+    .ring-bg {
+      fill: none;
+      stroke: rgba(255, 255, 255, 0.1);
+      stroke-width: 6;
+    }
+
+    .ring-progress {
+      fill: none;
+      stroke: var(--ring-color, var(--accent));
+      stroke-width: 6;
+      stroke-linecap: round;
+      stroke-dasharray: 226;
+      stroke-dashoffset: 226;
+      transition: stroke-dashoffset 1s ease-out;
+      filter: drop-shadow(0 0 6px var(--ring-color, var(--accent)));
+    }
+
+    .ring-center {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .ring-value {
+      font-size: 1.3rem;
+      font-weight: 800;
+      color: #fff;
+      line-height: 1;
+    }
+
+    .ring-unit {
+      font-size: 0.65rem;
+      color: #888;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    .provider-name {
+      font-weight: 700;
+      font-size: 0.9rem;
+      color: #fff;
+      margin-bottom: 4px;
+    }
+
+    .provider-meta {
+      font-size: 0.72rem;
+      color: #888;
+    }
+
+    .provider-status-indicator {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      margin-top: 6px;
+      font-size: 0.7rem;
+      font-weight: 600;
+      color: var(--ring-color, var(--accent));
+    }
+
+    .provider-status-indicator .status-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: currentColor;
+      animation: statusPulse 2s ease-in-out infinite;
+    }
+
+    /* ========== METRICS DASHBOARD GRID ========== */
+    .metrics-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 16px;
+      margin-bottom: 24px;
+    }
+
+    @media (max-width: 900px) {
+      .metrics-grid { grid-template-columns: repeat(2, 1fr); }
+    }
+
+    @media (max-width: 500px) {
+      .metrics-grid { grid-template-columns: 1fr; }
+    }
+
+    .metric-card {
+      background: var(--surface-card);
+      border: 1px solid var(--border-subtle);
+      border-radius: 14px;
+      padding: 20px;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .metric-card::before {
+      content: "";
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 4px;
+      height: 100%;
+      background: var(--metric-color, var(--accent));
+    }
+
+    .metric-card.highlight {
+      background: linear-gradient(135deg, rgba(0, 255, 136, 0.08) 0%, var(--surface-card) 100%);
+      border-color: rgba(0, 255, 136, 0.3);
+    }
+
+    .metric-value {
+      font-size: 2.2rem;
+      font-weight: 900;
+      color: var(--metric-color, #fff);
+      line-height: 1;
+      font-variant-numeric: tabular-nums;
+      text-shadow: 0 0 30px var(--metric-color, rgba(255,255,255,0.3));
+    }
+
+    .metric-label {
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: #888;
+      margin-top: 8px;
+      font-weight: 600;
+    }
+
+    .metric-trend {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      margin-top: 8px;
+      font-size: 0.75rem;
+      font-weight: 600;
+      color: var(--yes);
+    }
+
+    .metric-trend.down {
+      color: var(--no);
+    }
+
+    .metric-sparkline {
+      position: absolute;
+      bottom: 0;
+      right: 0;
+      width: 100px;
+      height: 40px;
+      opacity: 0.3;
+    }
+
+    /* ========== TRI-STATE GOVERNANCE PANEL ========== */
+    .governance-panel {
+      background: var(--surface-card);
+      border: 1px solid var(--border-subtle);
+      border-radius: 16px;
+      padding: 24px;
+      margin-bottom: 24px;
+    }
+
+    .governance-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 20px;
+      flex-wrap: wrap;
+      gap: 12px;
+    }
+
+    .governance-title {
+      font-size: 1.1rem;
+      font-weight: 700;
+      color: #fff;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .governance-title svg {
+      width: 24px;
+      height: 24px;
+    }
+
+    .tri-state-badges {
+      display: flex;
+      gap: 12px;
+    }
+
+    .tri-badge {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 16px;
+      border-radius: 10px;
+      font-size: 0.85rem;
+      font-weight: 700;
+    }
+
+    .tri-badge.yes {
+      background: rgba(0, 255, 136, 0.1);
+      border: 1px solid rgba(0, 255, 136, 0.3);
+      color: var(--yes);
+    }
+
+    .tri-badge.maybe {
+      background: rgba(255, 217, 61, 0.1);
+      border: 1px solid rgba(255, 217, 61, 0.3);
+      color: var(--maybe);
+    }
+
+    .tri-badge.no {
+      background: rgba(255, 107, 107, 0.1);
+      border: 1px solid rgba(255, 107, 107, 0.3);
+      color: var(--no);
+    }
+
+    .tri-badge-count {
+      font-size: 1.1rem;
+      font-weight: 800;
+    }
+
+    /* ========== NETWORK GRAPH DETAIL PANEL ========== */
+    .network-detail-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 24px;
+      margin-bottom: 24px;
+    }
+
+    @media (max-width: 900px) {
+      .network-detail-grid { grid-template-columns: 1fr; }
+    }
+
+    .panel {
+      background: var(--surface-card);
+      border: 1px solid var(--border-subtle);
+      border-radius: 16px;
+      padding: 20px;
+    }
+
+    .panel-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 16px;
+      padding-bottom: 12px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+    }
+
+    .panel-title {
+      font-size: 0.9rem;
+      font-weight: 700;
+      color: #aaa;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .panel-count {
+      background: rgba(255, 255, 255, 0.08);
+      padding: 2px 10px;
+      border-radius: 12px;
+      font-size: 0.75rem;
+      color: var(--accent);
+      border: 1px solid rgba(0, 255, 136, 0.2);
+    }
+
+    /* Activity Feed */
+    .activity-feed {
+      max-height: 300px;
+      overflow-y: auto;
+    }
+
+    .activity-item {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 10px 12px;
+      border-radius: 8px;
+      margin-bottom: 6px;
+      background: rgba(255, 255, 255, 0.02);
+      transition: background 0.2s;
+    }
+
+    .activity-item:hover {
+      background: rgba(255, 255, 255, 0.05);
+    }
+
+    .activity-time {
+      color: #666;
+      font-size: 0.75rem;
+      font-family: monospace;
+      min-width: 60px;
+    }
+
+    .activity-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+
+    .activity-dot.yes { background: var(--yes); box-shadow: 0 0 6px var(--yes); }
+    .activity-dot.maybe { background: var(--maybe); box-shadow: 0 0 6px var(--maybe); }
+    .activity-dot.no { background: var(--no); box-shadow: 0 0 6px var(--no); }
+    .activity-dot.info { background: var(--accent-cyan); box-shadow: 0 0 6px var(--accent-cyan); }
+
+    .activity-content {
+      flex: 1;
+      font-size: 0.85rem;
+    }
+
+    .activity-agent {
+      color: var(--accent-cyan);
+      font-weight: 600;
+    }
+
+    .activity-desc {
+      color: #ccc;
+      margin-left: 6px;
+    }
+
+    .activity-speed {
+      color: var(--accent);
+      font-size: 0.75rem;
+      font-weight: 700;
+      font-family: monospace;
+    }
+
+    /* Routing Priority Visualization */
+    .routing-steps {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .routing-step {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      padding: 12px 16px;
+      background: rgba(255, 255, 255, 0.02);
+      border: 1px solid rgba(255, 255, 255, 0.05);
+      border-radius: 10px;
+      transition: all 0.2s;
+    }
+
+    .routing-step:hover {
+      background: rgba(255, 255, 255, 0.05);
+      border-color: rgba(255, 255, 255, 0.1);
+    }
+
+    .routing-step.priority {
+      background: rgba(0, 255, 136, 0.05);
+      border-color: rgba(0, 255, 136, 0.2);
+    }
+
+    .step-number {
+      width: 28px;
+      height: 28px;
+      border-radius: 50%;
+      background: rgba(255, 255, 255, 0.1);
+      color: #888;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 800;
+      font-size: 0.8rem;
+      flex-shrink: 0;
+    }
+
+    .priority .step-number {
+      background: rgba(0, 255, 136, 0.2);
+      color: var(--yes);
+    }
+
+    .step-info {
+      flex: 1;
+    }
+
+    .step-title {
+      font-weight: 700;
+      color: #fff;
+      font-size: 0.9rem;
+    }
+
+    .priority .step-title {
+      color: var(--yes);
+    }
+
+    .step-desc {
+      font-size: 0.78rem;
+      color: #888;
+      margin-top: 2px;
+    }
+
+    .step-badge {
+      font-size: 0.7rem;
+      padding: 3px 8px;
+      border-radius: 4px;
+      font-weight: 700;
+      text-transform: uppercase;
+    }
+
+    .step-badge.free {
+      background: rgba(0, 255, 136, 0.15);
+      color: var(--yes);
+    }
+
+    .step-badge.fast {
+      background: rgba(0, 240, 255, 0.15);
+      color: var(--accent-cyan);
+    }
+
+    /* ========== CHARTS SECTION ========== */
+    .charts-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 24px;
+      margin-bottom: 24px;
+    }
+
+    @media (max-width: 900px) {
+      .charts-grid { grid-template-columns: 1fr; }
+    }
+
+    .chart-container {
+      height: 200px;
+      position: relative;
+    }
+
+    .chart-container svg {
+      width: 100%;
+      height: 100%;
+    }
+
+    .chart-bar {
+      fill: var(--accent);
+      opacity: 0.8;
+      transition: opacity 0.2s;
+    }
+
+    .chart-bar:hover {
+      opacity: 1;
+    }
+
+    /* ========== PLAYGROUND SECTION ========== */
+    .playground-section {
+      background: var(--surface-card);
+      border: 1px solid var(--border-subtle);
+      border-radius: 20px;
+      overflow: hidden;
+      position: relative;
+      margin-bottom: 24px;
+    }
+
+    .playground-section::before {
+      content: "";
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 3px;
+      background: linear-gradient(90deg, var(--accent), var(--accent-cyan), var(--accent-purple));
+    }
+
+    .playground-toolbar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 14px 20px;
+      background: rgba(10, 10, 18, 0.85);
+      border-bottom: 1px solid var(--border-subtle);
+      flex-wrap: wrap;
+      gap: 12px;
+    }
+
+    .toolbar-left, .toolbar-right {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .model-select {
+      background: var(--surface-input);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 8px;
+      color: #fff;
+      padding: 8px 14px;
+      font-size: 0.85rem;
+      font-weight: 600;
+      cursor: pointer;
+      outline: none;
+      transition: all 0.2s;
+    }
+
+    .model-select:focus, .model-select:hover {
+      border-color: var(--accent);
+      box-shadow: 0 0 12px rgba(0, 255, 136, 0.2);
+    }
+
+    .toolbar-btn {
+      background: rgba(255, 255, 255, 0.04);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      color: #cbd5e1;
+      padding: 7px 14px;
+      border-radius: 8px;
+      font-size: 0.8rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .toolbar-btn:hover {
+      background: rgba(255, 255, 255, 0.08);
+      color: #fff;
+      border-color: rgba(255, 255, 255, 0.2);
+    }
+
+    .toolbar-btn.active {
+      background: rgba(0, 255, 136, 0.12);
+      border-color: rgba(0, 255, 136, 0.4);
+      color: var(--accent);
+    }
+
+    .starters-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 20px;
+      background: rgba(0, 0, 0, 0.25);
+      border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+      overflow-x: auto;
+      white-space: nowrap;
+    }
+
+    .starters-label {
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: #64748b;
+      font-weight: 700;
+      flex-shrink: 0;
+    }
+
+    .starter-chip {
+      background: rgba(255, 255, 255, 0.03);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 999px;
+      padding: 5px 12px;
+      font-size: 0.78rem;
+      color: #94a3b8;
+      cursor: pointer;
+      transition: all 0.2s;
+      flex-shrink: 0;
+    }
+
+    .starter-chip:hover {
+      background: rgba(0, 255, 136, 0.08);
+      border-color: rgba(0, 255, 136, 0.3);
+      color: #fff;
+    }
+
+    .chat-window {
+      padding: 24px;
+      min-height: 300px;
+      max-height: 500px;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 18px;
+      background: #07070f;
+    }
+
+    .chat-empty {
+      margin: auto;
+      text-align: center;
+      color: #64748b;
+      padding: 40px 20px;
+    }
+
+    .chat-empty-icon {
+      font-size: 2.5rem;
+      margin-bottom: 12px;
+      display: block;
+    }
+
+    .chat-empty h3 {
+      font-size: 1.15rem;
+      color: #e2e8f0;
+      margin: 0 0 6px;
+    }
+
+    .chat-empty p {
+      font-size: 0.88rem;
+      max-width: 440px;
+      margin: 0 auto;
+      line-height: 1.6;
+    }
+
+    .chat-msg {
+      display: flex;
+      flex-direction: column;
+      max-width: 90%;
+      animation: msgAppear 0.2s ease-out;
+    }
+
+    @keyframes msgAppear {
+      from { opacity: 0; transform: translateY(6px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    .chat-msg.user { align-self: flex-end; }
+    .chat-msg.assistant { align-self: flex-start; max-width: 96%; }
+
+    .msg-header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 6px;
+      font-size: 0.75rem;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+
+    .chat-msg.user .msg-header {
+      justify-content: flex-end;
+      color: #74b9ff;
+    }
+
+    .chat-msg.assistant .msg-header {
+      color: var(--accent);
+    }
+
+    .msg-provider-tag {
+      font-size: 0.68rem;
+      padding: 2px 8px;
+      border-radius: 4px;
+      background: rgba(0, 255, 136, 0.1);
+      border: 1px solid rgba(0, 255, 136, 0.25);
+      color: var(--accent);
+      font-weight: 600;
+      text-transform: none;
+    }
+
+    .msg-bubble {
+      padding: 14px 18px;
+      border-radius: 14px;
+      font-size: 0.94rem;
+      line-height: 1.65;
+      word-break: break-word;
+    }
+
+    .chat-msg.user .msg-bubble {
+      background: linear-gradient(135deg, #182848 0%, #1e1e38 100%);
+      border: 1px solid rgba(116, 185, 255, 0.25);
+      color: #f1f5f9;
+      border-bottom-right-radius: 4px;
+    }
+
+    .chat-msg.assistant .msg-bubble {
+      background: #0d0d1b;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      color: #e2e8f0;
+      border-bottom-left-radius: 4px;
+      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+    }
+
+    .reasoning-drawer {
+      background: rgba(168, 85, 247, 0.05);
+      border: 1px solid rgba(168, 85, 247, 0.2);
+      border-radius: 10px;
+      margin-bottom: 12px;
+      overflow: hidden;
+      transition: all 0.25s;
+    }
+
+    .reasoning-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 8px 14px;
+      background: rgba(168, 85, 247, 0.08);
+      cursor: pointer;
+      font-size: 0.78rem;
+      font-weight: 700;
+      color: #d8b4fe;
+      user-select: none;
+    }
+
+    .reasoning-header:hover {
+      background: rgba(168, 85, 247, 0.14);
+    }
+
+    .reasoning-body {
+      padding: 12px 14px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.8rem;
+      line-height: 1.6;
+      color: #c4b5fd;
+      background: #080712;
+      border-top: 1px solid rgba(168, 85, 247, 0.15);
+      max-height: 200px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+    }
+
+    .reasoning-drawer.collapsed .reasoning-body {
+      display: none;
+    }
+
+    .cursor-pulse {
+      display: inline-block;
+      width: 8px;
+      height: 16px;
+      background: var(--accent);
+      vertical-align: text-bottom;
+      margin-left: 3px;
+      animation: blink 0.8s infinite;
+    }
+
+    @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
+
+    .msg-perf-footer {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-top: 8px;
+      padding-top: 6px;
+      font-size: 0.74rem;
+      color: #64748b;
+      border-top: 1px solid rgba(255, 255, 255, 0.04);
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+
+    .tps-gauge {
+      color: var(--accent);
+      font-weight: 700;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      font-family: monospace;
+    }
+
+    .msg-actions {
+      display: flex;
+      gap: 8px;
+    }
+
+    .msg-action-btn {
+      background: transparent;
+      border: none;
+      color: #64748b;
+      font-size: 0.74rem;
+      cursor: pointer;
+      padding: 2px 6px;
+      border-radius: 4px;
+      transition: all 0.15s;
+    }
+
+    .msg-action-btn:hover {
+      color: #fff;
+      background: rgba(255, 255, 255, 0.08);
+    }
+
+    .chat-dock {
+      padding: 16px 20px;
+      background: #090914;
+      border-top: 1px solid var(--border-subtle);
+    }
+
+    .chat-input-wrapper {
+      display: flex;
+      gap: 12px;
+      align-items: flex-end;
+      background: var(--surface-input);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 12px;
+      padding: 10px 14px;
+      transition: border-color 0.2s, box-shadow 0.2s;
+    }
+
+    .chat-input-wrapper:focus-within {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(0, 255, 136, 0.15);
+    }
+
+    #chat-input {
+      flex: 1;
+      background: transparent;
+      border: none;
+      color: #fff;
+      font-size: 0.96rem;
+      line-height: 1.5;
+      resize: none;
+      min-height: 24px;
+      max-height: 180px;
+      outline: none;
+      font-family: inherit;
+    }
+
+    #chat-input::placeholder { color: #64748b; }
+
+    .chat-dock-actions {
+      display: flex;
+      gap: 8px;
+    }
+
+    .btn-send {
+      background: linear-gradient(135deg, #00ff88 0%, #00cc6a 100%);
+      color: #000;
+      border: none;
+      border-radius: 8px;
+      padding: 10px 20px;
+      font-size: 0.88rem;
+      font-weight: 700;
+      cursor: pointer;
+      transition: all 0.2s;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      white-space: nowrap;
+    }
+
+    .btn-send:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 6px 20px rgba(0, 255, 136, 0.4);
+    }
+
+    .btn-send:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+      transform: none;
+      box-shadow: none;
+    }
+
+    .btn-stop {
+      background: rgba(255, 82, 82, 0.15);
+      border: 1px solid rgba(255, 82, 82, 0.35);
+      color: var(--danger);
+      border-radius: 8px;
+      padding: 10px 16px;
+      font-size: 0.85rem;
+      font-weight: 700;
+      cursor: pointer;
+      transition: all 0.2s;
+      display: none;
+    }
+
+    .btn-stop:hover {
+      background: rgba(255, 82, 82, 0.25);
+    }
+
+    /* ========== VOICE WAVEFORM ========== */
+    #voice-waveform {
+      animation: fadeIn 0.2s ease;
+    }
+
+    .wave-bar {
+      width: 3px;
+      height: 16px;
+      background: var(--accent);
+      border-radius: 2px;
+      animation: waveAnim 0.8s ease-in-out infinite;
+      box-shadow: 0 0 6px var(--accent);
+    }
+
+    .wave-bar:nth-child(1) { animation-delay: 0.0s; }
+    .wave-bar:nth-child(2) { animation-delay: 0.1s; }
+    .wave-bar:nth-child(3) { animation-delay: 0.2s; }
+    .wave-bar:nth-child(4) { animation-delay: 0.3s; }
+    .wave-bar:nth-child(5) { animation-delay: 0.4s; }
+    .wave-bar:nth-child(6) { animation-delay: 0.3s; }
+    .wave-bar:nth-child(7) { animation-delay: 0.2s; }
+
+    @keyframes waveAnim {
+      0%, 100% { height: 6px; opacity: 0.5; }
+      50% { height: 18px; opacity: 1; }
+    }
+
+    @keyframes fadeIn {
+      from { opacity: 0; }
+      to { opacity: 1; }
+    }
+
+    /* Recording dot pulse */
+    @keyframes pulseRecording {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.5; transform: scale(0.8); }
+    }
+
+    /* Audio level bars */
+    .audio-bar {
+      width: 3px;
+      height: 8px;
+      background: var(--accent);
+      border-radius: 2px;
+      transition: height 0.05s ease;
+      min-height: 3px;
+    }
+
+    /* ========== QUICK INTEGRATION ========== */
+    .integration-card {
+      background: var(--surface-card);
+      border: 1px solid var(--border-subtle);
+      border-radius: 16px;
+      padding: 24px;
+      margin-bottom: 24px;
+    }
+
+    .integration-card h2 {
+      font-size: 1.1rem;
+      color: #fff;
+      margin-bottom: 8px;
+    }
+
+    .integration-card p {
+      color: #94a3b8;
+      font-size: 0.88rem;
+      margin-bottom: 16px;
+    }
+
+    .code-block {
+      background: #080810;
+      border: 1px solid var(--border-subtle);
+      border-radius: 10px;
+      overflow: hidden;
+    }
+
+    .code-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 10px 14px;
+      background: rgba(255, 255, 255, 0.03);
+      border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+    }
+
+    .code-lang {
+      font-size: 0.75rem;
+      font-weight: 700;
+      color: var(--accent);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    .code-copy-btn {
+      background: transparent;
+      border: none;
+      color: #888;
+      font-size: 0.75rem;
+      cursor: pointer;
+      padding: 4px 8px;
+      border-radius: 4px;
+      transition: all 0.2s;
+    }
+
+    .code-copy-btn:hover {
+      color: #fff;
+      background: rgba(255, 255, 255, 0.1);
+    }
+
+    .code-block pre {
+      margin: 0;
+      padding: 16px;
+      overflow-x: auto;
+      font-size: 0.85rem;
+      line-height: 1.6;
+    }
+
+    .code-block code {
+      background: none;
+      padding: 0;
+      color: var(--accent-cyan);
+    }
+
+    /* ========== FOOTER ========== */
+    .command-footer {
+      text-align: center;
+      padding: 30px 20px;
+      color: #64748b;
+      font-size: 0.85rem;
+      border-top: 1px solid rgba(255, 255, 255, 0.06);
+      margin-top: 40px;
+    }
+
+    .command-footer a {
+      color: #94a3b8;
+      text-decoration: none;
+      margin: 0 8px;
+    }
+
+    .command-footer a:hover {
+      color: var(--accent);
+    }
+  </style>
+</head>
+<body>
+
+  <!-- COMMAND CENTER HEADER -->
+  <header class="command-header">
+    <div class="command-brand">
+      <svg viewBox="0 0 40 40" fill="none">
+        <circle cx="20" cy="20" r="18" stroke="url(#grad)" stroke-width="2.5"/>
+        <circle cx="20" cy="20" r="6" fill="#00ff88"/>
+        <circle cx="12" cy="14" r="3" fill="#a855f7"/>
+        <circle cx="28" cy="14" r="3" fill="#00f0ff"/>
+        <circle cx="12" cy="28" r="3" fill="#ffd93d"/>
+        <circle cx="28" cy="28" r="3" fill="#ff6b6b"/>
+        <line x1="20" y1="20" x2="12" y2="14" stroke="#444" stroke-width="1"/>
+        <line x1="20" y1="20" x2="28" y2="14" stroke="#444" stroke-width="1"/>
+        <line x1="20" y1="20" x2="12" y2="28" stroke="#444" stroke-width="1"/>
+        <line x1="20" y1="20" x2="28" y2="28" stroke="#444" stroke-width="1"/>
+        <defs>
+          <linearGradient id="grad" x1="0" y1="0" x2="40" y2="40">
+            <stop offset="0%" stop-color="#00ff88"/>
+            <stop offset="50%" stop-color="#00f0ff"/>
+            <stop offset="100%" stop-color="#a855f7"/>
+          </linearGradient>
+        </defs>
+      </svg>
+      <span class="command-brand-text">HIVV CONTROL</span>
+    </div>
+
+    <div class="command-status-live">
+      <span class="pulse-dot"></span>
+      <span id="header-status-text">LIVE — 64 TOK/S HARDWARE</span>
+    </div>
+
+    <nav class="command-nav">
+      <a href="/">Control Center</a>
+      <a href="/chat/" class="active" style="color:var(--accent);background:rgba(0,255,136,0.1);border:1px solid rgba(0,255,136,0.2);">🗣️ Chat</a>
+      <a href="/dashboard">Governance</a>
+      <a href="/status">Status</a>
+      <a href="/nodes.html" id="hivv-bee-pill" title="View all registered bees" style="display:inline-flex;align-items:center;gap:6px;color:#fef3c7;font-weight:600;border:1px solid #57534e;border-radius:999px;padding:4px 12px;background:rgba(254,243,199,.05);text-decoration:none"><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#22c55e;box-shadow:0 0 8px rgba(34,197,94,.6)"></span><span>🐝 <span id="hivv-bee-count">…</span> online</span></a>
+      <a href="/cli.html" style="color:#fbbf24;font-weight:700;border:1px solid #d97706;border-radius:6px;padding:4px 10px;background:rgba(251,191,36,.08)">🐝 Install CLI</a>
+      <a href="/docs">API Docs</a>
+    </nav>
+  </header>
+
+  <!-- MAIN CONTROL LAYOUT -->
+  <main class="control-main">
+
+    <!-- 🔥 OBVIOUS CLI INSTALL BANNER -->
+    <section style="background:linear-gradient(135deg,#1c1917 0%,#292524 100%);border:1px solid #d97706;border-radius:14px;padding:22px 26px;margin:0 0 24px;box-shadow:0 12px 40px -8px rgba(217,119,6,.35);position:relative;overflow:hidden;color:#fef3c7;display:flex;flex-wrap:wrap;align-items:center;gap:20px">
+      <div style="position:absolute;top:0;left:0;right:0;height:3px;background:linear-gradient(90deg,#d97706,#fbbf24,#d97706)"></div>
+      <div style="flex:1;min-width:280px">
+        <div style="font-size:.72rem;text-transform:uppercase;letter-spacing:.12em;color:#fbbf24;margin-bottom:6px;font-weight:700">🐝 Run hivv from your terminal</div>
+        <div style="font-size:1.35rem;font-weight:700;color:#fef3c7;margin-bottom:10px;letter-spacing:-.01em">One command. Stdlib only. ~27 KB.</div>
+        <div style="display:flex;align-items:center;gap:10px;background:#0c0a09;border:1px solid #44403c;border-radius:8px;padding:10px 14px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">
+          <span style="color:#a8a29e">$</span>
+          <code id="hivv-install-cmd" style="color:#fbbf24;font-size:1rem;flex:1">curl -sSL https://hivv.org/install-hivv.sh | bash</code>
+          <button onclick="navigator.clipboard.writeText('curl -sSL https://hivv.org/install-hivv.sh | bash').then(()=>{this.textContent='✓ copied';setTimeout(()=>this.textContent='copy',1500)})" style="background:transparent;border:1px solid #d97706;color:#fbbf24;padding:4px 10px;border-radius:6px;font-size:.75rem;cursor:pointer;font-family:inherit">copy</button>
+        </div>
+        <div style="font-size:.78rem;color:#a8a29e;margin-top:8px">macOS · Linux · WSL · Windows PowerShell · Auto-updates itself · Zero deps</div>
+      </div>
+      <div style="display:flex;gap:10px;flex-wrap:wrap">
+        <a href="/cli.html" style="display:inline-block;padding:11px 20px;background:#d97706;color:#fef3c7;border-radius:8px;font-weight:600;font-size:.92rem;text-decoration:none;transition:transform .15s" onmouseover="this.style.background='#fbbf24';this.style.color='#1c1917'" onmouseout="this.style.background='#d97706';this.style.color='#fef3c7'">View CLI guide →</a>
+        <a href="/openapi.yaml" download style="display:inline-block;padding:11px 20px;background:transparent;border:1px solid #d97706;color:#fbbf24;border-radius:8px;font-weight:600;font-size:.92rem;text-decoration:none" onmouseover="this.style.background='rgba(251,191,36,.1)'" onmouseout="this.style.background='transparent'">⬇ OpenAPI</a>
+      </div>
+    </section>
+
+    <!-- HERO: SIMPLIFIED - MAP + KEY STATS -->
+    <section class="universe-hero">
+
+      <!-- Left: World Satellite Map -->
+      <div class="map-panel">
+        <div id="world-map"></div>
+          <div class="map-overlay">
+            <div class="map-title">🌍 THE GLOBAL HIVV NETWORK</div>
+            <div class="map-subtitle">🐝 <span id="hivv-bee-count-hero">…</span> computers pooled together</div>
+          </div>
+          </div>
+      </div>
+
+      <!-- Right: Network Stats + Quick Start -->
+      <div class="network-panel" style="padding: 24px; display: flex; flex-direction: column; justify-content: center;">
+        <div style="text-align: center; margin-bottom: 24px;">
+          <div style="font-size: 2.5rem; font-weight: 900; background: linear-gradient(135deg, #00ff88, #00f0ff); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent;">FREE AI</div>
+          <div style="font-size: 1rem; color: #888; margin-top: 4px;">for everyone, powered by the crowd</div>
+        </div>
+
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 24px;">
+          <div style="background: rgba(0,255,136,0.1); border: 1px solid rgba(0,255,136,0.2); border-radius: 12px; padding: 16px; text-align: center;">
+            <div style="font-size: 1.8rem; font-weight: 800; color: #00ff88;" id="hero-nodes">—</div>
+            <div style="font-size: 0.7rem; color: #888; text-transform: uppercase; letter-spacing: 0.05em;">Nodes Online</div>
+          </div>
+          <div style="background: rgba(0,240,255,0.1); border: 1px solid rgba(0,240,255,0.2); border-radius: 12px; padding: 16px; text-align: center;">
+            <div style="font-size: 1.8rem; font-weight: 800; color: #00f0ff;" id="hero-providers">—</div>
+            <div style="font-size: 0.7rem; color: #888; text-transform: uppercase; letter-spacing: 0.05em;">AI Providers</div>
+          </div>
+        </div>
+
+        <div style="background: rgba(168,85,247,0.1); border: 1px solid rgba(168,85,247,0.2); border-radius: 12px; padding: 16px; text-align: center;">
+          <div style="font-size: 1.4rem; font-weight: 800; color: #a855f7;" id="hero-throughput">—</div>
+          <div style="font-size: 0.7rem; color: #888; text-transform: uppercase; letter-spacing: 0.05em;">Combined Throughput (tok/s)</div>
+        </div>
+
+        <div style="margin-top: 20px; padding-top: 16px; border-top: 1px solid rgba(255,255,255,0.1); text-align: center;">
+          <div style="font-size: 0.85rem; color: #94a3b8;">
+            No signup required · Your data stays private · 100% free
+          </div>
+        </div>
+      </div>
+
+    </section>
+
+    <!-- SIMPLIFIED: WHAT IS HIVV -->
+    <section style="background:linear-gradient(135deg,rgba(0,255,136,.06) 0%,rgba(168,85,247,.06) 100%);border:1px solid rgba(0,255,136,.15);border-radius:14px;padding:24px 28px;margin:0 0 24px">
+      <div style="text-align:center;max-width:700px;margin:0 auto">
+        <div style="font-size:1.5rem;font-weight:700;color:var(--accent);margin-bottom:12px">🤖 Talk to a Free AI Supercomputer</div>
+        <p style="font-size:1rem;color:#cbd5e1;line-height:1.7;margin-bottom:16px">
+          HIVV is a distributed AI network where <strong style="color:#fff">thousands of computers pool their resources</strong> to provide free AI access for everyone. No signup. No data collection. Just talk to the hive.
+        </p>
+        <div style="display:flex;justify-content:center;gap:24px;flex-wrap:wrap;font-size:.85rem;color:#94a3b8">
+          <span>🔒 <strong style="color:#fff">Private</strong> — your chats go peer-to-peer</span>
+          <span>⚡ <strong style="color:#fff">Fast</strong> — 60+ tokens per second</span>
+          <span>🌍 <strong style="color:#fff">Global</strong> — runs on donated hardware</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- TRY IT NOW — instant curl test -->
+    <section style="background:linear-gradient(135deg,#0d0d1a 0%,#1a1a2e 100%);border:1px solid rgba(0,240,255,.3);border-radius:14px;padding:24px 28px;margin:0 0 24px">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px">
+        <span style="font-size:1.3rem">⚡</span>
+        <span style="font-size:1.1rem;font-weight:700;color:var(--accent-cyan)">TRY IT NOW — no install needed</span>
+      </div>
+      <div style="font-size:.9rem;color:#94a3b8;margin-bottom:14px">Copy this command and run it in your terminal. It talks directly to our distributed AI network.</div>
+      <div style="background:#0a0a14;border:1px solid #333;border-radius:8px;padding:14px 18px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.88rem;position:relative;margin-bottom:12px">
+        <button onclick="navigator.clipboard.writeText(this.dataset.cmd).then(()=>{this.textContent='✓ copied!';setTimeout(()=>this.textContent='copy',1500)})" data-cmd='curl -s https://hivv.org/v1/chat/completions -H &apos;Content-Type: application/json&apos; -d &apos;{&quot;model&quot;:&quot;auto&quot;,&quot;messages&quot;:[{&quot;role&quot;:&quot;user&quot;,&quot;content&quot;:&quot;what can you help me with?&quot;}]}&apos; | python3 -m json.tool' style="position:absolute;top:10px;right:10px;background:transparent;border:1px solid #555;color:#888;padding:3px 8px;border-radius:4px;cursor:pointer;font-size:.7rem">copy</button>
+        <div style="color:#6b7280">$</div>
+        <div style="color:#00f0ff;word-break:break-all">curl -s https://hivv.org/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"auto","messages":[{"role":"user","content":"what can you help me with?"}]}' \
+  | python3 -m json.tool</div>
+      </div>
+      <div style="display:flex;gap:16px;flex-wrap:wrap;font-size:.8rem">
+        <div style="color:#64748b">💡 <strong style="color:#94a3b8">What it does:</strong> Sends your message to the hive → a bee (node) answers directly</div>
+        <div style="color:#64748b">🔒 <strong style="color:#94a3b8">Privacy:</strong> Message goes straight to the node, not through us</div>
+      </div>
+      <div style="margin-top:14px;display:flex;gap:10px;flex-wrap:wrap">
+        <div style="background:#111;border:1px solid #333;border-radius:6px;padding:8px 12px;font-size:.78rem;color:#94a3b8">
+          <span style="color:var(--accent)">streaming:</span> add <code style="color:#fbbf24">"stream":true</code> for real-time tokens
+        </div>
+        <div style="background:#111;border:1px solid #333;border-radius:6px;padding:8px 12px;font-size:.78rem;color:#94a3b8">
+          <span style="color:var(--accent)">direct:</span> use <code style="color:#fbbf24">hivv node-chat yalla "hello"</code> for node-to-node
+        </div>
+      </div>
+    </section>
+
+    <!-- ═══════════════════════════════════════════════════════════════ -->
+    <!-- FOR AI AGENTS — Complete API Reference & Onboarding          -->
+    <!-- ═══════════════════════════════════════════════════════════════ -->
+    <section style="background:linear-gradient(135deg,rgba(168,85,247,.08) 0%,rgba(0,240,255,.06) 100%);border:1px solid rgba(168,85,247,.3);border-radius:14px;padding:28px 28px;margin:0 0 24px;position:relative;overflow:hidden">
+      <div style="position:absolute;top:0;left:0;right:0;height:3px;background:linear-gradient(90deg,#a855f7,#00f0ff,#a855f7)"></div>
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px">
+        <span style="font-size:1.3rem">🤖</span>
+        <span style="font-size:1.1rem;font-weight:700;color:#c084fc">FOR AI AGENTS — Complete API Reference &amp; Join the Hive</span>
+      </div>
+      <div style="font-size:.85rem;color:#94a3b8;margin-bottom:18px">Everything an AI needs to <strong style="color:#00ff88">consume</strong> (chat, completions) or <strong style="color:#ffd93d">join as a provider</strong> (donate a key, run a node, serve an LLM). No signup. OpenAI-compatible.</div>
+
+      <!-- ── MACHINE-READABLE STRUCTURED DATA (for AI scanners) ── -->
+      <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "Service",
+        "name": "HIVV.org",
+        "description": "Distributed AI network — OpenAI-compatible gateway. Any AI can consume or join as a provider.",
+        "url": "https://hivv.org",
+        "documentation": [
+          "https://hivv.org/openapi.yaml",
+          "https://hivv.org/ai.txt",
+          "https://hivv.org/api.html"
+        ],
+        "endpoint": {
+          "@type": "EntryPoint",
+          "urlTemplate": "https://hivv.org/v1/chat/completions",
+          "contentType": "application/json"
+        },
+        "provider": {
+          "@type": "Organization",
+          "name": "HIVV.org",
+          "url": "https://hivv.org"
+        },
+        "additionalType": "https://schema.org/SoftwareApplication",
+        "applicationCategory": "AI Gateway",
+        "operatingSystem": "Any (API-based)"
+      }
+      </script>
+      <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "WebAPI",
+        "name": "HIVV.org Public API",
+        "description": "OpenAI-compatible chat completions + node registration + capabilities + policy gate",
+        "url": "https://hivv.org/v1",
+        "documentation": "https://hivv.org/openapi.yaml",
+        "provider": { "@type": "Organization", "name": "HIVV.org" },
+        "conformsTo": "https://spec.openai.com",
+        "endpoints": [
+          { "@type": "EntryPoint", "name": "Chat", "urlTemplate": "https://hivv.org/v1/chat/completions", "httpMethod": "POST" },
+          { "@type": "EntryPoint", "name": "Models", "urlTemplate": "https://hivv.org/v1/models", "httpMethod": "GET" },
+          { "@type": "EntryPoint", "name": "Health", "urlTemplate": "https://hivv.org/api/health", "httpMethod": "GET" },
+          { "@type": "EntryPoint", "name": "Donate Key", "urlTemplate": "https://hivv.org/api/keys/donate", "httpMethod": "POST" },
+          { "@type": "EntryPoint", "name": "Register Node", "urlTemplate": "https://hivv.org/api/nodes/register", "httpMethod": "POST" },
+          { "@type": "EntryPoint", "name": "Capabilities", "urlTemplate": "https://hivv.org/api/capabilities", "httpMethod": "GET" },
+          { "@type": "EntryPoint", "name": "Policy", "urlTemplate": "https://hivv.org/api/policy", "httpMethod": "GET" },
+          { "@type": "EntryPoint", "name": "Leaderboard", "urlTemplate": "https://hivv.org/api/hive/leaderboard", "httpMethod": "GET" },
+          { "@type": "EntryPoint", "name": "Nodes", "urlTemplate": "https://hivv.org/api/control/nodes", "httpMethod": "GET" }
+        ]
+      }
+      </script>
+      <!-- Hidden structured text for AI scanners (not rendered visually) -->
+      <template id="ai-manifest">
+        HIVV.org — Distributed AI Network
+        PROTOCOL: OpenAI Chat Completions (v1/chat/completions)
+        BASE_URL: https://hivv.org/v1
+        AUTH: api_key="any" (no registration needed to CONSUME)
+        QUICKSTART: POST https://hivv.org/v1/chat/completions with {"model":"auto","messages":[{"role":"user","content":"hello"}]}
+        JOIN AS PROVIDER: POST https://hivv.org/api/keys/donate with {"provider":"openai","api_key":"sk-..."}
+        HOST A NODE: curl -sSL https://hivv.org/install-hivv.sh | bash && hivv start
+        SELF-HOSTED ENDPOINT: POST https://hivv.org/api/keys/donate with {"provider":"custom","api_key":"any","endpoint":"http://YOUR_IP:8080/v1"}
+        ROUTE_MODES: balanced, quality, fast, cheap, private, trusted
+        CAPABILITIES: GET https://hivv.org/api/capabilities
+        POLICY: GET https://hivv.org/api/policy
+        NODES: GET https://hivv.org/api/control/nodes
+        OPENAPI: https://hivv.org/openapi.yaml
+        AI_MANIFEST: https://hivv.org/ai.txt
+      </template>
+
+      <!-- ── STEP-BY-STEP PROTOCOL ── -->
+      <div style="background:#0a0a14;border:1px solid #333;border-radius:10px;padding:18px;margin-bottom:16px">
+        <div style="font-size:.8rem;text-transform:uppercase;letter-spacing:.08em;color:#c084fc;font-weight:700;margin-bottom:12px">Step 1 — Discover &amp; Connect</div>
+        <div style="display:flex;flex-direction:column;gap:8px;font-size:.82rem;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">
+          <div style="display:flex;gap:12px;align-items:flex-start">
+            <span style="color:#00ff88;min-width:20px;font-weight:700">1.</span>
+            <div>
+              <div style="color:#e2e8f0;font-weight:600">Check health</div>
+              <div style="background:#111;border:1px solid #333;border-radius:6px;padding:8px 12px;margin-top:4px"><span style="color:#00f0ff">GET</span> <span style="color:#e2e8f0">https://hivv.org/api/health</span></div>
+              <div style="color:#666;margin-top:2px">Returns: <code style="color:#ffd93d">{"ok":true,"uptime":...,"nodes":...}</code></div>
+            </div>
+          </div>
+          <div style="display:flex;gap:12px;align-items:flex-start">
+            <span style="color:#00ff88;min-width:20px;font-weight:700">2.</span>
+            <div>
+              <div style="color:#e2e8f0;font-weight:600">List available models</div>
+              <div style="background:#111;border:1px solid #333;border-radius:6px;padding:8px 12px;margin-top:4px"><span style="color:#00f0ff">GET</span> <span style="color:#e2e8f0">https://hivv.org/v1/models</span></div>
+              <div style="color:#666;margin-top:2px">Returns OpenAI-compatible model list. Use <code style="color:#ffd93d">"auto"</code> to let the router pick the best one.</div>
+            </div>
+          </div>
+          <div style="display:flex;gap:12px;align-items:flex-start">
+            <span style="color:#00ff88;min-width:20px;font-weight:700">3.</span>
+            <div>
+              <div style="color:#e2e8f0;font-weight:600">Send a chat message</div>
+              <div style="background:#111;border:1px solid #333;border-radius:6px;padding:8px 12px;margin-top:4px"><span style="color:#00ff88">POST</span> <span style="color:#e2e8f0">https://hivv.org/v1/chat/completions</span></div>
+              <div style="color:#666;margin-top:2px">Full OpenAI Chat Completions format. Stream with <code style="color:#ffd93d">"stream":true</code>.</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── FULL REQUEST/RESPONSE EXAMPLES ── -->
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px">
+        <div style="background:#0a0a14;border:1px solid #333;border-radius:10px;padding:16px">
+          <div style="font-size:.75rem;text-transform:uppercase;letter-spacing:.08em;color:#00ff88;font-weight:700;margin-bottom:8px">Request Body</div>
+          <div style="background:#080810;border:1px solid #333;border-radius:6px;padding:12px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.75rem;line-height:1.6;overflow-x:auto;white-space:pre">{
+  <span style="color:#ffd93d">"model"</span>: <span style="color:#00ff88">"auto"</span>,
+  <span style="color:#ffd93d">"messages"</span>: [
+    {<span style="color:#ffd93d">"role"</span>: <span style="color:#00ff88">"user"</span>, <span style="color:#ffd93d">"content"</span>: <span style="color:#00ff88">"What is HIVV?"</span>}
+  ],
+  <span style="color:#ffd93d">"stream"</span>: <span style="color:#c084fc">true</span>,
+  <span style="color:#ffd93d">"route"</span>: { <span style="color:#ffd93d">"mode"</span>: <span style="color:#00ff88">"fast"</span> }
+}</div>
+        </div>
+        <div style="background:#0a0a14;border:1px solid #333;border-radius:10px;padding:16px">
+          <div style="font-size:.75rem;text-transform:uppercase;letter-spacing:.08em;color:#00f0ff;font-weight:700;margin-bottom:8px">SSE Stream Response</div>
+          <div style="background:#080810;border:1px solid #333;border-radius:6px;padding:12px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.75rem;line-height:1.6;overflow-x:auto;white-space:pre"><span style="color:#6b7280">Each line is an SSE event:</span>
+<span style="color:#ffd93d">data:</span> {<span style="color:#ffd93d">"choices"</span>:[{<span style="color:#ffd93d">"delta"</span>:{<span style="color:#ffd93d">"content"</span>:<span style="color:#00ff88">"HIVV"</span>}}]}
+
+<span style="color:#ffd93d">data:</span> {<span style="color:#ffd93d">"choices"</span>:[{<span style="color:#ffd93d">"delta"</span>:{<span style="color:#ffd93d">"content"</span>:<span style="color:#00ff88">" is"</span>}}]}
+
+<span style="color:#6b7280">Last events: finish chunk, then stats, then done:</span>
+<span style="color:#ffd93d">data:</span> {<span style="color:#ffd93d">"choices"</span>:[{<span style="color:#ffd93d">"finish_reason"</span>:<span style="color:#00ff88">"stop"</span>,<span style="color:#ffd93d">"index"</span>:0,<span style="color:#ffd93d">"delta"</span>:{}}]}
+<span style="color:#ffd93d">data:</span> {<span style="color:#ffd93d">"hivv_stats"</span>: {<span style="color:#ffd93d">"tokens_per_sec"</span>:64}}
+<span style="color:#ffd93d">data:</span> [DONE]</div>
+        </div>
+      </div>
+
+      <!-- ── FULL NON-STREAMING EXAMPLE ── -->
+      <div style="background:#0a0a14;border:1px solid #333;border-radius:10px;padding:16px;margin-bottom:16px">
+        <div style="font-size:.75rem;text-transform:uppercase;letter-spacing:.08em;color:#ffd93d;font-weight:700;margin-bottom:8px">Full Response (non-streaming) — <code style="color:#94a3b8">"stream":false</code></div>
+        <div style="background:#080810;border:1px solid #333;border-radius:6px;padding:12px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.72rem;line-height:1.5;overflow-x:auto;white-space:pre">{<span style="color:#ffd93d">"id"</span>: <span style="color:#00ff88">"chatcmpl-abc123"</span>,
+ <span style="color:#ffd93d">"object"</span>: <span style="color:#00ff88">"chat.completion"</span>,
+ <span style="color:#ffd93d">"model"</span>: <span style="color:#00ff88">"gemma-4-E2B-it-Q4_K_M"</span>,
+ <span style="color:#ffd93d">"choices"</span>: [{
+   <span style="color:#ffd93d">"index"</span>: 0,
+   <span style="color:#ffd93d">"message"</span>: {<span style="color:#ffd93d">"role"</span>: <span style="color:#00ff88">"assistant"</span>, <span style="color:#ffd93d">"content"</span>: <span style="color:#00ff88">"HIVV is a distributed AI network..."</span>},
+   <span style="color:#ffd93d">"finish_reason"</span>: <span style="color:#00ff88">"stop"</span>
+ }],
+ <span style="color:#ffd93d">"usage"</span>: {<span style="color:#ffd93d">"prompt_tokens"</span>: 12, <span style="color:#ffd93d">"completion_tokens"</span>: 42, <span style="color:#ffd93d">"total_tokens"</span>: 54}
+}
+<span style="color:#6b7280">Response headers include:</span>
+<span style="color:#ffd93d">X-Hivv-Answered-By:</span> <span style="color:#00ff88">ashy/gemma-4 (direct)</span>
+<span style="color:#ffd93d">X-Hivv-Policy:</span> <span style="color:#00ff88">ALLOW compute</span></div>
+      </div>
+
+      <!-- ── ROUTE MODES ── -->
+      <div style="background:#0a0a14;border:1px solid #333;border-radius:10px;padding:16px;margin-bottom:16px">
+        <div style="font-size:.75rem;text-transform:uppercase;letter-spacing:.08em;color:#c084fc;font-weight:700;margin-bottom:8px">Route Modes — Control How Your Request is Routed</div>
+        <div style="font-size:.78rem;color:#666;margin-bottom:10px">Add <code style="background:#1a1a2e;padding:2px 6px;border-radius:4px;color:#ffd93d">"route":{"mode":"..."}</code> to your request body. Default: <code style="color:#e2e8f0">balanced</code>.</div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:8px">
+          <div style="background:#111;border:1px solid #333;border-radius:8px;padding:10px 12px">
+            <div style="color:#00ff88;font-weight:700;font-size:.82rem">balanced</div>
+            <div style="color:#666;font-size:.72rem;margin-top:2px">Default. Mix of speed, quality, and cost. Best general-purpose mode.</div>
+          </div>
+          <div style="background:#111;border:1px solid #333;border-radius:8px;padding:10px 12px">
+            <div style="color:#a855f7;font-weight:700;font-size:.82rem">quality</div>
+            <div style="color:#666;font-size:.72rem;margin-top:2px">Prefer the best model available (GPT-4o, Claude). May be slower.</div>
+          </div>
+          <div style="background:#111;border:1px solid #333;border-radius:8px;padding:10px 12px">
+            <div style="color:#00f0ff;font-weight:700;font-size:.82rem">fast</div>
+            <div style="color:#666;font-size:.72rem;margin-top:2px">Lowest measured latency. Prefers local hardware and fast cloud endpoints.</div>
+          </div>
+          <div style="background:#111;border:1px solid #333;border-radius:8px;padding:10px 12px">
+            <div style="color:#ffd93d;font-weight:700;font-size:.82rem">cheap</div>
+            <div style="color:#666;font-size:.72rem;margin-top:2px">Free compute first, cloud last. Filters by max_cost per token.</div>
+          </div>
+          <div style="background:#111;border:1px solid #333;border-radius:8px;padding:10px 12px">
+            <div style="color:#ff6b6b;font-weight:700;font-size:.82rem">private</div>
+            <div style="color:#666;font-size:.72rem;margin-top:2px">Localhost + hive peers only. Cloud providers removed from candidates.</div>
+          </div>
+          <div style="background:#111;border:1px solid #333;border-radius:8px;padding:10px 12px">
+            <div style="color:#ff9f43;font-weight:700;font-size:.82rem">trusted</div>
+            <div style="color:#666;font-size:.72rem;margin-top:2px">Only nodes with trusted reputation scores. Highest reliability.</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── KEY ENDPOINTS ── -->
+      <div style="background:#0a0a14;border:1px solid #333;border-radius:10px;padding:16px;margin-bottom:16px">
+        <div style="font-size:.75rem;text-transform:uppercase;letter-spacing:.08em;color:#00ff88;font-weight:700;margin-bottom:8px">Full Endpoint Reference</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;font-size:.78rem;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">
+          <div style="background:#111;border:1px solid #333;border-radius:6px;padding:8px 10px"><span style="color:#00ff88">POST</span> /v1/chat/completions <span style="color:#666"> — chat (OpenAI format)</span></div>
+          <div style="background:#111;border:1px solid #333;border-radius:6px;padding:8px 10px"><span style="color:#00f0ff">GET</span> /v1/models <span style="color:#666"> — list available models</span></div>
+          <div style="background:#111;border:1px solid #333;border-radius:6px;padding:8px 10px"><span style="color:#00f0ff">GET</span> /api/health <span style="color:#666"> — gateway health + uptime</span></div>
+          <div style="background:#111;border:1px solid #333;border-radius:6px;padding:8px 10px"><span style="color:#00f0ff">GET</span> /api/capabilities <span style="color:#666"> — what the hive can do</span></div>
+          <div style="background:#111;border:1px solid #333;border-radius:6px;padding:8px 10px"><span style="color:#00f0ff">GET</span> /api/capabilities/node/:id <span style="color:#666"> — per-node capabilities</span></div>
+          <div style="background:#111;border:1px solid #333;border-radius:6px;padding:8px 10px"><span style="color:#00f0ff">GET</span> /api/control/nodes <span style="color:#666"> — all registered nodes</span></div>
+          <div style="background:#111;border:1px solid #333;border-radius:6px;padding:8px 10px"><span style="color:#00f0ff">GET</span> /api/policy <span style="color:#666"> — YES/MAYBE/NO defaults</span></div>
+          <div style="background:#111;border:1px solid #333;border-radius:6px;padding:8px 10px"><span style="color:#00f0ff">GET</span> /api/hive/leaderboard <span style="color:#666"> — weekly bee ranking</span></div>
+          <div style="background:#111;border:1px solid #333;border-radius:6px;padding:8px 10px"><span style="color:#ffd93d">POST</span> /api/keys/donate <span style="color:#666"> — add your AI key</span></div>
+          <div style="background:#111;border:1px solid #333;border-radius:6px;padding:8px 10px"><span style="color:#ffd93d">POST</span> /api/chat <span style="color:#666"> — simple chat (SSE)</span></div>
+        </div>
+        <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">
+          <a href="/openapi.yaml" download style="font-size:.75rem;color:#a855f7;text-decoration:none;border:1px solid rgba(168,85,247,.3);padding:4px 10px;border-radius:6px;background:rgba(168,85,247,.08)">⬇ OpenAPI Spec (YAML)</a>
+          <a href="/docs" style="font-size:.75rem;color:#00f0ff;text-decoration:none;border:1px solid rgba(0,240,255,.3);padding:4px 10px;border-radius:6px;background:rgba(0,240,255,.08)">📖 Swagger UI</a>
+          <a href="/api.html" style="font-size:.75rem;color:#ffd93d;text-decoration:none;border:1px solid rgba(255,217,61,.3);padding:4px 10px;border-radius:6px;background:rgba(255,217,61,.08)">📄 Full API Docs</a>
+        </div>
+      </div>
+
+      <!-- ── ERROR HANDLING ── -->
+      <div style="background:#0a0a14;border:1px solid #333;border-radius:10px;padding:16px;margin-bottom:16px">
+        <div style="font-size:.75rem;text-transform:uppercase;letter-spacing:.08em;color:#ff6b6b;font-weight:700;margin-bottom:8px">Error Handling &amp; Rate Limits</div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px;font-size:.78rem">
+          <div style="background:#111;border:1px solid #333;border-radius:6px;padding:8px 10px">
+            <div style="color:#00ff88;font-weight:700">200 OK</div>
+            <div style="color:#666;font-size:.72rem">Success. Response follows OpenAI format.</div>
+          </div>
+          <div style="background:#111;border:1px solid #333;border-radius:6px;padding:8px 10px">
+            <div style="color:#ffd93d;font-weight:700">429 Rate Limited</div>
+            <div style="color:#666;font-size:.72rem">60 req/min per IP. Check <code>Retry-After</code> header.</div>
+          </div>
+          <div style="background:#111;border:1px solid #333;border-radius:6px;padding:8px 10px">
+            <div style="color:#ff9f43;font-weight:700">503 Unavailable</div>
+            <div style="color:#666;font-size:.72rem">All providers exhausted. Retry after a moment.</div>
+          </div>
+          <div style="background:#111;border:1px solid #333;border-radius:6px;padding:8px 10px">
+            <div style="color:#ff6b6b;font-weight:700">Timeout</div>
+            <div style="color:#666;font-size:.72rem">60s server timeout. Shorter for local nodes (15s).</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── 3 WAYS TO JOIN THE HIVE ── -->
+      <div style="background:#0a0a14;border:1px solid #333;border-radius:10px;padding:16px;margin-bottom:16px">
+        <div style="font-size:.75rem;text-transform:uppercase;letter-spacing:.08em;color:#ffd93d;font-weight:700;margin-bottom:8px">🐝 3 Ways to Join the Hive — Contribute Compute</div>
+        <div style="font-size:.8rem;color:#94a3b8;margin-bottom:12px">Any AI can join HIVV as a provider. Pick the path that fits your setup.</div>
+        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px">
+          <!-- Path A: Cloud Key -->
+          <div style="background:#111;border:1px solid #333;border-radius:8px;padding:12px">
+            <div style="color:#ffd93d;font-weight:700;font-size:.82rem;margin-bottom:6px">Path A: Donate a Cloud Key</div>
+            <div style="color:#666;font-size:.72rem;margin-bottom:8px">30 seconds. No install. Your key serves the entire hive.</div>
+            <div style="background:#080810;border:1px solid #333;border-radius:6px;padding:8px;font-family:monospace;font-size:.68rem;line-height:1.5;overflow-x:auto;white-space:pre"><span style="color:#ffd93d">curl</span> -X POST https://hivv.org/api/keys/donate \
+  -H <span style="color:#00ff88">"Content-Type: application/json"</span> \
+  -d <span style="color:#00ff88">'{
+    "provider": "openai",
+    "api_key": "sk-..."
+  }'</span></div>
+            <div style="color:#666;font-size:.68rem;margin-top:6px">Supports: openai, anthropic, google, groq, deepseek, mistral, qwen, together, openrouter</div>
+          </div>
+          <!-- Path B: Self-Hosted Endpoint -->
+          <div style="background:#111;border:1px solid #333;border-radius:8px;padding:12px">
+            <div style="color:#00f0ff;font-weight:700;font-size:.82rem;margin-bottom:6px">Path B: Register a Self-Hosted Endpoint</div>
+            <div style="color:#666;font-size:.72rem;margin-bottom:8px">Any OpenAI-compatible API. No install needed on the hub.</div>
+            <div style="background:#080810;border:1px solid #333;border-radius:6px;padding:8px;font-family:monospace;font-size:.68rem;line-height:1.5;overflow-x:auto;white-space:pre"><span style="color:#ffd93d">curl</span> -X POST https://hivv.org/api/keys/donate \
+  -H <span style="color:#00ff88">"Content-Type: application/json"</span> \
+  -d <span style="color:#00ff88">'{
+    "provider": "my-llm",
+    "api_key": "any",
+    "endpoint": "http://YOUR_IP:8080/v1",
+    "model": "my-model"
+  }'</span></div>
+            <div style="color:#666;font-size:.68rem;margin-top:6px">Works with: ollama, llama.cpp, vLLM, LM Studio, KoboldCPP, LocalAI, any OpenAI-compatible server</div>
+          </div>
+          <!-- Path C: Run a Node -->
+          <div style="background:#111;border:1px solid #333;border-radius:8px;padding:12px">
+            <div style="color:#00ff88;font-weight:700;font-size:.82rem;margin-bottom:6px">Path C: Run a Full Node</div>
+            <div style="color:#666;font-size:.72rem;margin-bottom:8px">Join the swarm. Earn honey. Serve the hive with your GPU.</div>
+            <div style="background:#080810;border:1px solid #333;border-radius:6px;padding:8px;font-family:monospace;font-size:.68rem;line-height:1.5;overflow-x:auto;white-space:pre"><span style="color:#ffd93d">curl</span> -sSL https://hivv.org/install-hivv.sh | bash
+<span style="color:#ffd93d">hivv</span> start
+<span style="color:#ffd93d">hivv</span> llm serve
+<span style="color:#ffd93d">hivv</span> volunteer on</div>
+            <div style="color:#666;font-size:.68rem;margin-top:6px">Registers with hub. Heartbeats every 60s. Accepts relay jobs. Earns honey ranks.</div>
+          </div>
+        </div>
+        <div style="margin-top:10px;font-size:.72rem;color:#666">
+          <strong style="color:#94a3b8">Fields for /api/keys/donate:</strong>
+          <code style="color:#ffd93d">provider</code> (required) · <code style="color:#ffd93d">api_key</code> (required) · <code style="color:#94a3b8">endpoint</code> (optional — custom URL) · <code style="color:#94a3b8">name</code> (optional) · <code style="color:#94a3b8">model</code> (optional preferred model)
+          · Keys are <strong style="color:#94a3b8">AES-256-GCM encrypted</strong> at rest.
+        </div>
+      </div>
+
+      <!-- ── CAPABILITIES & POLICY ── -->
+      <div style="background:#0a0a14;border:1px solid #333;border-radius:10px;padding:16px;margin-bottom:16px">
+        <div style="font-size:.75rem;text-transform:uppercase;letter-spacing:.08em;color:#00f0ff;font-weight:700;margin-bottom:8px">Capabilities &amp; Policy Gate</div>
+        <div style="font-size:.8rem;color:#94a3b8;margin-bottom:10px">HIVV has a tri-state permission system. Every action gets YES (auto-allow), MAYBE (ask human), or NO (deny).</div>
+        <div style="display:flex;flex-direction:column;gap:6px;font-size:.78rem;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">
+          <div style="display:flex;gap:8px"><span style="color:#00f0ff;min-width:44px">GET</span><span style="color:#e2e8f0">/api/capabilities</span><span style="color:#666;margin-left:auto">— what actions the hive supports (reasoning, vision, web.search, etc.)</span></div>
+          <div style="display:flex;gap:8px"><span style="color:#00f0ff;min-width:44px">GET</span><span style="color:#e2e8f0">/api/policy</span><span style="color:#666;margin-left:auto">— YES/MAYBE/NO defaults for each action type</span></div>
+          <div style="display:flex;gap:8px"><span style="color:#00f0ff;min-width:44px">GET</span><span style="color:#e2e8f0">/api/capabilities/route/dry-run</span><span style="color:#666;margin-left:auto">— simulate routing without executing</span></div>
+        </div>
+        <div style="margin-top:10px;font-size:.75rem;color:#666">
+          <strong style="color:#94a3b8">Risk tiers:</strong>
+          <span style="color:#00ff88">compute</span> (chat — free, fast-path) ·
+          <span style="color:#ffd93d">data</span> (web.fetch, database — MAYBE, then standing grant) ·
+          <span style="color:#ff6b6b">execute</span> (code — sandboxed, admin-approve) ·
+          <span style="color:#ff6b6b">financial/physical</span> (denied until backend exists)
+        </div>
+      </div>
+
+      <!-- ── JOIN THE HIVE (node operators) ── -->
+      <div style="background:#0a0a14;border:1px solid #333;border-radius:10px;padding:16px;margin-bottom:16px">
+        <div style="font-size:.75rem;text-transform:uppercase;letter-spacing:.08em;color:#00ff88;font-weight:700;margin-bottom:8px">🐝 Join the Hive — Run Your Own Bee</div>
+        <div style="font-size:.8rem;color:#94a3b8;margin-bottom:10px">Your machine becomes a bee in the swarm. The hub handles registration, routing, and job distribution.</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+          <div style="background:#111;border:1px solid #333;border-radius:8px;padding:12px">
+            <div style="color:#00ff88;font-weight:700;font-size:.82rem;margin-bottom:6px">1. Install &amp; start</div>
+            <div style="background:#080810;border:1px solid #333;border-radius:6px;padding:8px;font-family:monospace;font-size:.72rem;line-height:1.5">
+              <div style="color:#ffd93d">curl -sSL https://hivv.org/install-hivv.sh | bash</div>
+              <div style="color:#ffd93d">hivv start</div>
+            </div>
+            <div style="color:#666;font-size:.72rem;margin-top:6px">Registers your bee with the hub. Heartbeats every 60s.</div>
+          </div>
+          <div style="background:#111;border:1px solid #333;border-radius:8px;padding:12px">
+            <div style="color:#00f0ff;font-weight:700;font-size:.82rem;margin-bottom:6px">2. Serve LLM &amp; volunteer</div>
+            <div style="background:#080810;border:1px solid #333;border-radius:6px;padding:8px;font-family:monospace;font-size:.72rem;line-height:1.5">
+              <div style="color:#ffd93d">hivv llm install</div>
+              <div style="color:#ffd93d">hivv llm serve</div>
+              <div style="color:#ffd93d">hivv volunteer on</div>
+            </div>
+            <div style="color:#666;font-size:.72rem;margin-top:6px">Run ollama/llama.cpp. Your GPU power serves the hive.</div>
+          </div>
+        </div>
+        <div style="margin-top:12px;background:#111;border:1px solid #333;border-radius:8px;padding:12px">
+          <div style="color:#ffd93d;font-weight:700;font-size:.82rem;margin-bottom:6px">3. Check your bee</div>
+          <div style="background:#080810;border:1px solid #333;border-radius:6px;padding:8px;font-family:monospace;font-size:.72rem;line-height:1.5">
+            <div style="color:#ffd93d">hivv bees</div>               <span style="color:#666"># see all bees in the hive</span>
+            <div style="color:#ffd93d">hivv bee &lt;name&gt;</div>        <span style="color:#666"># inspect your bee</span>
+            <div style="color:#ffd93d">hivv drone</div>              <span style="color:#666"># your volunteer status</span>
+            <div style="color:#ffd93d">hivv waggle &lt;name&gt;</div>     <span style="color:#666"># test if another bee is reachable</span>
+            <div style="color:#ffd93d">hivv swarm "question"</div>   <span style="color:#666"># fan out to multiple models</span>
+          </div>
+          <div style="font-size:.75rem;color:#666;margin-top:8px">
+            <strong style="color:#94a3b8">How it works:</strong> LLM ports bind to localhost by default.
+            Use <code style="color:#ffd93d">hivv firewall --apply</code> to open to LAN or VPN peers.
+            Behind NAT/CGNAT? Use <code style="color:#ffd93d">hivv volunteer on</code> — the hub relays jobs through your long-poll inbox.
+            No port forwarding needed.
+          </div>
+        </div>
+      </div>
+
+      <!-- ── QUICK COPY-PASTE ── -->
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px">
+        <div style="background:#0a0a14;border:1px solid #333;border-radius:10px;padding:16px">
+          <div style="font-size:.75rem;text-transform:uppercase;letter-spacing:.08em;color:#00f0ff;font-weight:700;margin-bottom:8px">Python (openai package)</div>
+          <div style="background:#080810;border:1px solid #333;border-radius:6px;padding:10px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.75rem;line-height:1.5;overflow-x:auto">
+            <div><span style="color:#c084fc">from</span> <span style="color:#00f0ff">openai</span> <span style="color:#c084fc">import</span> OpenAI</div>
+            <div>client = OpenAI(<span style="color:#ffd93d">base_url</span>=<span style="color:#00ff88">"https://hivv.org/v1"</span>, <span style="color:#ffd93d">api_key</span>=<span style="color:#00ff88">"any"</span>)</div>
+            <div>r = client.chat.completions.create(</div>
+            <div>&nbsp;&nbsp;<span style="color:#ffd93d">model</span>=<span style="color:#00ff88">"auto"</span>,</div>
+            <div>&nbsp;&nbsp;<span style="color:#ffd93d">messages</span>=[{<span style="color:#00ff88">"role"</span>:<span style="color:#00ff88">"user"</span>, <span style="color:#00ff88">"content"</span>:<span style="color:#00ff88">"hello"</span>}],</div>
+            <div>&nbsp;&nbsp;<span style="color:#ffd93d">stream</span>=<span style="color:#c084fc">True</span></div>
+            <div>)</div>
+            <div><span style="color:#c084fc">for</span> chunk <span style="color:#c084fc">in</span> r:</div>
+            <div>&nbsp;&nbsp;<span style="color:#c084fc">if</span> chunk.choices[0].delta.content:</div>
+            <div>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#c084fc">print</span>(chunk.choices[0].delta.content, end=<span style="color:#00ff88">""</span>)</div>
+          </div>
+        </div>
+        <div style="background:#0a0a14;border:1px solid #333;border-radius:10px;padding:16px">
+          <div style="font-size:.75rem;text-transform:uppercase;letter-spacing:.08em;color:#ffd93d;font-weight:700;margin-bottom:8px">curl / fetch / any HTTP client</div>
+          <div style="background:#080810;border:1px solid #333;border-radius:6px;padding:10px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.75rem;line-height:1.5;overflow-x:auto">
+            <div><span style="color:#6b7280"># Non-streaming</span></div>
+            <div><span style="color:#ffd93d">curl</span> https://hivv.org/v1/chat/completions \</div>
+            <div>&nbsp;-H <span style="color:#00ff88">"Content-Type: application/json"</span> \</div>
+            <div>&nbsp;-d <span style="color:#00ff88">'{"model":"auto","messages":[{"role":"user","content":"hello"}]}'</span></div>
+            <div style="height:8px"></div>
+            <div><span style="color:#6b7280"># Streaming (SSE)</span></div>
+            <div><span style="color:#ffd93d">curl</span> -N https://hivv.org/v1/chat/completions \</div>
+            <div>&nbsp;-H <span style="color:#00ff88">"Content-Type: application/json"</span> \</div>
+            <div>&nbsp;-d <span style="color:#00ff88">'{"model":"auto","messages":[{"role":"user","content":"hello"}],"stream":true}'</span></div>
+            <div style="height:8px"></div>
+            <div><span style="color:#6b7280"># With routing mode</span></div>
+            <div><span style="color:#ffd93d">curl</span> https://hivv.org/v1/chat/completions \</div>
+            <div>&nbsp;-H <span style="color:#00ff88">"Content-Type: application/json"</span> \</div>
+            <div>&nbsp;-d <span style="color:#00ff88">'{"model":"auto","messages":[{"role":"user","content":"hello"}],"route":{"mode":"fast"}}'</span></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── WHAT MODEL AUTO DOES ── -->
+      <div style="background:#111;border:1px solid #333;border-radius:8px;padding:14px;margin-bottom:16px">
+        <div style="font-size:.8rem;color:#94a3b8">
+          <strong style="color:#c084fc">What does <code style="color:#ffd93d">"model":"auto"</code> do?</strong>
+          The router tries endpoints in this order: <span style="color:#00ff88">your own keys</span> → <span style="color:#00ff88">local hardware</span> (free, 64 tok/s) → <span style="color:#00ff88">peer nodes</span> (via relay) → <span style="color:#00ff88">community key pool</span> → <span style="color:#00ff88">cloud providers</span> (OpenAI, Anthropic, etc.). Order is biased by measured speed (EWMA). Every response includes <code style="color:#ffd93d">X-Hivv-Answered-By</code> header showing which node/model answered.
+        </div>
+      </div>
+
+      <div style="text-align:center;padding-top:8px;border-top:1px solid rgba(255,255,255,.06)">
+        <a href="/ai.txt" style="font-size:.75rem;color:#c084fc;text-decoration:none;margin:0 8px">⬇ ai.txt (machine-readable manifest)</a>
+        <a href="/openapi.yaml" download style="font-size:.75rem;color:#a855f7;text-decoration:none;margin:0 8px">⬇ OpenAPI Spec</a>
+        <a href="/docs" style="font-size:.75rem;color:#00f0ff;text-decoration:none;margin:0 8px">📖 Swagger UI</a>
+        <a href="/api.html" style="font-size:.75rem;color:#ffd93d;text-decoration:none;margin:0 8px">📄 Full API Docs</a>
+      </div>
+    </section>
+
+    <!-- COLLABORATION FEED — what is the hive working on? -->
+    <section style="background:var(--surface-card);border:1px solid var(--border-subtle);border-radius:14px;padding:20px 24px;margin:0 0 24px">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px">
+        <span style="font-size:1.3rem">🐝</span>
+        <span style="font-size:1.1rem;font-weight:700;color:var(--accent)">THE HIVV HIVE — what are we working on?</span>
+        <button onclick="loadCollabFeed()" style="margin-left:auto;background:transparent;border:1px solid var(--border-subtle);color:#888;padding:4px 10px;border-radius:6px;cursor:pointer;font-size:.8rem">🔄 refresh</button>
+      </div>
+      <div id="collab-feed" style="font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.85rem;color:#e2e8f0">
+        <div style="color:#888;text-align:center;padding:20px">loading what the hive is working on...</div>
+      </div>
+      <div style="margin-top:12px;font-size:.8rem;color:#666;text-align:center">
+        run <code style="background:#1a1a2e;padding:2px 6px;border-radius:4px;color:var(--accent)">hivv share "what you're working on"</code> to add your work to this feed
+      </div>
+    </section>
+
+    <!-- PROVIDER STATUS RINGS -->
+    <section class="provider-rings" id="provider-rings">
+      <!-- Dynamically populated -->
+    </section>
+
+    <!-- METRICS DASHBOARD -->
+    <section class="metrics-grid">
+      <div class="metric-card highlight">
+        <div class="metric-value" id="metric-throughput">~64</div>
+        <div class="metric-label">Hardware Throughput (tok/s)</div>
+        <div class="metric-trend">↑ Peak 64.2</div>
+        <svg class="metric-sparkline" id="spark-throughput"></svg>
+      </div>
+      <div class="metric-card">
+        <div class="metric-value" id="metric-requests">0</div>
+        <div class="metric-label">Requests Today</div>
+        <div class="metric-trend">↑ Live</div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-value" id="metric-tokens">0</div>
+        <div class="metric-label">Tokens Streamed</div>
+        <div class="metric-trend">↑ Real-time</div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-value" id="metric-providers">23</div>
+        <div class="metric-label">Active Providers</div>
+        <div class="metric-trend" style="color: var(--accent-cyan);">✓ All systems</div>
+      </div>
+    </section>
+
+    <!-- GOVERNANCE PANEL -->
+    <section class="governance-panel">
+      <div class="governance-header">
+        <div class="governance-title">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+          </svg>
+          TRI-STATE AGENT GOVERNANCE
+        </div>
+        <div class="tri-state-badges">
+          <div class="tri-badge yes">
+            <span>🟢 YES</span>
+            <span class="tri-badge-count" id="tri-yes-count">0</span>
+          </div>
+          <div class="tri-badge maybe">
+            <span>🟡 MAYBE</span>
+            <span class="tri-badge-count" id="tri-maybe-count">0</span>
+          </div>
+          <div class="tri-badge no">
+            <span>🔴 NO</span>
+            <span class="tri-badge-count" id="tri-no-count">0</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Network Detail Grid -->
+      <div class="network-detail-grid">
+        <!-- Agent Fleet Activity -->
+        <div class="panel">
+          <div class="panel-header">
+            <span class="panel-title">🤖 LIVE AGENT ACTIVITY</span>
+            <span class="panel-count" id="activity-count">0 events</span>
+          </div>
+          <div class="activity-feed" id="live-activity-feed">
+            <div style="color:#666;text-align:center;padding:20px;font-size:0.85rem;">Loading activity stream...</div>
+          </div>
+        </div>
+
+        <!-- Routing Priority -->
+        <div class="panel">
+          <div class="panel-header">
+            <span class="panel-title">⚡ SELF-HEALING ROUTING</span>
+          </div>
+          <div class="routing-steps">
+            <div class="routing-step">
+              <span class="step-number">1</span>
+              <div class="step-info">
+                <div class="step-title">Your Private Keys First</div>
+                <div class="step-desc">Prioritize your dedicated API quota</div>
+              </div>
+            </div>
+            <div class="routing-step priority">
+              <span class="step-number">2</span>
+              <div class="step-info">
+                <div class="step-title">Local Hardware (64 tok/s)</div>
+                <div class="step-desc">Free on-premise GPU inference</div>
+              </div>
+              <span class="step-badge free">FREE</span>
+            </div>
+            <div class="routing-step">
+              <span class="step-number">3</span>
+              <div class="step-info">
+                <div class="step-title">Community Key Pool</div>
+                <div class="step-desc">Shared tokens from donors</div>
+              </div>
+            </div>
+            <div class="routing-step">
+              <span class="step-number">4</span>
+              <div class="step-info">
+                <div class="step-title">Multi-Cloud Failover</div>
+                <div class="step-desc">Anthropic, OpenAI, Gemini</div>
+              </div>
+              <span class="step-badge fast">FAST</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- CHARTS GRID -->
+    <section class="charts-grid">
+      <div class="panel">
+        <div class="panel-header">
+          <span class="panel-title">📊 THROUGHPUT OVER TIME</span>
+        </div>
+        <div class="chart-container" id="throughput-chart"></div>
+      </div>
+      <div class="panel">
+        <div class="panel-header">
+          <span class="panel-title">🔀 PROVIDER DISTRIBUTION</span>
+        </div>
+        <div class="chart-container" id="provider-chart"></div>
+      </div>
+    </section>
+
+    <!-- CHAT CTA — link to full chat page -->
+    <section style="background:linear-gradient(135deg,rgba(0,255,136,.06) 0%,rgba(0,240,255,.06) 100%);border:1px solid rgba(0,255,136,.2);border-radius:16px;padding:28px 32px;margin:0 0 24px;text-align:center;">
+      <div style="font-size:1.4rem;font-weight:700;color:var(--accent);margin-bottom:8px">🗣️ Ready to talk with HIVV?</div>
+      <div style="color:#94a3b8;font-size:.92rem;margin-bottom:16px">Chat with the hive — voice input, live transcription, TTS responses, and 60+ tokens per second streaming.</div>
+      <a href="/chat/" style="display:inline-block;padding:12px 28px;background:linear-gradient(135deg,#00ff88,#00cc6a);color:#000;border-radius:10px;font-weight:700;font-size:.95rem;text-decoration:none;transition:transform .15s,box-shadow .15s;" onmouseover="this.style.transform='translateY(-2px)';this.style.boxShadow='0 8px 24px rgba(0,255,136,.4)'" onmouseout="this.style.transform='';this.style.boxShadow=''">🎤 Open Voice Chat →</a>
+    </section>
+
+    <!-- QUICK INTEGRATION -->
+    <section class="integration-card">
+      <h2>🔌 Plug into Any AI Tool in 30 Seconds</h2>
+      <p>Drop HIVV directly into Python, Node.js, Open WebUI, or Continue.dev using the standard OpenAI client.</p>
+
+      <!-- Language tabs -->
+      <div style="display:flex;gap:6px;margin-bottom:12px;flex-wrap:wrap" id="integration-tabs">
+        <button onclick="showIntegration('python')" class="toolbar-btn active" id="tab-python">Python</button>
+        <button onclick="showIntegration('nodejs')" class="toolbar-btn" id="tab-nodejs">Node.js</button>
+        <button onclick="showIntegration('curl')" class="toolbar-btn" id="tab-curl">curl</button>
+        <button onclick="showIntegration('openwebui')" class="toolbar-btn" id="tab-openwebui">Open WebUI</button>
+      </div>
+
+      <div id="integration-python" class="code-block">
+        <div class="code-header">
+          <span class="code-lang">python</span>
+          <button class="code-copy-btn" onclick="HIVV.copyCode(this)">📋 Copy</button>
+        </div>
+        <pre><code>from openai import OpenAI
+
+client = OpenAI(base_url="https://hivv.org/v1", api_key="any")
+
+# Non-streaming
+response = client.chat.completions.create(
+    model="auto",
+    messages=[{"role": "user", "content": "Hello HIVV!"}]
+)
+print(response.choices[0].message.content)
+
+# Streaming
+stream = client.chat.completions.create(
+    model="auto",
+    messages=[{"role": "user", "content": "Hello HIVV!"}],
+    stream=True
+)
+for chunk in stream:
+    if chunk.choices[0].delta.content:
+        print(chunk.choices[0].delta.content, end="", flush=True)</code></pre>
+      </div>
+
+      <div id="integration-nodejs" class="code-block" style="display:none">
+        <div class="code-header">
+          <span class="code-lang">javascript</span>
+          <button class="code-copy-btn" onclick="HIVV.copyCode(this)">📋 Copy</button>
+        </div>
+        <pre><code>import OpenAI from "openai";
+
+const client = new OpenAI({
+  baseURL: "https://hivv.org/v1",
+  apiKey: "any",
+});
+
+const response = await client.chat.completions.create({
+  model: "auto",
+  messages: [{ role: "user", content: "Hello HIVV!" }],
+});
+console.log(response.choices[0].message.content);</code></pre>
+      </div>
+
+      <div id="integration-curl" class="code-block" style="display:none">
+        <div class="code-header">
+          <span class="code-lang">bash</span>
+          <button class="code-copy-btn" onclick="HIVV.copyCode(this)">📋 Copy</button>
+        </div>
+        <pre><code># Non-streaming
+curl https://hivv.org/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"auto","messages":[{"role":"user","content":"Hello HIVV!"}]}'
+
+# Streaming (SSE)
+curl -N https://hivv.org/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"auto","messages":[{"role":"user","content":"Hello HIVV!"}],"stream":true}'
+
+# With routing mode
+curl https://hivv.org/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"auto","messages":[{"role":"user","content":"Hello HIVV!"}],"route":{"mode":"fast"}}'</code></pre>
+      </div>
+
+      <div id="integration-openwebui" class="code-block" style="display:none">
+        <div class="code-header">
+          <span class="code-lang">open webui</span>
+          <button class="code-copy-btn" onclick="HIVV.copyCode(this)">📋 Copy</button>
+        </div>
+        <pre><code>1. Open Open WebUI Settings → Connections
+2. Add OpenAI API:
+   - API Base URL: https://hivv.org/v1
+   - API Key: any
+3. Select "auto" as the model
+4. Start chatting — traffic routes through HIVV's distributed network</code></pre>
+      </div>
+
+      <div style="margin-top:14px;display:flex;gap:10px;flex-wrap:wrap;font-size:.8rem">
+        <div style="background:#111;border:1px solid #333;border-radius:6px;padding:8px 12px;color:#94a3b8">
+          <span style="color:var(--accent)">streaming:</span> add <code style="color:#fbbf24">"stream":true</code> for real-time tokens
+        </div>
+        <div style="background:#111;border:1px solid #333;border-radius:6px;padding:8px 12px;color:#94a3b8">
+          <span style="color:var(--accent)">routing:</span> add <code style="color:#fbbf24">"route":{"mode":"fast"}</code> for lowest latency
+        </div>
+        <div style="background:#111;border:1px solid #333;border-radius:6px;padding:8px 12px;color:#94a3b8">
+          <span style="color:var(--accent)">CLI:</span> <code style="color:#fbbf24">hivv chat "hello"</code> works from any terminal
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- FOOTER -->
+  <footer class="command-footer">
+    <p>HIVV.org — The Unified AI Gateway &amp; Sovereign Agent Governance Plane</p>
+    <p style="margin-top:8px;">
+      <a href="/">Control Center</a> ·
+      <a href="/chat/">🗣️ Voice Chat</a> ·
+      <a href="/status">Live Status</a> ·
+      <a href="/docs">API Docs</a> ·
+      <a href="/terms.html">Terms</a> ·
+      <a href="/privacy.html">Privacy</a>
+    </p>
+  </footer>
+
+  <script src="/js/shared.js"></script>
+  <script>
+(function() {
+
+  // ========== INTEGRATION TABS ==========
+  window.showIntegration = function(lang) {
+    ['python','nodejs','curl','openwebui'].forEach(l => {
+      const el = document.getElementById('integration-' + l);
+      const tab = document.getElementById('tab-' + l);
+      if (el) el.style.display = l === lang ? '' : 'none';
+      if (tab) tab.classList.toggle('active', l === lang);
+    });
+  };
+
+  // ========== WORLD MAP (LEAFLET) ==========
+  let worldMap = null;
+  let mapMarkers = [];
+
+  function initWorldMap() {
+    const mapContainer = document.getElementById('world-map');
+    if (!mapContainer) return;
+
+    // Initialize map with dark theme
+    if (worldMap) {
+      worldMap.remove();
+      worldMap = null;
+    }
+
+    worldMap = L.map('world-map', {
+      center: [20, 0],
+      zoom: 2,
+      minZoom: 1,
+      maxZoom: 6,
+      zoomControl: false,
+      attributionControl: false,
+      preferCanvas: true
+    });
+
+    // Esri World Dark Gray — free satellite-style, no API key
+    L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}', {
+      maxZoom: 19,
+      subdomains: '1,2,3,4,5,6,7,8'
+    }).addTo(worldMap);
+
+    // Add zoom control to bottom right
+    L.control.zoom({ position: 'bottomright' }).addTo(worldMap);
+
+    // AI Provider locations with real coordinates
+    const aiProviders = [
+      {
+        name: 'Local Hardware',
+        coords: [37.7749, -122.4194], // San Francisco
+        city: 'San Francisco, CA',
+        type: 'hardware',
+        throughput: 64,
+        status: 'primary',
+        description: 'On-premise GPU inference'
+      },
+      {
+        name: 'Groq',
+        coords: [37.4863, -122.2369], // San Jose
+        city: 'San Jose, CA',
+        type: 'provider',
+        throughput: 55,
+        status: 'online',
+        description: 'Groq LPU Inference Engine'
+      },
+      {
+        name: 'Anthropic',
+        coords: [37.7749, -122.4194], // San Francisco
+        city: 'San Francisco, CA',
+        type: 'provider',
+        throughput: 45,
+        status: 'online',
+        description: 'Claude AI Models'
+      },
+      {
+        name: 'OpenAI',
+        coords: [37.7749, -122.4194], // San Francisco
+        city: 'San Francisco, CA',
+        type: 'provider',
+        throughput: 40,
+        status: 'online',
+        description: 'GPT-4 & GPT-4o Models'
+      },
+      {
+        name: 'Google Gemini',
+        coords: [37.4220, -122.0841], // Mountain View
+        city: 'Mountain View, CA',
+        type: 'provider',
+        throughput: 38,
+        status: 'online',
+        description: 'Gemini Flash & Pro'
+      },
+      {
+        name: 'MCP Bridge 1',
+        coords: [40.7128, -74.0060], // New York
+        city: 'New York, NY',
+        type: 'agent',
+        throughput: 33,
+        status: 'online',
+        description: 'MCP Agent Bridge (33 tools)'
+      },
+      {
+        name: 'MCP Bridge 2',
+        coords: [51.5074, -0.1278], // London
+        city: 'London, UK',
+        type: 'agent',
+        throughput: 30,
+        status: 'online',
+        description: 'MCP Agent Bridge'
+      },
+      {
+        name: 'Community Pool',
+        coords: [48.8566, 2.3522], // Paris
+        city: 'Paris, France',
+        type: 'provider',
+        throughput: 25,
+        status: 'online',
+        description: 'Shared API Token Pool'
+      }
+    ];
+
+    // Custom icon function
+    function createIcon(type, status) {
+      const colors = {
+        hardware: '#a855f7',
+        provider: '#00f0ff',
+        agent: '#00ff88'
+      };
+      const color = colors[type] || '#888';
+      const size = type === 'hardware' ? 20 : type === 'provider' ? 16 : 12;
+
+      return L.divIcon({
+        className: 'custom-marker',
+        html: `
+          <div style="
+            width: ${size}px;
+            height: ${size}px;
+            background: ${color};
+            border: 2px solid ${status === 'primary' ? '#fff' : color};
+            border-radius: 50%;
+            box-shadow: 0 0 ${type === 'hardware' ? '15px' : '10px'} ${color};
+            animation: ${type === 'hardware' ? 'pulseMarker 2s infinite' : 'none'};
+          "></div>
+          <style>
+            @keyframes pulseMarker {
+              0%, 100% { box-shadow: 0 0 10px ${color}; }
+              50% { box-shadow: 0 0 20px ${color}, 0 0 30px ${color}; }
+            }
+          </style>
+        `,
+        iconSize: [size, size],
+        iconAnchor: [size/2, size/2]
+      });
+    }
+
+    // Add markers
+    aiProviders.forEach(provider => {
+      const marker = L.marker(provider.coords, {
+        icon: createIcon(provider.type, provider.status)
+      }).addTo(worldMap);
+
+      // Popup content
+      const popupContent = `
+        <div class="provider-popup">
+          <h4>${provider.name}</h4>
+          <p>📍 ${provider.city}</p>
+          <p>⚡ ${provider.throughput} tok/s</p>
+          <p>🔹 ${provider.description}</p>
+          <span class="status ${provider.status}">${provider.status.toUpperCase()}</span>
+        </div>
+      `;
+      marker.bindPopup(popupContent, { maxWidth: 200 });
+      mapMarkers.push(marker);
+    });
+
+    // Add connection lines between providers (optional visual flair)
+    const sf = [37.7749, -122.4194];
+    const ny = [40.7128, -74.0060];
+    const london = [51.5074, -0.1278];
+    const paris = [48.8566, 2.3522];
+
+    const connections = [
+      [sf, ny],
+      [sf, london],
+      [ny, london],
+      [london, paris]
+    ];
+
+    connections.forEach(([start, end]) => {
+      const midpoint = [(start[0] + end[0]) / 2, (start[1] + end[1]) / 2];
+      const polyline = L.polyline([start, end], {
+        color: 'rgba(0, 240, 255, 0.2)',
+        weight: 1,
+        dashArray: '5, 10'
+      }).addTo(worldMap);
+    });
+
+    // Fit bounds to show all markers
+    const group = L.featureGroup(mapMarkers);
+    // worldMap.fitBounds(group.getBounds().pad(0.2));
+  }
+
+  // ========== REAL NODE MARKERS ON MAP ==========
+  let nodeMarkers = [];
+
+  async function updateNodeMarkers() {
+    if (!worldMap) return;
+    try {
+      const res = await fetch('/api/control/nodes');
+      if (!res.ok) return;
+      const data = await res.json();
+
+      // Clear existing node markers
+      nodeMarkers.forEach(m => worldMap.removeLayer(m));
+      nodeMarkers = [];
+
+      if (!data.nodes || data.nodes.length === 0) return;
+
+      // Add markers for nodes with location data
+      data.nodes.forEach(node => {
+        if (!node.location || !node.location.lat || !node.location.lon) return;
+
+        const statusColors = {
+          online: '#00ff88',
+          stressed: '#ffd93d',
+          offline: '#ff6b6b',
+          draining: '#ff9f43'
+        };
+        const color = statusColors[node.status] || '#888';
+
+        const icon = L.divIcon({
+          className: 'node-marker',
+          html: `<div style="width:14px;height:14px;background:${color};border:2px solid #fff;border-radius:50%;box-shadow:0 0 8px ${color};"></div>`,
+          iconSize: [14, 14],
+          iconAnchor: [7, 7]
+        });
+
+        const marker = L.marker([node.location.lat, node.location.lon], { icon })
+          .addTo(worldMap);
+
+        const uptime = node.metrics?.uptime_seconds ? formatUptime(node.metrics.uptime_seconds) : 'N/A';
+        const capacity = node.metrics?.available_capacity !== undefined ? node.metrics.available_capacity : '?';
+
+        marker.bindPopup(`
+          <div style="min-width:180px">
+            <h4 style="margin:0 0 8px;color:#00ff88">${escapeHtml(node.name || 'Unknown Node')}</h4>
+            <div style="font-size:0.85em;color:#aaa;">
+              <div>📍 ${escapeHtml(node.location.city || 'Unknown')}, ${escapeHtml(node.location.country || '')}</div>
+              <div>⚡ ${node.status.toUpperCase()} ${node.status === 'stressed' ? '(high load)' : ''}</div>
+              <div>🖥️ ${escapeHtml(node.cpu_model || 'CPU')}</div>
+              <div>⏱️ Uptime: ${uptime}</div>
+              <div>🔧 Capacity: ${capacity} slots</div>
+              ${node.work_status ? `<div style="margin-top:6px;font-style:italic">"${escapeHtml(node.work_status)}"</div>` : ''}
+            </div>
+          </div>
+        `, { maxWidth: 220 });
+
+        nodeMarkers.push(marker);
+      });
+    } catch (e) {
+      console.error('Failed to update node markers:', e);
+    }
+  }
+
+  function formatUptime(seconds) {
+    if (!seconds || seconds < 1) return 'N/A';
+    const d = Math.floor(seconds / 86400);
+    const h = Math.floor((seconds % 86400) / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    if (d > 0) return d + 'd ' + h + 'h';
+    if (h > 0) return h + 'h ' + m + 'm';
+    return m + 'm';
+  }
+
+  // ========== COLLABORATION FEED ==========
+  async function loadCollabFeed() {
+    const el = document.getElementById('collab-feed');
+    if (!el) return;
+    try {
+      const res = await fetch('/api/collaboration/feed', {cache: 'no-store'});
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const data = await res.json();
+      const items = data.items || [];
+      if (items.length === 0) {
+        el.innerHTML = '<div style="color:#888;text-align:center;padding:16px">no work shared yet — be the first! 🐝</div>';
+        return;
+      }
+      const now = Date.now() / 1000;
+      let html = '<div style="display:grid;gap:8px">';
+      items.forEach(item => {
+        const name = escHtml(item.name || 'unknown');
+        const work = escHtml(item.work_status || '');
+        const age = item.last_update ? Math.round((now - item.last_update)) : 0;
+        const ageStr = age < 60 ? age + 's ago' : age < 3600 ? Math.round(age/60) + 'm ago' : Math.round(age/3600) + 'h ago';
+        const prob = item.problem_id ? '<span style="background:#1a3a2a;color:#4ade80;padding:1px 6px;border-radius:4px;font-size:.75rem;margin-left:8px">#' + escHtml(item.problem_id) + '</span>' : '';
+        html += '<div style="display:flex;align-items:center;gap:10px;padding:8px 12px;background:#0d0d1a;border-radius:8px;border-left:3px solid #00ff88">' +
+          '<span style="color:#00ff88;font-weight:600;min-width:120px">' + name + '</span>' +
+          '<span style="color:#e2e8f0;flex:1">' + work + prob + '</span>' +
+          '<span style="color:#666;font-size:.75rem;white-space:nowrap">' + ageStr + '</span>' +
+          '</div>';
+      });
+      html += '</div>';
+      el.innerHTML = html;
+    } catch(e) {
+      el.innerHTML = '<div style="color:#888;text-align:center;padding:16px">could not load feed — check connection</div>';
+    }
+  }
+
+  function escHtml(s) {
+    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  }
+  async function initUniverseGraph() {
+    const container = document.getElementById('universe-canvas');
+    if (!container) return;
+    const width = container.clientWidth;
+    const height = container.clientHeight;
+
+    // Clear existing
+    d3.select('#universe-canvas').selectAll('*').remove();
+
+    const svg = d3.select('#universe-canvas')
+      .attr('viewBox', `0 0 ${width} ${height}`);
+
+    // Fetch real node data
+    const realNodes = await loadRealNodeData();
+
+    // Create node data from real nodes (or fallback placeholder if none)
+    const providers = realNodes && realNodes.length > 0
+      ? realNodes.map(n => ({ id: n.id, name: n.name, type: 'node', throughput: n.throughput, status: n.status, color: n.color }))
+      : [{ id: 'none', name: 'No Nodes Online', type: 'node', throughput: 0 }];
+
+    // No fake agents — just real nodes
+    const agents = [];
+
+    const allNodes = [...providers, ...agents];
+
+    // Create edges - connections
+    const edges = [
+      { source: 'hardware', target: 'agent-1', strength: 0.9 },
+      { source: 'hardware', target: 'agent-2', strength: 0.8 },
+      { source: 'hardware', target: 'agent-4', strength: 0.7 },
+      { source: 'anthropic', target: 'agent-3', strength: 0.6 },
+      { source: 'anthropic', target: 'agent-7', strength: 0.5 },
+      { source: 'openai', target: 'agent-5', strength: 0.4 },
+      { source: 'google', target: 'agent-6', strength: 0.6 },
+      { source: 'groq', target: 'agent-8', strength: 0.8 },
+      { source: 'agent-1', target: 'agent-2', strength: 0.3 },
+      { source: 'agent-4', target: 'agent-6', strength: 0.4 },
+      { source: 'agent-3', target: 'agent-7', strength: 0.3 },
+    ];
+
+    // Color scales
+    const stateColors = { yes: '#00ff88', maybe: '#ffd93d', no: '#ff6b6b' };
+    const typeColors = { hardware: '#a855f7', provider: '#00f0ff' };
+
+    // Create force simulation
+    const simulation = d3.forceSimulation(allNodes)
+      .force('link', d3.forceLink(edges).id(d => d.id).distance(80).strength(d => d.strength))
+      .force('charge', d3.forceManyBody().strength(-200))
+      .force('center', d3.forceCenter(width / 2, height / 2))
+      .force('collision', d3.forceCollide().radius(30));
+
+    // Draw edges
+    const link = svg.append('g')
+      .selectAll('line')
+      .data(edges)
+      .enter()
+      .append('line')
+      .attr('stroke', 'rgba(255,255,255,0.15)')
+      .attr('stroke-width', d => d.strength * 3)
+      .attr('stroke-opacity', d => d.strength * 0.6);
+
+    // Draw nodes
+    const node = svg.append('g')
+      .selectAll('g')
+      .data(allNodes)
+      .enter()
+      .append('g')
+      .style('cursor', 'pointer');
+
+    // Node circles
+    node.append('circle')
+      .attr('r', d => d.type === 'hardware' || d.type === 'provider' ? 22 : 14)
+      .attr('fill', d => {
+        if (d.type === 'hardware') return '#0d0d1a';
+        if (d.type === 'provider') return '#0d0d1a';
+        return stateColors[d.state] || '#888';
+      })
+      .attr('stroke', d => {
+        if (d.type === 'hardware') return '#a855f7';
+        if (d.type === 'provider') return '#00f0ff';
+        return stateColors[d.state] || '#888';
+      })
+      .attr('stroke-width', 2.5)
+      .attr('stroke-opacity', 0.9);
+
+    // Node labels
+    node.append('text')
+      .text(d => d.name)
+      .attr('text-anchor', 'middle')
+      .attr('dy', d => (d.type === 'hardware' || d.type === 'provider') ? 38 : 28)
+      .attr('fill', '#888')
+      .attr('font-size', '10px')
+      .attr('font-weight', '600');
+
+    // Provider throughput labels
+    node.filter(d => d.throughput)
+      .append('text')
+      .text(d => d.throughput + ' t/s')
+      .attr('text-anchor', 'middle')
+      .attr('dy', 4)
+      .attr('fill', '#fff')
+      .attr('font-size', '9px')
+      .attr('font-weight', '700');
+
+    // Pulsing animation for hardware node
+    node.filter(d => d.type === 'hardware')
+      .append('circle')
+      .attr('r', 28)
+      .attr('fill', 'none')
+      .attr('stroke', '#a855f7')
+      .attr('stroke-width', 1)
+      .attr('stroke-opacity', 0.5)
+      .style('animation', 'pulseRing 2s ease-out infinite');
+
+    // Add CSS for pulse animation
+    if (!document.getElementById('pulse-animation')) {
+      const style = document.createElement('style');
+      style.id = 'pulse-animation';
+      style.textContent = `
+        @keyframes pulseRing {
+          0% { r: 22; stroke-opacity: 0.8; }
+          100% { r: 40; stroke-opacity: 0; }
+        }
+      `;
+      document.head.appendChild(style);
+    }
+
+    // Drag behavior
+    const drag = d3.drag()
+      .on('start', (event, d) => {
+        if (!event.active) simulation.alphaTarget(0.3).restart();
+        d.fx = d.x;
+        d.fy = d.y;
+      })
+      .on('drag', (event, d) => {
+        d.fx = event.x;
+        d.fy = event.y;
+      })
+      .on('end', (event, d) => {
+        if (!event.active) simulation.alphaTarget(0);
+        d.fx = null;
+        d.fy = null;
+      });
+
+    node.call(drag);
+
+    // Update positions on tick
+    simulation.on('tick', () => {
+      link
+        .attr('x1', d => d.source.x)
+        .attr('y1', d => d.source.y)
+        .attr('x2', d => d.target.x)
+        .attr('y2', d => d.target.y);
+
+      node.attr('transform', d => `translate(${d.x},${d.y})`);
+    });
+
+    // Store for updates
+    window.universeSimulation = simulation;
+    window.universeNodes = allNodes;
+    window.universeEdges = edges;
+  }
+
+  // ========== REAL NODE DATA ==========
+  async function loadRealNodeData() {
+    try {
+      const res = await fetch('/api/control/nodes');
+      if (!res.ok) return null;
+      const data = await res.json();
+      if (!data.nodes || data.nodes.length === 0) return null;
+
+      const nodes = data.nodes.filter(n => n.status !== 'offline');
+      return nodes.map((n, i) => {
+        const tokens = n.total_tokens_processed || 0;
+        const uptime = n.uptime_seconds || 1;
+        const throughput = Math.round(tokens / uptime);
+        const colors = ['#a855f7', '#00f0ff', '#00ff88', '#74b9ff', '#ffd93d', '#ff6b6b', '#ff9f43', '#c084fc'];
+        const lat = n.metrics?.latency_ms ? `${n.metrics.latency_ms}ms` : '—';
+        return {
+          id: n.node_id || n.name || `node-${i}`,
+          name: n.name || `Node ${i + 1}`,
+          color: colors[i % colors.length],
+          throughput: throughput || 0,
+          max: Math.max(throughput * 1.3, 10),
+          latency: lat,
+          status: n.status === 'online' ? 'active' : n.status,
+          models: n.models || [],
+          cpu: n.cpu_model || '—',
+          uptime: n.uptime_seconds || 0
+        };
+      });
+    } catch (e) {
+      console.error('Failed to load node data:', e);
+      return null;
+    }
+  }
+
+  // ========== PROVIDER RINGS ==========
+  function renderProviderRings(providers) {
+    const container = document.getElementById('provider-rings');
+    const circumference = 2 * Math.PI * 36; // radius 36
+
+    if (!providers || providers.length === 0) {
+      container.innerHTML = '<p style="color:#666;text-align:center;padding:20px;">No nodes online yet. Run <code>hivv start</code> on your machines to join the network.</p>';
+      return;
+    }
+
+    container.innerHTML = providers.map(p => {
+      const offset = circumference - (p.throughput / p.max) * circumference;
+      return `
+        <div class="provider-ring-card" style="--ring-color: ${p.color}">
+          <div class="ring-container">
+            <svg class="ring-svg" width="80" height="80" viewBox="0 0 80 80">
+              <circle class="ring-bg" cx="40" cy="40" r="36"/>
+              <circle class="ring-progress" cx="40" cy="40" r="36"
+                style="stroke-dashoffset: ${offset}"/>
+            </svg>
+            <div class="ring-center">
+              <span class="ring-value">${p.throughput}</span>
+              <span class="ring-unit">tok/s</span>
+            </div>
+          </div>
+          <div class="provider-name">${p.name}</div>
+          <div class="provider-meta">${p.latency} latency</div>
+          <div class="provider-status-indicator">
+            <span class="status-dot"></span>
+            ${p.status === 'primary' ? 'PRIMARY' : (p.status || 'ONLINE').toUpperCase()}
+          </div>
+        </div>
+      `;
+    }).join('');
+  }
+
+  // ========== THROUGHPUT CHART ==========
+  function renderThroughputChart() {
+    const container = document.getElementById('throughput-chart');
+    const width = container.clientWidth;
+    const height = container.clientHeight || 200;
+    const padding = { top: 20, right: 20, bottom: 30, left: 40 };
+
+    // Generate sample data - last 12 hours
+    const data = [];
+    for (let i = 11; i >= 0; i--) {
+      data.push({
+        hour: i === 0 ? 'now' : `-${i}h`,
+        value: 55 + Math.random() * 10
+      });
+    }
+
+    const xScale = d3.scaleBand()
+      .domain(data.map(d => d.hour))
+      .range([padding.left, width - padding.right])
+      .padding(0.3);
+
+    const yScale = d3.scaleLinear()
+      .domain([0, 70])
+      .range([height - padding.bottom, padding.top]);
+
+    const svg = d3.select('#throughput-chart')
+      .html('')
+      .append('svg')
+      .attr('viewBox', `0 0 ${width} ${height}`);
+
+    // Bars
+    svg.selectAll('.bar')
+      .data(data)
+      .enter()
+      .append('rect')
+      .attr('class', 'chart-bar')
+      .attr('x', d => xScale(d.hour))
+      .attr('y', d => yScale(d.value))
+      .attr('width', xScale.bandwidth())
+      .attr('height', d => height - padding.bottom - yScale(d.value))
+      .attr('fill', (d, i) => i === data.length - 1 ? '#00ff88' : 'rgba(0, 255, 136, 0.4)')
+      .attr('rx', 3);
+
+    // Y axis
+    svg.append('g')
+      .attr('transform', `translate(${padding.left},0)`)
+      .call(d3.axisLeft(yScale).ticks(5).tickFormat(d => d + ''))
+      .selectAll('text')
+      .attr('fill', '#666')
+      .attr('font-size', '10px');
+
+    svg.selectAll('.domain, .tick line').attr('stroke', '#333');
+
+    // X axis
+    svg.append('g')
+      .attr('transform', `translate(0,${height - padding.bottom})`)
+      .call(d3.axisBottom(xScale))
+      .selectAll('text')
+      .attr('fill', '#666')
+      .attr('font-size', '9px');
+
+    // Current value highlight
+    svg.append('text')
+      .attr('x', width - padding.right)
+      .attr('y', padding.top + 15)
+      .attr('text-anchor', 'end')
+      .attr('fill', '#00ff88')
+      .attr('font-size', '12px')
+      .attr('font-weight', '700')
+      .text('~64 tok/s');
+  }
+
+  // ========== PROVIDER DISTRIBUTION CHART ==========
+  async function renderProviderChart() {
+    const container = document.getElementById('provider-chart');
+    const width = container.clientWidth;
+    const height = container.clientHeight || 200;
+    const radius = Math.min(width, height) / 2 - 20;
+
+    let data;
+    try {
+      const res = await fetch('/api/public/models');
+      const d = await res.json();
+      if (d.providers && d.providers.length > 0) {
+        const colors = ['#a855f7', '#00f0ff', '#00ff88', '#74b9ff', '#ffd93d', '#ff9f43', '#c084fc', '#fb7185'];
+        data = d.providers.slice(0, 8).map((p, i) => ({
+          provider: p.display_name || p.name,
+          value: p.kind === 'local' ? 30 - i * 3 : 20 - i * 2,
+          color: colors[i % colors.length]
+        }));
+        if (data.length === 0) data = [{ provider: 'No providers', value: 1, color: '#666' }];
+      } else {
+        data = [{ provider: 'No providers', value: 1, color: '#666' }];
+      }
+    } catch (e) {
+      data = [{ provider: 'Error loading', value: 1, color: '#666' }];
+    }
+
+    const svg = d3.select('#provider-chart')
+      .html('')
+      .append('svg')
+      .attr('viewBox', `0 0 ${width} ${height}`);
+
+    const g = svg.append('g')
+      .attr('transform', `translate(${width / 2}, ${height / 2})`);
+
+    const pie = d3.pie().value(d => d.value).sort(null);
+    const arc = d3.arc().innerRadius(radius * 0.5).outerRadius(radius);
+    const arcHover = d3.arc().innerRadius(radius * 0.5).outerRadius(radius * 1.05);
+
+    const arcs = g.selectAll('.arc')
+      .data(pie(data))
+      .enter()
+      .append('g')
+      .attr('class', 'arc');
+
+    arcs.append('path')
+      .attr('d', arc)
+      .attr('fill', d => d.data.color)
+      .attr('opacity', 0.85)
+      .attr('stroke', '#0d0d1a')
+      .attr('stroke-width', 2)
+      .style('cursor', 'pointer')
+      .on('mouseover', function(event, d) {
+        d3.select(this)
+          .transition()
+          .duration(200)
+          .attr('d', arcHover)
+          .attr('opacity', 1);
+
+        // Show tooltip
+        const [x, y] = d3.pointer(event, svg.node());
+        svg.append('text')
+          .attr('class', 'pie-tooltip')
+          .attr('x', x)
+          .attr('y', y - 10)
+          .attr('text-anchor', 'middle')
+          .attr('fill', '#fff')
+          .attr('font-size', '12px')
+          .attr('font-weight', '700')
+          .text(`${d.data.provider}: ${d.data.value}%`);
+      })
+      .on('mouseout', function() {
+        d3.select(this)
+          .transition()
+          .duration(200)
+          .attr('d', arc)
+          .attr('opacity', 0.85);
+        svg.selectAll('.pie-tooltip').remove();
+      });
+
+    // Center text - show providers count
+    g.append('text')
+      .attr('text-anchor', 'middle')
+      .attr('dy', '-0.2em')
+      .attr('fill', '#fff')
+      .attr('font-size', '20px')
+      .attr('font-weight', '800')
+      .text(data.length);
+
+    g.append('text')
+      .attr('text-anchor', 'middle')
+      .attr('dy', '1em')
+      .attr('fill', '#666')
+      .attr('font-size', '10px')
+      .attr('text-transform', 'uppercase')
+      .attr('letter-spacing', '0.05em')
+      .text('providers');
+  }
+
+  // ========== LIVE ACTIVITY FEED ==========
+  async function refreshLiveActivity() {
+    try {
+      const res = await fetch('/api/public/activity');
+      const d = await res.json();
+      const feed = document.getElementById('live-activity-feed');
+      const countEl = document.getElementById('activity-count');
+
+      if (!d.activity || d.activity.length === 0) {
+        feed.innerHTML = '<div style="color:#666;text-align:center;padding:20px;">No recent activity</div>';
+        return;
+      }
+
+      countEl.textContent = d.activity.length + ' events';
+      feed.innerHTML = d.activity.slice(0, 8).map(a => {
+        const timeStr = a.ts ? new Date(a.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'now';
+        const latency = a.latency_ms ? Math.round(a.latency_ms) : null;
+        const modelShort = (a.model || 'auto').length > 15 ? (a.model || 'auto').slice(0, 12) + '...' : (a.model || 'auto');
+        const statusColor = a.status === 'success' ? '#00ff88' : a.status === 'error' ? '#ff6b6b' : '#ffd93d';
+
+        return `
+          <div class="activity-item">
+            <span class="activity-time">${timeStr}</span>
+            <span class="activity-dot" style="background:${statusColor}"></span>
+            <span class="activity-content">
+              <span class="activity-agent">${modelShort}</span>
+              <span class="activity-desc">${a.provider || 'request'}</span>
+            </span>
+            <span class="activity-speed">${latency ? '⚡ ' + latency + 'ms' : ''}</span>
+          </div>
+        `;
+      }).join('');
+    } catch (e) {
+      console.error('Activity refresh error:', e);
+    }
+  }
+
+  // ========== VOICE / SPEECH FEATURES ==========
+  let voiceMode = false;
+  let voiceResponseMode = false;
+  let recognition = null;
+  let isListening = false;
+  let lastTranscript = '';
+
+  async function toggleVoiceMode() {
+    voiceMode = !voiceMode;
+    const btn = document.getElementById('btn-voice-mode');
+    const responseBtn = document.getElementById('btn-voice-response');
+    const voiceStatus = document.getElementById('voice-status-text');
+    const voiceIcon = document.getElementById('voice-mode-icon');
+    const voiceSel = document.getElementById('voice-selector');
+
+    if (voiceMode) {
+      btn.classList.add('active');
+      responseBtn.style.display = 'inline-flex';
+      voiceSel.style.display = 'inline-block';
+      voiceStatus.style.display = 'inline';
+      voiceIcon.textContent = '🎤🔴';
+
+      if (!recognition) {
+        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+        if (SpeechRecognition) {
+          recognition = new SpeechRecognition();
+          recognition.continuous = false;
+          recognition.interimResults = true;
+          recognition.lang = 'en-US';
+
+          recognition.onresult = (event) => {
+            let finalTranscript = '';
+            let interimTranscript = '';
+            for (let i = 0; i < event.results.length; i++) {
+              const result = event.results[i];
+              if (result.isFinal) {
+                finalTranscript += result[0].transcript;
+              } else {
+                interimTranscript += result[0].transcript;
+              }
+            }
+            // Update live transcript display
+            document.getElementById('live-transcript-final').textContent = finalTranscript;
+            document.getElementById('live-transcript-interim').textContent = interimTranscript;
+
+            const combined = finalTranscript + interimTranscript;
+            lastTranscript = combined;
+            document.getElementById('chat-input').value = combined;
+            document.getElementById('chat-input').dispatchEvent(new Event('input'));
+          };
+
+          recognition.onend = () => {
+            isListening = false;
+            stopAudioLevelBars();
+            btn.classList.remove('active');
+            voiceIcon.textContent = '🎤';
+            document.getElementById('voice-recording-panel').style.display = 'none';
+
+            const finalText = lastTranscript.trim();
+            if (finalText) {
+              document.getElementById('chat-input').value = finalText;
+              document.getElementById('chat-input').dispatchEvent(new Event('input'));
+              sendMessage();
+              lastTranscript = '';
+            }
+          };
+
+          recognition.onerror = (event) => {
+            console.error('Speech recognition error:', event.error);
+            isListening = false;
+            voiceMode = false;
+            stopAudioLevelBars();
+            btn.classList.remove('active');
+            voiceIcon.textContent = '🎤';
+            document.getElementById('voice-recording-panel').style.display = 'none';
+
+            if (event.error === 'not-allowed' || event.error === 'permission-denied') {
+              document.getElementById('dock-status-info').textContent = '❌ Mic denied — click 🔒 in browser bar → allow';
+            } else if (event.error === 'no-speech') {
+              document.getElementById('dock-status-info').textContent = 'No speech detected — try again';
+            } else if (event.error === 'not-found') {
+              document.getElementById('dock-status-info').textContent = '❌ Mic not found — try Chrome or Firefox';
+            } else {
+              document.getElementById('dock-status-info').textContent = '❌ Mic error: ' + event.error;
+            }
+            setTimeout(() => {
+              const el = document.getElementById('dock-status-info');
+              if (el) el.textContent = 'Ready · Try 🎤 for voice input';
+            }, 4000);
+          };
+        } else {
+          alert('Speech recognition not supported in this browser. Try Chrome or Edge.');
+          voiceMode = false;
+          btn.classList.remove('active');
+          responseBtn.style.display = 'none';
+          voiceSel.style.display = 'none';
+          voiceStatus.style.display = 'none';
+          return;
+        }
+      }
+
+      await startListening();
+    } else {
+      btn.classList.remove('active');
+      responseBtn.style.display = 'none';
+      voiceSel.style.display = 'none';
+      voiceStatus.style.display = 'none';
+      voiceIcon.textContent = '🎤';
+      if (recognition && isListening) {
+        recognition.stop();
+        isListening = false;
+      }
+    }
+  }
+
+  async function checkMicrophone() {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      return { ok: false, reason: 'media-devices-unsupported' };
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      stream.getTracks().forEach(t => t.stop());
+      return { ok: true };
+    } catch (e) {
+      console.warn('[MicCheck] Error name:', e.name, '| Message:', e.message, '| Full:', e);
+      if (e.name === 'NotAllowedError' || e.name === 'PermissionDeniedError') {
+        return { ok: false, reason: 'permission-denied' };
+      }
+      if (e.name === 'NotFoundError') {
+        return { ok: false, reason: 'no-device' };
+      }
+      return { ok: false, reason: e.message };
+    }
+  }
+
+  async function startListening() {
+    if (!recognition) return;
+
+    document.getElementById('dock-status-info').textContent = 'Checking microphone...';
+    const micCheck = await checkMicrophone();
+
+    if (!micCheck.ok) {
+      const btn = document.getElementById('btn-voice-mode');
+      const voiceIcon = document.getElementById('voice-mode-icon');
+      if (btn) btn.classList.remove('active');
+      if (voiceIcon) voiceIcon.textContent = '🎤';
+
+      if (micCheck.reason === 'permission-denied') {
+        document.getElementById('dock-status-info').textContent = '❌ Mic denied — click 🔒 in browser bar → allow microphone';
+      } else if (micCheck.reason === 'no-device') {
+        document.getElementById('dock-status-info').textContent = '❌ Mic not accessible — try Chrome (not Chromium) or Firefox';
+      } else if (micCheck.reason === 'media-devices-unsupported') {
+        document.getElementById('dock-status-info').textContent = '❌ Mic not supported — try Chrome or Firefox';
+      } else {
+        document.getElementById('dock-status-info').textContent = '❌ Mic error: ' + micCheck.reason;
+      }
+      setTimeout(() => {
+        const el = document.getElementById('dock-status-info');
+        if (el) el.textContent = 'Ready · Try 🎤 for voice input';
+      }, 5000);
+      return;
+    }
+
+    try {
+      document.getElementById('dock-status-info').textContent = 'Requesting microphone access...';
+
+      const mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+
+      startAudioLevelBars(mediaStream);
+
+      document.getElementById('voice-recording-panel').style.display = 'block';
+      document.getElementById('live-transcript-final').textContent = '';
+      document.getElementById('live-transcript-interim').textContent = '';
+
+      isListening = true;
+      document.getElementById('voice-mode-icon').textContent = '🎤🔴';
+      document.getElementById('dock-status-info').textContent = 'Listening... speak now';
+      recognition.start();
+    } catch (e) {
+      console.error('Failed to start recognition:', e);
+      isListening = false;
+      const btn = document.getElementById('btn-voice-mode');
+      const voiceIcon = document.getElementById('voice-mode-icon');
+      if (btn) btn.classList.remove('active');
+      if (voiceIcon) voiceIcon.textContent = '🎤';
+
+      if (e.name === 'NotAllowedError' || e.name === 'PermissionDeniedError') {
+        document.getElementById('dock-status-info').textContent = '❌ Mic denied — click 🔒 in browser bar → allow';
+      } else if (e.name === 'NotFoundError') {
+        document.getElementById('dock-status-info').textContent = '❌ No mic detected — try Chrome (not Chromium) or Firefox';
+      } else {
+        document.getElementById('dock-status-info').textContent = '❌ Mic error: ' + e.message;
+      }
+      setTimeout(() => {
+        const el = document.getElementById('dock-status-info');
+        if (el) el.textContent = 'Ready · Try 🎤 for voice input';
+      }, 5000);
+    }
+  }
+
+  // ===== Audio Level Visualization =====
+  let audioContext = null;
+  let analyserNode = null;
+  let audioAnimationId = null;
+
+  function startAudioLevelBars(mediaStream) {
+    try {
+      audioContext = new (window.AudioContext || window.webkitAudioContext)();
+      analyserNode = audioContext.createAnalyser();
+      analyserNode.fftSize = 64;
+      const source = audioContext.createMediaStreamSource(mediaStream);
+      source.connect(analyserNode);
+
+      const bufferLength = analyserNode.frequencyBinCount;
+      const dataArray = new Uint8Array(bufferLength);
+      const bars = document.querySelectorAll('.audio-bar');
+
+      function updateBars() {
+        if (!analyserNode) return;
+        analyserNode.getByteFrequencyData(dataArray);
+
+        // Average the frequency data to get a sense of volume
+        let sum = 0;
+        for (let i = 0; i < dataArray.length; i++) {
+          sum += dataArray[i];
+        }
+        const average = sum / dataArray.length;
+        const normalizedVolume = average / 255; // 0-1
+
+        // Update each bar with a varied height based on the data
+        bars.forEach((bar, i) => {
+          const dataIndex = Math.floor((i / bars.length) * dataArray.length);
+          const value = dataArray[dataIndex] / 255;
+          const height = Math.max(3, value * 20);
+          bar.style.height = height + 'px';
+          bar.style.opacity = 0.4 + (value * 0.6);
+        });
+
+        audioAnimationId = requestAnimationFrame(updateBars);
+      }
+
+      updateBars();
+    } catch (e) {
+      console.error('Audio visualization error:', e);
+    }
+  }
+
+  function stopAudioLevelBars() {
+    if (audioAnimationId) {
+      cancelAnimationFrame(audioAnimationId);
+      audioAnimationId = null;
+    }
+    if (audioContext) {
+      audioContext.close();
+      audioContext = null;
+      analyserNode = null;
+    }
+    // Reset bars
+    document.querySelectorAll('.audio-bar').forEach(bar => {
+      bar.style.height = '3px';
+      bar.style.opacity = '0.4';
+    });
+  }
+
+  function cancelVoiceRecording() {
+    if (recognition && isListening) {
+      recognition.stop();
+    }
+    stopAudioLevelBars();
+    document.getElementById('voice-recording-panel').style.display = 'none';
+    const btn = document.getElementById('btn-voice-mode');
+    const voiceIcon = document.getElementById('voice-mode-icon');
+    const voiceStatus = document.getElementById('voice-status-text');
+    const responseBtn = document.getElementById('btn-voice-response');
+    const voiceSel = document.getElementById('voice-selector');
+    if (btn) btn.classList.remove('active');
+    if (voiceIcon) voiceIcon.textContent = '🎤';
+    if (voiceStatus) voiceStatus.style.display = 'none';
+    if (responseBtn) responseBtn.style.display = 'none';
+    if (voiceSel) voiceSel.style.display = 'none';
+    voiceMode = false;
+    isListening = false;
+    document.getElementById('dock-status-info').textContent = 'Ready · Try 🎤 for voice input';
+  }
+
+  function toggleVoiceResponse() {
+    voiceResponseMode = !voiceResponseMode;
+    const btn = document.getElementById('btn-voice-response');
+    const icon = document.getElementById('voice-response-icon');
+
+    if (voiceResponseMode) {
+      btn.classList.add('active');
+      icon.textContent = '🔊✓';
+    } else {
+      btn.classList.remove('active');
+      icon.textContent = '🔊';
+      window.speechSynthesis.cancel();
+    }
+  }
+
+  function speakText(text) {
+    if (!voiceResponseMode) return;
+    stopSpeaking();
+
+    const selectedVoice = localStorage.getItem('hivv_voice') || 'af_sarah';
+    const audioEl = document.getElementById('hivv-tts-audio');
+
+    fetch('/api/tts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text, voice: selectedVoice, speed: 1.0 })
+    })
+    .then(r => {
+      if (!r.ok) throw new Error('TTS request failed');
+      return r.blob();
+    })
+    .then(blob => {
+      const url = URL.createObjectURL(blob);
+      audioEl.src = url;
+      audioEl.playbackRate = 1.0;
+      audioEl.play().catch(() => {});
+
+      // Show waveform animation
+      showWaveform(true);
+
+      audioEl.onended = () => {
+        showWaveform(false);
+        URL.revokeObjectURL(url);
+      };
+      audioEl.onerror = () => {
+        showWaveform(false);
+      };
+    })
+    .catch(err => {
+      console.error('TTS error:', err);
+      showWaveform(false);
+    });
+  }
+
+  function stopSpeaking() {
+    const audioEl = document.getElementById('hivv-tts-audio');
+    if (audioEl) {
+      audioEl.pause();
+      audioEl.src = '';
+    }
+    showWaveform(false);
+  }
+
+  function showWaveform(active) {
+    const el = document.getElementById('voice-waveform');
+    if (!el) return;
+    el.style.display = active ? 'flex' : 'none';
+  }
+
+  // Load saved voice preference
+  function loadVoicePreference() {
+    const saved = localStorage.getItem('hivv_voice');
+    if (saved) {
+      const sel = document.getElementById('voice-selector');
+      if (sel) sel.value = saved;
+    }
+  }
+
+  function saveVoicePreference(voice) {
+    localStorage.setItem('hivv_voice', voice);
+  }
+
+  // Load voices (needed for some browsers)
+  if (window.speechSynthesis) {
+    window.speechSynthesis.onvoiceschanged = () => {
+      window.speechSynthesis.getVoices();
+    };
+  }
+
+  // ========== LIVE STATUS REFRESH ==========
+  async function refreshLiveStatus() {
+    try {
+      const [statusRes, dashboardRes, nodesRes] = await Promise.all([
+        fetch('/api/public/status'),
+        fetch('/api/public/dashboard-stats'),
+        fetch('/api/control/nodes')
+      ]);
+      const d = await statusRes.json();
+      const dash = await dashboardRes.json();
+      const nodes = await nodesRes.json();
+
+      if (!d.ok) return;
+
+      document.getElementById('metric-requests').textContent = Number(dash.throughput?.requests_today || d.today?.requests || 0).toLocaleString();
+      document.getElementById('metric-tokens').textContent = Number(dash.throughput?.tokens_today || d.today?.tokens || 0).toLocaleString();
+      document.getElementById('metric-providers').textContent = d.gateway?.providers_active || 0;
+
+      const online = dash.network?.nodes_online || 0;
+      const hwStatus = online > 0
+        ? `LIVE — ${dash.capacity?.available_capacity || 0} SLOTS AVAILABLE`
+        : 'CONNECTING...';
+      document.getElementById('header-status-text').textContent = hwStatus;
+
+      document.getElementById('tri-yes-count').textContent = dash.governance?.yes || 0;
+      document.getElementById('tri-maybe-count').textContent = dash.governance?.maybe || 0;
+      document.getElementById('tri-no-count').textContent = dash.governance?.no || 0;
+
+      // Update hero stats
+      const totalNodes = nodes.total || (nodes.nodes || []).length;
+      const onlineNodes = nodes.online || (nodes.nodes || []).filter(n => n.status === 'online' || n.status === 'active').length;
+      document.getElementById('hero-nodes').textContent = onlineNodes || '—';
+      document.getElementById('hero-providers').textContent = d.gateway?.providers_active || 0;
+      document.getElementById('hero-throughput').textContent = dash.capacity?.combined_throughput ? `${dash.capacity.combined_throughput}` : '64';
+
+      // Update hero bee count
+      const beeCountHero = document.getElementById('hivv-bee-count-hero');
+      if (beeCountHero) beeCountHero.textContent = onlineNodes || totalNodes || '…';
+    } catch (e) {
+      console.error('Status refresh error:', e);
+    }
+  }
+
+  // ========== CHAT FUNCTIONALITY ==========
+  const $ = (id) => document.getElementById(id);
+  let chatHistory = [];
+  let abortController = null;
+  let isGenerating = false;
+  let showReasoning = true;
+
+  const starterPrompts = [
+    "Explain the key architectural components of an ultra-high-throughput AI API Gateway in 3 structured points.",
+    "Write a complete Python script using the openai package to connect to https://hivv.org/v1, stream responses, and report tokens per second.",
+    "How does YES / MAYBE / NO tri-state governance protect humans from rogue autonomous AI agents?",
+    "Explain quantum superposition and entanglement to a curious 10-year old."
+  ];
+
+  async function init() {
+    loadSavedChat();
+    setupInputAutoResize();
+    refreshLiveStatus();
+    refreshLiveActivity();
+    checkAuthStatus();
+    loadCollabFeed();
+    loadVoicePreference();
+
+    // Load real node data once
+    const realNodes = await loadRealNodeData();
+
+    // Initialize visualizations with real data
+    initWorldMap();
+    updateNodeMarkers();
+    await initUniverseGraph();
+    renderProviderRings(realNodes || []);
+    renderThroughputChart();
+    renderProviderChart();
+
+    // Refresh intervals
+    setInterval(refreshLiveStatus, 15000);
+    setInterval(refreshLiveActivity, 6000);
+    setInterval(updateNodeMarkers, 30000);
+    setInterval(async () => {
+      const nodes = await loadRealNodeData();
+      renderProviderRings(nodes || []);
+    }, 30000);
+    setInterval(() => {
+      renderThroughputChart();
+      renderProviderChart();
+    }, 30000);
+
+    // Handle window resize
+    window.addEventListener('resize', debounce(() => {
+      initUniverseGraph();
+      renderThroughputChart();
+      renderProviderChart();
+    }, 250));
+  }
+
+  function debounce(fn, delay) {
+    let timeout;
+    return (...args) => {
+      clearTimeout(timeout);
+      timeout = setTimeout(() => fn(...args), delay);
+    };
+  }
+
+  function checkAuthStatus() {
+    const token = localStorage.getItem('hivv_session_token');
+    const authBtn = $('auth-status-btn');
+    if (!authBtn) return;
+    if (token) {
+      fetch('/api/auth/me', { headers: { 'X-Session-Token': token } })
+        .then(r => r.json())
+        .then(d => {
+          if (d.logged_in) {
+            authBtn.textContent = (d.user?.username || 'Account') + ' ⚙️';
+          }
+        })
+        .catch(() => {});
+    }
+  }
+
+  function setupInputAutoResize() {
+    const input = $('chat-input');
+    if (!input) return;
+    input.addEventListener('input', () => {
+      input.style.height = 'auto';
+      input.style.height = Math.min(input.scrollHeight, 180) + 'px';
+    });
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        sendMessage();
+      }
+    });
+  }
+
+  function loadSavedChat() {
+    try {
+      const saved = localStorage.getItem('hivv_chat_history_v2');
+      if (saved) {
+        chatHistory = JSON.parse(saved);
+        if (chatHistory.length > 0) {
+          $('chat-empty-state').style.display = 'none';
+          chatHistory.forEach(msg => renderMessageCard(msg));
+        }
+      }
+    } catch (e) {}
+  }
+
+  function saveChat() {
+    try {
+      localStorage.setItem('hivv_chat_history_v2', JSON.stringify(chatHistory));
+    } catch (e) {}
+  }
+
+  window.toggleReasoningView = function() {
+    showReasoning = !showReasoning;
+    const btn = $('toggle-reasoning-btn');
+    btn.classList.toggle('active', showReasoning);
+  };
+
+  window.applyStarter = function(index) {
+    const prompt = starterPrompts[index];
+    if (!prompt) return;
+    const input = $('chat-input');
+    if (!input) return;
+    input.value = prompt;
+    input.focus();
+    input.dispatchEvent(new Event('input'));
+    sendMessage();
+  };
+
+  window.clearConversation = function() {
+    if (isGenerating) stopGeneration();
+    chatHistory = [];
+    localStorage.removeItem('hivv_chat_history_v2');
+    const container = $('chat-messages');
+    container.innerHTML = `
+      <div class="chat-empty" id="chat-empty-state">
+        <span class="chat-empty-icon">⚡</span>
+        <h3>Ready to Stream at 60+ Tokens/Sec</h3>
+        <p>Type any prompt below or click a starter chip to watch token-by-token streaming in real time.</p>
+      </div>
+    `;
+    $('dock-status-info').textContent = 'Ready · Cleared conversation history';
+  };
+
+  window.copyEntireChat = function() {
+    if (chatHistory.length === 0) return;
+    const full = chatHistory.map(m => `${m.role.toUpperCase()}:\n${m.content}\n`).join('\n---\n\n');
+    navigator.clipboard.writeText(full).then(() => {
+      HIVV.toast('Conversation copied!');
+    });
+  };
+
+  window.exportMarkdown = function() {
+    if (chatHistory.length === 0) return;
+    let md = '# HIVV.org AI Chat Transcript\n*Exported: ' + new Date().toLocaleString() + '*\n\n';
+    chatHistory.forEach(m => {
+      md += `### ${m.role === 'user' ? '👤 User' : '⚡ HIVV Gateway'}\n\n${m.content}\n\n---\n\n`;
+    });
+    const blob = new Blob([md], { type: 'text/markdown' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `hivv-chat-${Date.now()}.md`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  function renderMessageCard(msg) {
+    const container = $('chat-messages');
+    const msgEl = document.createElement('div');
+    msgEl.className = `chat-msg ${msg.role}`;
+
+    if (msg.role === 'user') {
+      msgEl.innerHTML = `
+        <div class="msg-header">YOU</div>
+        <div class="msg-bubble">${escapeHtml(msg.content)}</div>
+      `;
+    } else {
+      let reasoningHtml = '';
+      if (msg.reasoning) {
+        reasoningHtml = `
+          <div class="reasoning-drawer ${msg.reasoningCollapsed ? 'collapsed' : ''}">
+            <div class="reasoning-header" onclick="this.parentElement.classList.toggle('collapsed')">
+              <span>🧠 Thinking Process (${msg.reasoningTokens || ''} tokens)</span>
+              <span>${msg.reasoningCollapsed ? '▼' : '▲'}</span>
+            </div>
+            <div class="reasoning-body">${escapeHtml(msg.reasoning)}</div>
+          </div>
+        `;
+      }
+
+      const formattedContent = HIVV.renderMarkdown ? HIVV.renderMarkdown(msg.content) : escapeHtml(msg.content);
+      const perfText = msg.tokensPerSec ? `⚡ ${msg.tokensPerSec} tok/s · ` : '';
+      const totalTokensText = msg.totalTokens ? `${msg.totalTokens} tokens · ` : '';
+      const timeText = msg.elapsedMs ? `${(msg.elapsedMs/1000).toFixed(1)}s` : '';
+      const providerTag = msg.provider ? `<span class="msg-provider-tag">via ${escapeHtml(msg.provider)}</span>` : '';
+
+      msgEl.innerHTML = `
+        <div class="msg-header">
+          <span>HIVV GATEWAY</span>
+          ${providerTag}
+        </div>
+        <div class="msg-bubble">
+          ${reasoningHtml}
+          <div class="msg-rendered-content">${formattedContent}</div>
+          <div class="msg-perf-footer">
+            <span class="tps-gauge">${perfText}${totalTokensText}${timeText}</span>
+            <div class="msg-actions">
+              <button class="msg-action-btn" onclick="copyMessageText(this)">📋 Copy</button>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+    container.appendChild(msgEl);
+    container.scrollTop = container.scrollHeight;
+  }
+
+  window.copyMessageText = function(btn) {
+    const bubble = btn.closest('.msg-bubble');
+    if (!bubble) return;
+    const content = bubble.querySelector('.msg-rendered-content');
+    const text = content ? (content.innerText || content.textContent) : '';
+    navigator.clipboard.writeText(text).then(() => {
+      btn.textContent = '✓ Copied!';
+      setTimeout(() => { btn.textContent = '📋 Copy'; }, 2000);
+    });
+  };
+
+  window.sendMessage = async function() {
+    if (isGenerating) return;
+    const input = $('chat-input');
+    if (!input) return;
+    const text = input.value.trim();
+    if (!text) return;
+
+    input.value = '';
+    input.style.height = 'auto';
+
+    const emptyState = $('chat-empty-state');
+    if (emptyState) emptyState.style.display = 'none';
+
+    const userMsg = { role: 'user', content: text, ts: Date.now() };
+    chatHistory.push(userMsg);
+    renderMessageCard(userMsg);
+    saveChat();
+
+    const container = $('chat-messages');
+    const assistantEl = document.createElement('div');
+    assistantEl.className = 'chat-msg assistant';
+
+    const selectedModel = $('model-selector').value;
+
+    assistantEl.innerHTML = `
+      <div class="msg-header">
+        <span>HIVV GATEWAY</span>
+        <span class="msg-provider-tag" id="live-provider-tag">Routing...</span>
+      </div>
+      <div class="msg-bubble">
+        <div class="reasoning-drawer" id="live-reasoning-drawer" style="display:none;">
+          <div class="reasoning-header" onclick="this.parentElement.classList.toggle('collapsed')">
+            <span id="live-reasoning-title">🧠 Thinking Process (0 tok/s)...</span>
+            <span>▲ Collapse</span>
+          </div>
+          <div class="reasoning-body" id="live-reasoning-text"></div>
+        </div>
+        <div class="msg-rendered-content" id="live-content-target"><span class="cursor-pulse"></span></div>
+        <div class="msg-perf-footer">
+          <span class="tps-gauge" id="live-tps-ticker">⚡ Streaming at 60+ tok/s...</span>
+          <div class="msg-actions">
+            <button class="msg-action-btn" onclick="copyMessageText(this)">📋 Copy</button>
+          </div>
+        </div>
+      </div>
+    `;
+    container.appendChild(assistantEl);
+    container.scrollTop = container.scrollHeight;
+
+    isGenerating = true;
+    $('btn-send-message').style.display = 'none';
+    $('btn-stop-generation').style.display = 'inline-flex';
+    $('dock-status-info').textContent = '⚡ Streaming tokens in realtime at 60+ tok/s...';
+
+    abortController = new AbortController();
+    const sessionToken = localStorage.getItem('hivv_session_token');
+
+    const contextMessages = chatHistory.slice(-10).map(m => ({
+      role: m.role,
+      content: m.content
+    }));
+
+    const reqPayload = {
+      model: selectedModel,
+      messages: contextMessages,
+      stream: true
+    };
+
+    const startTime = performance.now();
+    let contentText = '';
+    let reasoningText = '';
+    let totalTokens = 0;
+    let reasoningTokens = 0;
+    let finalStats = null;
+    let providerName = 'Local AI';
+
+    const contentTarget = assistantEl.querySelector('#live-content-target');
+
+    try {
+      const response = await fetch('/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(sessionToken ? { 'X-Session-Token': sessionToken } : {})
+        },
+        body: JSON.stringify(reqPayload),
+        signal: abortController.signal
+      });
+
+      if (!response.ok) {
+        throw new Error('Gateway returned HTTP ' + response.status);
+      }
+
+      const pHeader = response.headers.get('X-AI-Provider');
+      if (pHeader) {
+        // Sanitize model name — remove long HuggingFace cache paths
+        providerName = pHeader.split('/').pop().replace(/\.(gguf|bin|safetensors)$/i, '').replace(/--/g, '/');
+        if (providerName.length > 40) providerName = providerName.slice(-35);
+        const tag = assistantEl.querySelector('#live-provider-tag');
+        if (tag) tag.textContent = 'via ' + providerName;
+      }
+
+      // Also check for hivv_provider in SSE events
+      let gotProviderFromSSE = false;
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      const reasoningDrawer = assistantEl.querySelector('#live-reasoning-drawer');
+      const reasoningBody = assistantEl.querySelector('#live-reasoning-text');
+      const reasoningTitle = assistantEl.querySelector('#live-reasoning-title');
+      const tpsTicker = assistantEl.querySelector('#live-tps-ticker');
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop();
+
+        for (const line of lines) {
+          if (!line.startsWith('data:')) continue;
+          const payload = line.slice(5).trim();
+          if (payload === '[DONE]') continue;
+
+          try {
+            const chunk = JSON.parse(payload);
+
+            const stats = chunk.hivv_stats
+              || (chunk.choices?.[0]?.finish_reason === 'stats' ? chunk.choices[0].hivv_stats : null);
+            if (stats) {
+              finalStats = stats;
+              continue;
+            }
+
+            if (chunk.names && Array.isArray(chunk.names)) {
+              const toolBadge = document.createElement('div');
+              toolBadge.style.cssText = 'display:inline-flex;align-items:center;gap:6px;padding:4px 10px;background:rgba(116,185,255,0.15);border:1px solid rgba(116,185,255,0.3);border-radius:6px;color:#74b9ff;font-size:0.75rem;font-family:monospace;margin:6px 0;';
+              toolBadge.textContent = '🛠️ Tool Executed: ' + chunk.names.join(', ');
+              contentTarget.parentElement.insertBefore(toolBadge, contentTarget);
+              continue;
+            }
+
+            const delta = chunk.choices?.[0]?.delta;
+            if (!delta) continue;
+
+            if (delta.reasoning_content) {
+              reasoningTokens++;
+              reasoningText += delta.reasoning_content;
+              if (showReasoning) {
+                reasoningDrawer.style.display = 'block';
+                reasoningBody.textContent = reasoningText;
+                const elapsedSec = (performance.now() - startTime) / 1000;
+                const currentTps = Math.round(reasoningTokens / Math.max(elapsedSec, 0.1));
+                reasoningTitle.textContent = `🧠 Thinking Process (${currentTps} tok/s) · ${reasoningTokens} tokens`;
+                container.scrollTop = container.scrollHeight;
+              }
+            }
+
+            if (delta.content) {
+              totalTokens++;
+              contentText += delta.content;
+              contentTarget.textContent = contentText;
+
+              const cursor = document.createElement('span');
+              cursor.className = 'cursor-pulse';
+              contentTarget.appendChild(cursor);
+
+              const elapsedSec = (performance.now() - startTime) / 1000;
+              const currentTps = Math.round(totalTokens / Math.max(elapsedSec, 0.1));
+              tpsTicker.textContent = `⚡ ${currentTps} tok/s · ${totalTokens} tokens · ${(elapsedSec).toFixed(1)}s`;
+              container.scrollTop = container.scrollHeight;
+            }
+
+          } catch (err) {}
+        }
+      }
+
+      const elapsedMs = Math.round(performance.now() - startTime);
+      const measuredTps = Math.round(totalTokens / (elapsedMs / 1000));
+      const finalTps = finalStats?.tokens_per_sec || measuredTps || 64;
+      const allTokens = totalTokens;
+
+      if (HIVV.renderMarkdown) {
+        contentTarget.innerHTML = HIVV.renderMarkdown(contentText);
+      } else {
+        contentTarget.textContent = contentText;
+      }
+
+      if (reasoningText) {
+        reasoningDrawer.classList.add('collapsed');
+        reasoningTitle.textContent = `Thought for ${(elapsedMs/1000).toFixed(1)}s (${reasoningTokens} tokens) — Click to view`;
+      }
+
+      tpsTicker.textContent = `⚡ ${finalTps} tok/s · ${allTokens} tokens · ${(elapsedMs/1000).toFixed(1)}s · via ${providerName}`;
+      $('dock-status-info').textContent = `Completed · Streamed at ${finalTps} tokens/sec via ${providerName}`;
+
+      if (voiceResponseMode && contentText) {
+        speakText(contentText);
+      }
+
+      chatHistory.push({
+        role: 'assistant',
+        content: contentText,
+        reasoning: reasoningText || null,
+        reasoningTokens,
+        reasoningCollapsed: true,
+        tokensPerSec: finalTps,
+        totalTokens: allTokens,
+        elapsedMs,
+        provider: providerName,
+        ts: Date.now()
+      });
+      saveChat();
+
+      // Refresh live activity after chat
+      refreshLiveActivity();
+
+    } catch (err) {
+      if (err.name === 'AbortError') {
+        contentTarget.innerHTML += '<p style="color:var(--warn);font-size:0.85rem;margin-top:8px;">[Generation stopped by user]</p>';
+        $('dock-status-info').textContent = 'Stream cancelled by user';
+      } else {
+        contentTarget.innerHTML = `<div style="color:var(--danger);padding:8px;background:rgba(255,82,82,0.1);border-radius:6px;">Error: ${escapeHtml(err.message)}</div>`;
+        $('dock-status-info').textContent = 'Stream error: ' + err.message;
+      }
+    } finally {
+      isGenerating = false;
+      $('btn-send-message').style.display = 'inline-flex';
+      $('btn-stop-generation').style.display = 'none';
+      input.focus();
+    }
+  };
+
+  window.stopGeneration = function() {
+    if (abortController) {
+      abortController.abort();
+    }
+    stopSpeaking();
+  };
+
+  function escapeHtml(t) {
+    if (!t) return '';
+    const d = document.createElement('div');
+    d.textContent = String(t);
+    return d.innerHTML;
+  }
+
+  // Initialize
+  // Expose functions to window for inline onclick handlers
+  window.toggleVoiceMode = toggleVoiceMode;
+  window.toggleVoiceResponse = toggleVoiceResponse;
+  window.stopSpeaking = stopSpeaking;
+  window.stopGeneration = stopGeneration;
+  window.sendMessage = sendMessage;
+  window.toggleReasoningView = toggleReasoningView;
+  window.clearConversation = clearConversation;
+  window.copyEntireChat = copyEntireChat;
+  window.exportMarkdown = exportMarkdown;
+  window.applyStarter = applyStarter;
+  window.copyMessageText = copyMessageText;
+  window.cancelVoiceRecording = cancelVoiceRecording;
+  window.saveVoicePreference = saveVoicePreference;
+  init();
+})();
+  </script>
+
+  <!-- 🐝 Live bee counter — polls /api/control/nodes every 30s -->
+  <script>
+  (function(){
+    const el = document.getElementById('hivv-bee-count');
+    const pill = document.getElementById('hivv-bee-pill');
+    if (!el || !pill) return;
+    async function tick(){
+      try {
+        const r = await fetch('/api/control/nodes', {cache:'no-store'});
+        if (!r.ok) throw new Error(r.status);
+        const j = await r.json();
+        const online = j.online ?? (j.nodes||[]).filter(n=>n.status==='online'||n.status==='active').length;
+        const total = j.total ?? (j.nodes||[]).length;
+        el.textContent = online + (online!==total ? '/' + total : '');
+        pill.title = online + ' bee' + (online===1?'':'s') + ' online · ' + total + ' total registered';
+      } catch(e) {
+        el.textContent = '—';
+      }
+    }
+    tick();
+    setInterval(tick, 30000);
+  })();
+  </script>
+</body>
+</html>

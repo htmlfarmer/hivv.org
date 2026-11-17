@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>HIVV — Chat</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='28'>🧠</text></svg>">
+  <!-- Highlight.js theme -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark-dimmed.min.css">
+  <!-- App styles -->
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div class="app">
+
+  <!-- SIDEBAR -->
+  <aside class="sidebar">
+    <div class="sidebar-header">
+      <span style="font-size:1.1rem">🐝</span>
+      <span class="brand">HIVV</span>
+    </div>
+    <div class="new-conv-btn" onclick="clearChat()">+ New Chat</div>
+    <div class="sidebar-list" id="sidebarList"></div>
+  </aside>
+
+  <!-- MAIN -->
+  <div class="main">
+
+    <!-- HEADER -->
+    <header class="header">
+      <div class="header-center">
+        <select class="model-select" id="modelSelect">
+          <option value="auto">🌐 Auto</option>
+          <option value="local">🖥️ Local</option>
+          <option value="openai">OpenAI</option>
+          <option value="anthropic">Anthropic</option>
+          <option value="google">Google</option>
+          <option value="deepseek">DeepSeek</option>
+        </select>
+        <select class="mode-select" id="modeSelect" title="Route mode">
+          <option value="balanced">⚖️ Balanced</option>
+          <option value="quality">✨ Quality</option>
+          <option value="fast">⚡ Fast</option>
+          <option value="cost">💰 Cheap</option>
+          <option value="private">🔒 Private</option>
+          <option value="trusted">🤝 Trusted</option>
+        </select>
+        <select class="model-select" id="voiceSelect" title="TTS Voice">
+          <option value="af_bella">🐝 Bella</option>
+          <option value="af_sarah">🌟 Sarah</option>
+          <option value="af_nova">✨ Nova</option>
+          <option value="af_nicole">💼 Nicole</option>
+        </select>
+        <select class="model-select" id="speedSelect" title="TTS Speed">
+          <option value="0.75">🐢</option>
+          <option value="1.0" selected>🐇</option>
+          <option value="1.25">⚡</option>
+          <option value="1.5">🚀</option>
+        </select>
+      </div>
+      <div class="header-right">
+        <button class="icon-btn" id="muteBtn" onclick="toggleMute()" title="Toggle voice (M)">🔊</button>
+        <button class="icon-btn" onclick="exportChat()" title="Export chat">↗</button>
+        <button class="icon-btn" onclick="openDrawer()" title="Settings (S)">⚙️</button>
+      </div>
+    </header>
+
+    <!-- CHAT AREA -->
+    <div class="chat-area" id="chatArea">
+      <div class="welcome" id="welcome">
+        <span class="welcome-icon">🐝</span>
+        <h1>Chat with HIVV</h1>
+        <p>A distributed AI gateway — your questions routed across a network of intelligent nodes. Attach files, tune generation params, and control every aspect of the response.</p>
+        <div class="suggestions">
+          <div class="suggestion" onclick="sendSuggestion(this)">Explain how the HIVV network works</div>
+          <div class="suggestion" onclick="sendSuggestion(this)">What nodes are currently online?</div>
+          <div class="suggestion" onclick="sendSuggestion(this)">Help me write a Python script</div>
+          <div class="suggestion" onclick="sendSuggestion(this)">Compare local vs cloud AI providers</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- VOICE PANEL -->
+    <div class="voice-panel" id="voicePanel">
+      <div class="voice-orb" id="voiceOrb">🎤</div>
+      <div class="voice-status" id="voiceStatus">Listening…</div>
+      <div class="voice-transcript" id="voiceTranscript"></div>
+      <div class="voice-levels" id="voiceLevels">
+        <span style="height:6px"></span><span style="height:6px"></span><span style="height:6px"></span>
+        <span style="height:6px"></span><span style="height:6px"></span><span style="height:6px"></span>
+        <span style="height:6px"></span><span style="height:6px"></span>
+      </div>
+    </div>
+
+    <!-- INPUT -->
+    <div class="input-area">
+      <div class="file-chips" id="fileChips"></div>
+      <div class="input-row">
+        <button class="attach-btn" onclick="document.getElementById('fileInput').click()" title="Attach file">📎</button>
+        <input type="file" id="fileInput" multiple style="display:none" onchange="if(this.files.length){window._addFiles(Array.from(this.files));this.value='';}">
+        <textarea id="chatInput" placeholder="Ask HIVV anything…" rows="1" oninput="autoResize(this)" onkeydown="handleKeyDown(event)"></textarea>
+        <div class="input-actions">
+          <button class="voice-toggle" id="voiceToggle" onclick="toggleVoiceMode()" title="Voice (V)">🎤</button>
+          <button class="send-btn" id="sendBtn" onclick="sendMessage()" title="Send (Enter)">➤</button>
+        </div>
+      </div>
+    </div>
+
+  </div><!-- /main -->
+
+</div><!-- /app -->
+
+<!-- DRAG OVERLAY -->
+<div class="drag-overlay" id="dragOverlay"><div class="drag-msg">📎 Drop files here</div></div>
+
+<!-- SETTINGS DRAWER -->
+<div class="drawer-overlay" id="drawerOverlay" onclick="closeDrawer()"></div>
+<div class="drawer" id="drawer">
+  <div class="drawer-header">
+    <h3>⚙️ Settings</h3>
+    <button class="icon-btn" onclick="closeDrawer()">✕</button>
+  </div>
+  <div class="drawer-body">
+
+    <!-- Presets -->
+    <div class="ctrl-group">
+      <label>Presets</label>
+      <div class="preset-chips">
+        <span class="preset-chip" id="presetCreative">🎨 Creative</span>
+        <span class="preset-chip" id="presetPrecise">🎯 Precise</span>
+        <span class="preset-chip" id="presetBalanced">⚖️ Balanced</span>
+      </div>
+    </div>
+
+    <!-- Temperature -->
+    <div class="ctrl-group">
+      <label>Temperature <span class="val" id="tempVal">0.7</span></label>
+      <div class="ctrl-desc">Higher = more creative, lower = more focused</div>
+      <div class="ctrl-row">
+        <span style="font-size:0.7rem;color:#64748b">0</span>
+        <input type="range" id="temp" min="0" max="2" step="0.05" value="0.7">
+        <span style="font-size:0.7rem;color:#64748b">2</span>
+      </div>
+    </div>
+
+    <!-- Top P -->
+    <div class="ctrl-group">
+      <label>Top P <span class="val" id="topPVal">0.95</span></label>
+      <div class="ctrl-desc">Nucleus sampling cutoff</div>
+      <div class="ctrl-row">
+        <span style="font-size:0.7rem;color:#64748b">0</span>
+        <input type="range" id="topP" min="0" max="1" step="0.01" value="0.95">
+        <span style="font-size:0.7rem;color:#64748b">1</span>
+      </div>
+    </div>
+
+    <!-- Max Tokens -->
+    <div class="ctrl-group">
+      <label>Max Tokens <span class="val" id="maxTokensVal">2048</span></label>
+      <div class="ctrl-desc">Maximum response length</div>
+      <div class="ctrl-row">
+        <span style="font-size:0.7rem;color:#64748b">64</span>
+        <input type="range" id="maxTokens" min="64" max="16384" step="64" value="2048">
+        <span style="font-size:0.7rem;color:#64748b">16K</span>
+      </div>
+    </div>
+
+    <!-- Frequency Penalty -->
+    <div class="ctrl-group">
+      <label>Frequency Penalty <span class="val" id="freqPenVal">0</span></label>
+      <div class="ctrl-desc">Reduce repetition of token frequencies</div>
+      <div class="ctrl-row">
+        <span style="font-size:0.7rem;color:#64748b">0</span>
+        <input type="range" id="freqPen" min="0" max="2" step="0.05" value="0">
+        <span style="font-size:0.7rem;color:#64748b">2</span>
+      </div>
+    </div>
+
+    <!-- Presence Penalty -->
+    <div class="ctrl-group">
+      <label>Presence Penalty <span class="val" id="presPenVal">0</span></label>
+      <div class="ctrl-desc">Reduce repetition of topics</div>
+      <div class="ctrl-row">
+        <span style="font-size:0.7rem;color:#64748b">0</span>
+        <input type="range" id="presPen" min="0" max="2" step="0.05" value="0">
+        <span style="font-size:0.7rem;color:#64748b">2</span>
+      </div>
+    </div>
+
+    <!-- Thinking Toggle -->
+    <div class="ctrl-group">
+      <div class="toggle-row">
+        <span>🧠 Thinking / Reasoning</span>
+        <div class="toggle" id="thinkingToggle"></div>
+      </div>
+      <div class="ctrl-desc">Show model reasoning (slower, may fail on some models)</div>
+    </div>
+
+    <!-- System Prompt -->
+    <div class="ctrl-group">
+      <label>System Prompt</label>
+      <textarea id="sysPrompt" placeholder="Custom instructions for the AI…"></textarea>
+    </div>
+
+  </div>
+</div>
+
+<!-- TOAST -->
+<div class="toast" id="toast"></div>
+
+<!-- CDN Libraries -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/marked/15.0.4/marked.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.2.4/purify.min.js"></script>
+<!-- App -->
+<script src="app.js"></script>
+</body>
+</html>

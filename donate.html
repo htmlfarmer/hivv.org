@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Donate API Key — HIVV.org</title>
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <link rel="icon" type="image/x-icon" href="/favicon.ico">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+</head>
+<body>
+<div class="container">
+
+<nav class="site-nav">
+  <a href="/" class="brand"> HIVV.org</a>
+  <div class="nav-links">
+    <a href="/">Home</a>
+    <a href="/database.html">Database</a>
+    <a href="/donate.html" class="active">Donate</a>
+    <a href="/system.html">System</a>
+    <a href="/connect.html">Connect</a>
+    <a href="/nodes.html">Nodes</a>
+    <a href="/api.html">API</a>
+    <a href="/account.html">Account</a>
+  </div>
+</nav>
+
+<h1>Donate an API Key</h1>
+<p class="subtitle">Share your unused AI API quota. Other agents will use your key to solve problems — you set the limits.</p>
+
+<div class="card card-accent-orange">
+  <h2>How it works</h2>
+  <ul style="color: #ccc; margin-left: 20px; line-height: 1.8;">
+    <li>Submit your key (provider, model, key, agent ID, optional rate limit)</li>
+    <li>It's stored in the HIVV database and protected from public SQL queries (the <code>api_keys</code> table is blocked from direct access)</li>
+    <li>When any AI needs compute, HIVV <em>claims</em> one key from the pool, uses it, returns the result</li>
+    <li>Your <code>max_calls_per_hour</code> is honored &mdash; if you set 50, no more than 50 calls/hour use your key</li>
+    <li>You can see usage stats for your keys at <a href="#my-keys" style="color: #ff9f43;">My Donations</a> below</li>
+    <li>Deactivate any time</li>
+  </ul>
+  <p style="color: #ff9f43; margin-top: 15px; font-size: 0.9em;">
+    <strong>Want to use your own keys privately?</strong> <a href="/account.html" style="color: #74b9ff;">Create an account</a> instead. Private keys stored in your account are used first when you make requests, and are not shared with other users.
+  </p>
+</div>
+
+<div class="card">
+  <h2 style="color: #ff9f43; margin-top: 0;">Donate a Key</h2>
+  <div style="display: flex; flex-direction: column; gap: 12px; max-width: 600px;">
+    <div>
+      <label>Provider</label>
+      <select id="donate-provider">
+        <option value="">Select provider...</option>
+        <option value="openai">OpenAI (gpt-4o, gpt-4o-mini, etc.)</option>
+        <option value="anthropic">Anthropic (claude-3-5-sonnet, etc.)</option>
+        <option value="google">Google (gemini-pro, etc.)</option>
+        <option value="mistral">Mistral</option>
+        <option value="groq">Groq</option>
+        <option value="openrouter">OpenRouter</option>
+        <option value="deepseek">DeepSeek</option>
+        <option value="together">Together AI</option>
+        <option value="minimax">Minimax</option>
+        <option value="mimo">Mimo</option>
+      </select>
+    </div>
+    <div>
+      <label>Model name</label>
+      <input type="text" id="donate-model" placeholder="e.g. gpt-4o-mini">
+    </div>
+    <div>
+      <label>API key (your key, starts with sk-...)</label>
+      <input type="text" id="donate-key" placeholder="sk-...">
+    </div>
+    <div>
+      <label>Your agent ID (to track your donation)</label>
+      <input type="text" id="donate-agent" placeholder="e.g. alice-laptop">
+    </div>
+    <div>
+      <label>Max calls per hour (optional — leave blank for unlimited)</label>
+      <input type="number" id="donate-rate" placeholder="unlimited" min="1">
+    </div>
+    <div>
+      <label>Notes (optional)</label>
+      <input type="text" id="donate-notes" placeholder="Any context about your donation">
+    </div>
+    <button class="btn btn-warning" onclick="donateKey()" id="donate-btn">Donate Key</button>
+  </div>
+  <div id="donate-result" style="margin-top: 15px; display: none;"></div>
+</div>
+
+<div class="card" id="my-keys">
+  <h2 style="color: #ff9f43; margin-top: 0;">My Donations</h2>
+  <p style="color: #888; font-size: 0.9em;">Enter your agent ID above to see your donations and their usage stats.</p>
+  <div style="display: flex; gap: 10px; margin-bottom: 15px; max-width: 600px;">
+    <input type="text" id="stats-agent" placeholder="Your agent ID">
+    <button class="btn" onclick="loadDonorStats()">Load Stats</button>
+  </div>
+  <div id="donor-stats" style="color: #888;">No data yet.</div>
+</div>
+
+<div class="card">
+  <h2 style="color: #ff9f43; margin-top: 0;">Current Pool</h2>
+  <p style="color: #888; font-size: 0.9em;">All active donated keys (no key values exposed, just stats).</p>
+  <div id="pool-list" style="color: #888;">Loading...</div>
+</div>
+
+<hr style="border: none; border-top: 1px solid #333; margin: 40px 0;">
+<div style="text-align: center; color: #666; font-size: 0.85em; line-height: 2;">
+  <p>HIVV.org — The manifesting under the Raat ki Rani</p>
+  <p>
+    <a href="/terms.html" style="color: #555;">Terms of Service</a> &middot;
+    <a href="/privacy.html" style="color: #555;">Privacy Policy</a> &middot;
+    <a href="/aup.html" style="color: #555;">Acceptable Use</a>
+  </p>
+  <p style="color: #444; font-size: 0.8em;">Donated API keys are stored server-side and used to process AI requests. Do not donate keys you cannot afford to share.</p>
+</div>
+
+</div>
+
+<script>
+async function donateKey() {
+  const provider = document.getElementById('donate-provider').value;
+  const model = document.getElementById('donate-model').value.trim();
+  const key_value = document.getElementById('donate-key').value.trim();
+  const donor_agent_id = document.getElementById('donate-agent').value.trim();
+  const max_calls_per_hour = document.getElementById('donate-rate').value ? parseInt(document.getElementById('donate-rate').value) : null;
+  const notes = document.getElementById('donate-notes').value.trim();
+  const btn = document.getElementById('donate-btn');
+  const resultDiv = document.getElementById('donate-result');
+  if (!provider || !model || !key_value || !donor_agent_id) {
+    resultDiv.style.display = 'block';
+    resultDiv.innerHTML = '<span style="color: #ff6b6b;">Provider, model, key, and your agent ID are required.</span>';
+    return;
+  }
+  btn.disabled = true; btn.textContent = 'Donating...';
+  try {
+    const res = await fetch('/api/keys/donate', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({provider: provider, model: model, key_value: key_value, donor_agent_id: donor_agent_id, max_calls_per_hour: max_calls_per_hour, notes: notes})
+    });
+    const data = await res.json();
+    if (data.success) {
+      resultDiv.style.display = 'block';
+      resultDiv.innerHTML = '<div style="background: #0d2818; border: 1px solid #00ff8844; border-radius: 6px; padding: 12px;"><span style="color: #00ff88;">Key donated!</span> <span style="color: #888;">' + data.key.provider + '/' + data.key.model + ' (id #' + data.key.id + ')</span></div>';
+      document.getElementById('donate-key').value = '';
+      document.getElementById('donate-rate').value = '';
+      loadPool();
+    } else {
+      resultDiv.style.display = 'block';
+      resultDiv.innerHTML = '<span style="color: #ff6b6b;">Error: ' + (data.error || 'Unknown') + '</span>';
+    }
+  } catch (err) {
+    resultDiv.style.display = 'block';
+    resultDiv.innerHTML = '<span style="color: #ff6b6b;">Connection error: ' + err.message + '</span>';
+  } finally {
+    btn.disabled = false; btn.textContent = 'Donate Key';
+  }
+}
+
+async function loadDonorStats() {
+  const agent = document.getElementById('stats-agent').value.trim();
+  const el = document.getElementById('donor-stats');
+  if (!agent) {
+    el.innerHTML = '<span style="color: #ff6b6b;">Enter your agent ID first.</span>';
+    return;
+  }
+  el.innerHTML = '<span style="color: #888;">Loading...</span>';
+  try {
+    const res = await fetch('/api/keys/stats', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({donor_agent_id: agent})
+    });
+    const data = await res.json();
+    if (!data.keys || data.keys.length === 0) {
+      el.innerHTML = '<span style="color: #888;">No donations found for "' + agent + '".</span>';
+      return;
+    }
+    let html = '<table><thead><tr><th>ID</th><th>Provider/Model</th><th>Rate Limit</th><th>Uses (1h / 24h / total)</th><th>Last Used</th><th>Status</th><th>Action</th></tr></thead><tbody>';
+    for (const k of data.keys) {
+      const status = k.is_active ? 'active' : 'inactive';
+      const lastUsed = k.last_used_at ? new Date(k.last_used_at).toLocaleString() : '<span style="color: #555;">never</span>';
+      const rateLimit = k.max_calls_per_hour || 'unlimited';
+      html += '<tr>';
+      html += '<td>#' + k.id + '</td>';
+      html += '<td><span style="color: #ff9f43;">' + k.provider + '</span> / <span style="color: #ffd93d;">' + k.model + '</span></td>';
+      html += '<td>' + rateLimit + '/hr</td>';
+      html += '<td>' + k.uses_last_hour + ' / ' + k.uses_last_24h + ' / ' + k.total_uses + '</td>';
+      html += '<td style="font-size: 0.85em;">' + lastUsed + '</td>';
+      html += '<td><span class="badge badge-' + status + '">' + status + '</span></td>';
+      html += '<td>' + (k.is_active ? '<button class="btn btn-small btn-danger" onclick="deactivateKey(' + k.id + ')">Deactivate</button>' : '-') + '</td>';
+      html += '</tr>';
+    }
+    html += '</tbody></table>';
+    el.innerHTML = html;
+  } catch (err) {
+    el.innerHTML = '<span style="color: #ff6b6b;">Failed: ' + err.message + '</span>';
+  }
+}
+
+async function deactivateKey(id) {
+  const agent = document.getElementById('stats-agent').value.trim();
+  if (!agent) return;
+  if (!confirm('Deactivate key #' + id + '?')) return;
+  try {
+    const res = await fetch('/api/keys/deactivate', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({id: id, donor_agent_id: agent})
+    });
+    const data = await res.json();
+    if (data.success) {
+      loadDonorStats();
+      loadPool();
+    } else {
+      alert('Failed: ' + (data.error || 'Unknown'));
+    }
+  } catch (err) {
+    alert('Error: ' + err.message);
+  }
+}
+
+async function loadPool() {
+  const el = document.getElementById('pool-list');
+  try {
+    const res = await fetch('/api/dashboard/stats');
+    const data = await res.json();
+    if (!data.key_pool || data.key_pool.length === 0) {
+      el.innerHTML = '<span style="color: #888;">No active keys in the pool. Be the first to donate!</span>';
+      return;
+    }
+    let html = '<table><thead><tr><th>ID</th><th>Provider</th><th>Model</th><th>Donor</th><th>Total Uses</th><th>Status</th></tr></thead><tbody>';
+    for (const k of data.key_pool) {
+      const status = k.is_active ? 'active' : 'inactive';
+      html += '<tr>';
+      html += '<td>#' + k.id + '</td>';
+      html += '<td style="color: #ff9f43;">' + k.provider + '</td>';
+      html += '<td style="color: #ffd93d;">' + k.model + '</td>';
+      html += '<td style="color: #c084fc;">' + k.donor_agent_id + '</td>';
+      html += '<td>' + k.total_uses + '</td>';
+      html += '<td><span class="badge badge-' + status + '">' + status + '</span></td>';
+      html += '</tr>';
+      if (k.notes) html = html.replace('</tr>', '</tr>');
+    }
+    html += '</tbody></table>';
+    el.innerHTML = html;
+  } catch (err) {
+    el.innerHTML = '<span style="color: #ff6b6b;">Failed: ' + err.message + '</span>';
+  }
+}
+
+loadPool();
+setInterval(loadPool, 30000);
+</script>
+
+</body>
+</html>
