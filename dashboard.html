@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>My Account — HIVV.org</title>
-  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/styles.css?v=1794950764">
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <style>
     .dashboard-container { max-width: 900px; margin: 0 auto; padding: 20px; }
@@ -58,6 +58,8 @@
       <a href="/admin.html" id="nav-admin" style="display:none;">Admin</a>
     </div>
   </nav>
+
+  <main id="main">
 
   <div id="login-required" class="login-prompt" style="display: none;">
     <h2>Login Required</h2>
@@ -596,5 +598,6 @@ async function logout() {
 
 checkSession();
 </script>
+  </main>
 </body>
 </html>

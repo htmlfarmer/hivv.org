@@ -1,3 +1,11 @@
+/* CACHE NOTE: Cloudflare caches this file for up to 4h (max-age=14400),
+   so an edit here does NOT go live on its own — measured 2026-11-17 when a
+   grid fix sat stale for 17 minutes while the site kept overflowing.
+   Pages reference this file as /styles.css?v=<mtime-of-this-file>.
+   After editing, bump that query string in every <link> (or re-run the
+   one-liner in docs/USABILITY-AUDIT.md) so browsers and Cloudflare treat
+   it as a new URL and fetch the fresh copy. HTML itself is NOT CF-cached
+   (cf-cache-status: DYNAMIC), so the new reference takes effect at once. */
 /* HIVV.org Main Styles - Unified design system */
 @import url('/css/shared.css');
 
