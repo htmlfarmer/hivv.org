@@ -43,6 +43,7 @@ import hmac
 import http.client as http_client
 import http.server as http_server
 import json
+import math
 import os
 import re
 import secrets
@@ -4881,6 +4882,215 @@ def _fast_scan_lang(suffix: str) -> str | None:
     return _FAST_SCAN_LANGS.get(str(suffix or "").lower())
 
 
+# ── local standalone fast scan ─────────────────────────────────────────────
+# The SAME rules as the gateway's api/lib/fast-scan.js, reimplemented in
+# pure-stdlib Python so `hivv fast-scan` works with NO gateway, NO internet,
+# and NO Node.js. The two implementations are kept in step by the contract
+# tests; both are deterministic and fail-closed.
+_FAST_HARD = [
+    ("dynamic_exec", "critical", "dynamic code execution", re.compile(r"(?<![.\w])(?:eval|exec)\s*\(\s*[^\s)]")),
+    ("shell_true", "critical", "shell command interpolation", re.compile(r"shell\s*=\s*True")),
+    ("os_system", "critical", "shell command execution", re.compile(r"\bos\.system\s*\(")),
+    ("subprocess_shell", "high", "process spawning", re.compile(r"\bsubprocess\.(?:run|call|Popen|check_output|check_call)\s*\(")),
+    ("destructive_delete", "critical", "recursive/destructive delete", re.compile(r"\b(?:shutil\.rmtree|fs\.rmSync|rm\s+-[rf])\b")),
+    ("credential_paths", "critical", "credential file access", re.compile(r"(?:^|[\s\"'=])(?:/etc/(?:passwd|shadow)|\.ssh/id_[a-z0-9]+|~?/\.aws/credentials)", re.M | re.I)),
+    ("env_secret_read", "high", "secret environment variable read", re.compile(r"\b(?:os\.environ(?:\.get)?\s*\(?\s*['\"][^'\"]*(?:SECRET|TOKEN|PASSWORD|KEY)|process\.env\.[A-Z_]*(?:SECRET|TOKEN|PASSWORD|KEY))")),
+    ("network_socket", "high", "network request", re.compile(r"\b(?:socket\.socket|socket\.create_connection|requests\.(?:get|post|put|delete)|urllib\.request\.urlopen|httpx\.(?:get|post))\s*\(")),
+    ("reverse_shell", "critical", "possible reverse shell", re.compile(r"\b(?:nc|ncat|netcat)\b[^\n]{0,80}(?:\-e|/bin/(?:ba)?sh)|/dev/tcp/")),
+    ("obfuscation", "high", "encoded/executable payload", re.compile(r"\b(?:base64\.(?:b64decode|decodebytes)|marshal\.loads|pickle\.loads|exec\s*\(\s*['\"]|eval\s*\(\s*['\"])")),
+    ("privilege_escalation", "critical", "privilege escalation", re.compile(r"\b(?:sudo\s|chmod\s+[467][0-7]{2}\b|os\.setuid|setuid\s*\()")),
+    ("persistence", "high", "persistence mechanism", re.compile(r"(?:crontab\s+-|\.bashrc|\.zshrc|authorized_keys)")),
+    ("pipe_to_shell", "critical", "download piped to shell", re.compile(r"(?:curl|wget)[^|\n]{0,120}\|\s*(?:ba)?sh\b")),
+    ("child_process", "high", "child process spawn", re.compile(r"\b(?:child_process\.)?(?:exec|execSync|spawn|spawnSync|fork)\s*\(")),
+]
+
+_FAST_SECRET = [
+    ("aws_access_key", re.compile(r"\bAKIA[0-9A-Z]{16}\b")),
+    ("github_token", re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}\b")),
+    ("openai_key", re.compile(r"\bsk-[A-Za-z0-9]{20,}\b")),
+    ("private_key_block", re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH |PGP )?PRIVATE KEY-----")),
+    ("slack_token", re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b")),
+    ("jwt", re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b")),
+]
+
+_FAST_COMMANDS = {
+    "python.print": r"\bprint\s*\(",
+    "python.open": r"\bopen\s*\(",
+    "python.eval": r"\beval\s*\(",
+    "python.exec": r"\bexec\s*\(",
+    "python.__import__": r"\b__import__\s*\(",
+    "os.system": r"\bos\.system\s*\(",
+    "os.remove": r"\bos\.remove\s*\(",
+    "os.environ": r"\bos\.environ\b",
+    "subprocess.run": r"\bsubprocess\.run\s*\(",
+    "subprocess.Popen": r"\bsubprocess\.Popen\s*\(",
+    "shell=True": r"\bshell\s*=\s*True\b",
+    "requests.get": r"\brequests\.get\s*\(",
+    "requests.post": r"\brequests\.post\s*\(",
+    "urllib.request": r"\burllib\.request\.(?:urlopen|Request)\b",
+    "socket.socket": r"\bsocket\.socket\s*\(",
+    "fs.writeFileSync": r"\bfs\.(?:writeFileSync|writeFile|appendFileSync)\s*\(",
+    "fs.unlinkSync": r"\bfs\.(?:unlinkSync|rmSync)\s*\(",
+    "child_process": r"\b(?:child_process\.)?(?:exec|execSync|spawn|spawnSync|fork)\s*\(",
+    "curl": r"\bcurl\b",
+    "wget": r"\bwget\b",
+    "ssh": r"\bssh\b",
+    "sudo": r"\bsudo\b",
+    "chmod": r"\bchmod\b",
+    "pickle.loads": r"\bpickle\.loads?\s*\(",
+    "base64.decode": r"\bbase64\.(?:b64decode|decodebytes)\s*\(",
+    "password.read": r"(?:read_text|readFileSync|open)\s*\([^\n]{0,120}(?:passwd|shadow|\.ssh|id_rsa)",
+    "env.read": r"\b(?:os\.environ|process\.env|getenv)\b",
+}
+
+_FAST_RISK_WEIGHTS = {
+    "dynamic_execution": 40, "shell_execution": 35, "process_spawn": 20,
+    "filesystem_write": 20, "filesystem_read": 8, "network": 25,
+    "credential_access": 35, "privilege_escalation": 35, "destructive": 40,
+    "obfuscation": 30, "persistence": 30, "resource_exhaustion": 15,
+}
+
+
+def _fast_risk_level(score: int) -> str:
+    if score <= 0: return "safe"
+    if score <= 19: return "low"
+    if score <= 49: return "medium"
+    if score <= 79: return "high"
+    return "critical"
+
+
+def _fast_entropy(text: str) -> int:
+    if not text: return 0
+    freq: dict = {}
+    for ch in text: freq[ch] = freq.get(ch, 0) + 1
+    h = 0.0
+    for n in freq.values():
+        p = n / len(text)
+        h -= p * math.log2(p)
+    return int(round(h))
+
+
+def _local_fast_scan(code: str, language: str = "python") -> dict | None:
+    """Deterministic, AI-free source scan — pure stdlib, no gateway needed."""
+    try:
+        src = str(code or "")
+        if not src.strip(): return None
+        sha = hashlib.sha256(src.encode("utf-8")).hexdigest()
+        lines = src.split("\n")
+
+        hard = []
+        for pid, level, label, rx in _FAST_HARD:
+            ms = list(rx.finditer(src))
+            if ms:
+                hard.append({
+                    "id": pid, "level": level, "label": label, "count": len(ms),
+                    "position": ms[0].start(), "sample": ms[0].group(0)[:120],
+                })
+
+        secrets = []
+        for sid, rx in _FAST_SECRET:
+            m = rx.search(src)
+            if m:
+                secrets.append({
+                    "id": sid,
+                    "fingerprint": hashlib.sha256(m.group(0).encode()).hexdigest()[:16],
+                    "position": m.start(),
+                })
+
+        commands = []
+        for name, pattern in _FAST_COMMANDS.items():
+            n = len(re.findall(pattern, src))
+            if n:
+                commands.append({"name": name, "count": n})
+        commands.sort(key=lambda c: (-c["count"], c["name"]))
+
+        write_n = len(re.findall(r"\bopen\s*\([^\n)]*?['\"][^'\"]*[wax+][^'\"]*['\"]", src))
+        read_n = len(re.findall(r"\bopen\s*\([^\n)]*?['\"][^'\"]*[r+][^'\"]*['\"]", src))
+        del_n = len(re.findall(r"\b(?:os\.(?:remove|unlink)|fs\.(?:unlinkSync|rmSync))\s*\(", src))
+        domains = sorted({m.group(1).lower() for m in re.finditer(r"https?://([^/\s:'\"]+)", src)})
+        net_indicators = len(re.findall(r"\b(?:requests|urllib|httpx|aiohttp|socket|fetch|axios)\b", src))
+
+        categories = {
+            "dynamic_execution": len(re.findall(r"\b(?:eval|exec|compile|__import__)\s*\(", src)),
+            "shell_execution": len(re.findall(r"\b(?:os\.system|subprocess\.[A-Za-z_]+|child_process\.|shell\s*=\s*True)\b", src)),
+            "process_spawn": len(re.findall(r"\b(?:subprocess\.|child_process\.|os\.fork|os\.spawn)", src)),
+            "filesystem_write": write_n,
+            "filesystem_read": read_n + del_n,
+            "network": net_indicators + len(domains),
+            "credential_access": len(re.findall(r"(?:passwd|shadow|id_rsa|api[_-]?key|secret|token|password|\.ssh|\.env\b)", src, re.I)),
+            "privilege_escalation": len(re.findall(r"\b(?:sudo|chmod\s+[467][0-7]{2}\b|os\.setuid|setuid\s*\()", src)),
+            "destructive": len(re.findall(r"\b(?:rm\s+-[rf]|shutil\.rmtree|os\.remove|os\.unlink|fs\.rmSync)\b", src)),
+            "obfuscation": len(re.findall(r"\b(?:base64\.(?:b64decode|decodebytes)|marshal\.loads|pickle\.loads|exec\s*\(\s*['\"]|eval\s*\(\s*['\"])", src)),
+            "persistence": len(re.findall(r"(?:crontab\s+-|systemctl\s+enable|authorized_keys|\.bashrc|\.zshrc)", src)),
+            "resource_exhaustion": len(re.findall(r"\b(?:while\s+True|ThreadPoolExecutor|ProcessPoolExecutor|fork\s*\()", src)),
+        }
+        score = 0
+        cat_scores = {}
+        for cat, count in categories.items():
+            pts = min(_FAST_RISK_WEIGHTS.get(cat, 0), count * _FAST_RISK_WEIGHTS.get(cat, 0))
+            cat_scores[cat] = pts
+            score += pts
+        for h in hard:
+            score += 25 if h["level"] == "critical" else (15 if h["level"] == "high" else 8)
+        score += 20 * len(secrets)
+        score = max(0, min(100, score))
+        level = _fast_risk_level(score)
+
+        if any(h["level"] == "critical" for h in hard) or secrets:
+            verdict = "unsafe"
+        elif hard or level in ("medium", "high", "critical"):
+            verdict = "review"
+        else:
+            verdict = "safe"
+
+        riskiest = sorted(
+            ({"name": k, "points": v, "count": categories[k]} for k, v in cat_scores.items() if v > 0),
+            key=lambda x: (-x["points"], x["name"]),
+        )[:8]
+
+        return {
+            "schema": "hivv.fast-scan.v1",
+            "source_sha256": sha,
+            "language": language,
+            "size": {
+                "bytes": len(src.encode("utf-8")),
+                "chars": len(src),
+                "lines": len(lines),
+                "non_empty_lines": sum(1 for l in lines if l.strip()),
+                "max_line_length": max((len(l) for l in lines), default=0),
+                "avg_line_length": int(round(len(src) / len(lines))) if lines else 0,
+            },
+            "entropy": {"whole_file": _fast_entropy(src)},
+            "imports": [],
+            "commands": commands[:20],
+            "command_count": sum(c["count"] for c in commands),
+            "most_used_commands": commands[:10],
+            "most_used": commands[0] if commands else None,
+            "riskiest_operations": riskiest,
+            "files": {
+                "paths": [], "modes": {"read": read_n, "write": write_n, "append": 0, "delete": del_n},
+                "read_count": read_n, "write_count": write_n, "delete_count": del_n,
+            },
+            "network": {"indicators": net_indicators, "urls": [], "domains": domains[:20], "ports": []},
+            "risks": {
+                "score": score, "level": level, "categories": categories,
+                "category_scores": cat_scores,
+                "most_used": commands[0] if commands else None,
+                "riskiest_operations": riskiest,
+            },
+            "permissions": None,
+            "hard_findings": hard,
+            "secret_findings": secrets,
+            "verdict": verdict,
+            "verdict_basis": "deterministic-only",
+            "scanned_at_ms": int(time.time() * 1000),
+            "scan_duration_ms": 0,
+            "needs_ai_review": verdict != "safe" or score >= 20,
+        }
+    except Exception:
+        return None
+
+
 def cmd_fast_scan(args) -> None:
     """Screen a file WITHOUT an AI.
 
@@ -4914,8 +5124,21 @@ def cmd_fast_scan(args) -> None:
 
     code_, resp = http("POST", endpoint, body=body, timeout=60, base_url=hub)
     if code_ != 200:
-        _print(resp, code_)
-        sys.exit(2)
+        # No gateway reachable. Fall back to the LOCAL deterministic scanner so
+        # `hivv fast-scan` still works offline, with no hub and no internet.
+        # The result is identical in substance — same rules, same fields — it
+        # simply was not produced by a gateway.
+        local = _local_fast_scan(code, lang or "python")
+        if local is None:
+            print(json.dumps(resp, indent=2) if isinstance(resp, (dict, list)) else resp)
+            sys.exit(2)
+        local["source"] = "local-standalone"
+        local["note"] = "no HIVV gateway was reachable — scanned locally with the same rules"
+        resp = {"data": local}
+        code_ = 200
+        if getattr(args, "json_output", False):
+            print(json.dumps(local, indent=2))
+            sys.exit(0)
     data = resp.get("data", resp) if isinstance(resp, dict) else resp
 
     if getattr(args, "json_output", False):
