@@ -6081,11 +6081,13 @@ def _render_problems(payload: dict, as_json: bool) -> None:
 
 
 def cmd_problems(args) -> None:
-    """hivv problems [--json] [--window 3600] — see what is breaking globally."""
+    """hivv problems [--json] [--window 3600] [--node NAME] — see what is breaking."""
     as_json = bool(getattr(args, "json_output", False))
     window = int(getattr(args, "window", 0) or 3600)
+    node = (getattr(args, "node", None) or "").strip() or None
     payload: dict = {"data": {}}
 
+    node_q = f"&node={urllib.parse.quote(node)}" if node else ""
     try:
         code, s_body = http("GET", f"/api/errors/summary?window={window}", timeout=15, sign=False)
         if code == 200 and isinstance(s_body, dict):
@@ -6100,23 +6102,31 @@ def cmd_problems(args) -> None:
     except Exception:
         pass
 
-    # The single most common failure, with advice.
+    # Recent entries — filtered by node when asked.
     try:
-        code, r_body = http("GET", "/api/errors/recent?limit=1", timeout=15, sign=False)
-        if code == 200 and isinstance(r_body, dict) and r_body.get("data"):
-            top = r_body["data"][0]
-            payload["data"]["top_diagnosis"] = {
-                "class": top.get("class"), "advice": top.get("diagnosis"),
-                "endpoint": top.get("endpoint"), "message": top.get("message"),
-            }
+        code, r_body = http("GET", f"/api/errors/recent?limit=50{node_q}",
+                            timeout=15, sign=False)
+        if code == 200 and isinstance(r_body, dict):
+            rows = r_body.get("data") or []
+            payload["data"]["recent"] = rows
+            if rows:
+                top = rows[0]
+                payload["data"]["top_diagnosis"] = {
+                    "class": top.get("class"), "advice": top.get("diagnosis"),
+                    "endpoint": top.get("endpoint"), "message": top.get("message"),
+                    "node": top.get("node"),
+                }
     except Exception:
         pass
 
     _render_problems(payload, as_json)
     if not as_json:
-        print(f"\n  drill in:   {APP} bug <what broke>")
+        scope = f" on {node}" if node else ""
+        print(f"\n  drill in:   {APP} bug <what broke>{f' --node {node}' if node else ''}")
         print(f"  report:     {APP} submit \"<what you saw>\"")
         print(f"  ask an AI:  {APP} support \"<question>\"")
+        if not node:
+            print(f"  per-node:   {APP} problems --node <name>{scope}")
     sys.exit(0)
 
 
@@ -6132,6 +6142,7 @@ def cmd_bug(args) -> None:
     as_json = bool(getattr(args, "json_output", False))
     limit = int(getattr(args, "limit", 0) or 20)
     client = (getattr(args, "client", None) or "").strip().lower() or None
+    node = (getattr(args, "node", None) or "").strip() or None
 
     rows: list = []
     try:
@@ -6141,6 +6152,8 @@ def cmd_bug(args) -> None:
             url += f"&class={q}"
         if client:
             url += f"&client={urllib.parse.quote(client)}"
+        if node:
+            url += f"&node={urllib.parse.quote(node)}"
         code, body = http("GET", url, timeout=15, sign=False)
         if code == 200 and isinstance(body, dict):
             rows = body.get("data") or []
@@ -6188,8 +6201,10 @@ def cmd_bug(args) -> None:
                             "connection_refused", "timeout") else Y
         ts = r.get("iso") or (str(r.get("ts")) if r.get("ts") else "?")
         cli = r.get("client") or "?"
+        nd = r.get("node") or ""
+        nd_s = f"  {Y}@{nd}{R}" if nd else ""
         print(f"  {mark}{cls}{R}  {C}{r.get('endpoint','?')}{R}  "
-              f"[{cli}]  {ts}")
+              f"[{cli}]{nd_s}  {ts}")
         msg = str(r.get("message", ""))[:200]
         if msg:
             print(f"      {msg}")
@@ -10864,12 +10879,14 @@ def build_parser() -> argparse.ArgumentParser:
     sp_pb = sub.add_parser("problems", help="what is breaking globally? (error log + incidents)")
     sp_pb.add_argument("--json", dest="json_output", action="store_true", help="output raw JSON")
     sp_pb.add_argument("--window", type=int, default=3600, help="look-back window in seconds (default 3600)")
+    sp_pb.add_argument("--node", default=None, help="filter to one node (e.g. yalla, masjid)")
     sub.add_parser("errors", help="alias for problems")
     sp_bg = sub.add_parser("bug", help="research a specific problem (searches the live error log)")
     sp_bg.add_argument("query", nargs="*", help="what broke (class, endpoint, or message fragment)")
     sp_bg.add_argument("--json", dest="json_output", action="store_true", help="output raw JSON")
     sp_bg.add_argument("--limit", type=int, default=20, help="max entries (default 20)")
     sp_bg.add_argument("--client", default=None, help="filter by client: opencode, continue, cline, vscode, …")
+    sp_bg.add_argument("--node", default=None, help="filter by node (e.g. yalla, masjid)")
     sp_sb = sub.add_parser("submit", help="file a bug report to the hub")
     sp_sb.add_argument("text", nargs="+", help="what you saw")
     sp_sb.add_argument("--subject", default=None, help="short summary line")
