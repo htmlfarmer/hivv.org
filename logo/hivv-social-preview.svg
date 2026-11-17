@@ -1,0 +1,112 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 640" width="1280" height="640" role="img" aria-label="HIVV — a distributed AI network, at home and around the world">
+  <title>HIVV — a distributed AI network</title>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0d0b14"/>
+      <stop offset="55%" stop-color="#16101c"/>
+      <stop offset="100%" stop-color="#241507"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="26%" cy="46%" r="46%">
+      <stop offset="0%" stop-color="#ffd23d" stop-opacity="0.42"/>
+      <stop offset="60%" stop-color="#ff9f1c" stop-opacity="0.12"/>
+      <stop offset="100%" stop-color="#ff9f1c" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="honey" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#ffd23d"/>
+      <stop offset="55%" stop-color="#ffb31a"/>
+      <stop offset="100%" stop-color="#ff8c1a"/>
+    </linearGradient>
+    <linearGradient id="wing" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.92"/>
+      <stop offset="100%" stop-color="#d9f4ff" stop-opacity="0.7"/>
+    </linearGradient>
+    <linearGradient id="ink" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#4a1d05"/>
+      <stop offset="100%" stop-color="#2b1003"/>
+    </linearGradient>
+    <!-- faint constellation: the hive is global -->
+    <g stroke="#ffd23d" stroke-opacity="0.22" stroke-width="1.5" fill="none">
+      <path d="M760 180 L880 120 L1010 210 L1180 150"/>
+      <path d="M880 120 L940 300 L1120 330 L1180 150"/>
+      <path d="M1010 210 L940 300"/>
+      <path d="M940 300 L820 380 L1010 470 L1120 330"/>
+      <path d="M760 180 L820 380"/>
+      <path d="M1010 470 L1160 520"/>
+    </g>
+    <g fill="#ffd23d" fill-opacity="0.55">
+      <circle cx="760" cy="180" r="4"/><circle cx="880" cy="120" r="5"/>
+      <circle cx="1010" cy="210" r="4"/><circle cx="1180" cy="150" r="5"/>
+      <circle cx="940" cy="300" r="6"/><circle cx="1120" cy="330" r="4"/>
+      <circle cx="820" cy="380" r="5"/><circle cx="1010" cy="470" r="4"/>
+      <circle cx="1160" cy="520" r="5"/>
+    </g>
+  </defs>
+
+  <rect width="1280" height="640" fill="url(#bg)"/>
+  <rect width="1280" height="640" fill="url(#glow)"/>
+
+  <!-- bee, drawn inline so the preview needs no external asset -->
+  <g transform="translate(70,55) scale(1.05)">
+    <!-- wings -->
+    <g stroke="url(#ink)" stroke-width="9" stroke-linejoin="round">
+      <path d="M232 196 C182 150 106 146 84 182 C64 214 108 252 214 244 Z" fill="url(#wing)"/>
+      <path d="M280 196 C330 150 406 146 428 182 C448 214 404 252 298 244 Z" fill="url(#wing)"/>
+    </g>
+    <g stroke="url(#ink)" stroke-opacity="0.32" stroke-width="5" fill="none" stroke-linecap="round">
+      <path d="M222 204 L104 184"/><path d="M222 214 L100 212"/><path d="M222 224 L104 238"/>
+      <path d="M290 204 L408 184"/><path d="M290 214 L412 212"/><path d="M290 224 L408 238"/>
+    </g>
+    <!-- body -->
+    <ellipse cx="256" cy="282" rx="72" ry="98" fill="url(#honey)" stroke="url(#ink)" stroke-width="10"/>
+    <g fill="none" stroke="url(#ink)" stroke-width="11" stroke-linecap="round">
+      <path d="M191 250 Q256 275 321 250"/>
+      <path d="M185 290 Q256 318 327 290"/>
+      <path d="M189 330 Q256 358 323 330"/>
+    </g>
+    <!-- head -->
+    <circle cx="256" cy="176" r="62" fill="url(#honey)" stroke="url(#ink)" stroke-width="10"/>
+    <g fill="none" stroke="url(#ink)" stroke-width="9" stroke-linecap="round">
+      <path d="M232 130 C226 100 212 88 192 82"/>
+      <path d="M280 130 C286 100 300 88 320 82"/>
+    </g>
+    <circle cx="190" cy="80" r="11" fill="#4a1d05"/>
+    <circle cx="322" cy="80" r="11" fill="#4a1d05"/>
+    <circle cx="234" cy="172" r="19" fill="#12060a"/>
+    <circle cx="278" cy="172" r="19" fill="#12060a"/>
+    <circle cx="240" cy="165" r="6" fill="#ffffff"/>
+    <circle cx="284" cy="165" r="6" fill="#ffffff"/>
+    <path d="M232 200 Q256 224 280 200" fill="none" stroke="url(#ink)" stroke-width="9" stroke-linecap="round"/>
+  </g>
+
+  <!-- wordmark -->
+  <g transform="translate(660,140)">
+    <text x="0" y="0" font-family="'JetBrains Mono','SF Mono',Menlo,Consolas,monospace"
+          font-size="118" font-weight="700" letter-spacing="16" fill="#ffd23d">HIVV</text>
+    <text x="4" y="62" font-family="'Inter',system-ui,-apple-system,sans-serif"
+          font-size="40" font-weight="600" fill="#f0e6d2">A distributed AI network</text>
+    <text x="4" y="112" font-family="'Inter',system-ui,-apple-system,sans-serif"
+          font-size="30" font-weight="400" fill="#a89a86">at home and around the world</text>
+
+    <g transform="translate(0,168)" font-family="'JetBrains Mono',Menlo,monospace" font-size="21">
+      <rect x="0" y="0" width="150" height="46" rx="10" fill="#ffd23d" fill-opacity="0.12" stroke="#ffd23d" stroke-opacity="0.35"/>
+      <text x="16" y="30" fill="#ffd23d">git clone</text>
+      <rect x="164" y="0" width="330" height="46" rx="10" fill="#ffd23d" fill-opacity="0.12" stroke="#ffd23d" stroke-opacity="0.35"/>
+      <text x="180" y="30" fill="#ffd23d">github.com/htmlfarmer/hivv</text>
+      <rect x="0" y="60" width="494" height="46" rx="10" fill="#00ff88" fill-opacity="0.10" stroke="#00ff88" stroke-opacity="0.3"/>
+      <text x="16" y="90" fill="#7dffc4">./scripts/setup-local.sh   # runs offline</text>
+    </g>
+  </g>
+
+  <!-- bottom strip -->
+  <g transform="translate(660,470)" font-family="'JetBrains Mono',Menlo,monospace" font-size="19" fill="#8d8170">
+    <text x="0" y="0">open weights · open models · open source</text>
+    <text x="0" y="34">local-first · offline-capable · yours to run</text>
+  </g>
+
+  <!-- honeycomb accent, bottom-right -->
+  <g fill="none" stroke="#ffd23d" stroke-opacity="0.14" stroke-width="4">
+    <path d="M1140 500 L1182 522 L1182 566 L1140 588 L1098 566 L1098 522 Z"/>
+    <path d="M1230 500 L1272 522 L1272 566 L1230 588 L1188 566 L1188 522 Z"/>
+    <path d="M1185 430 L1227 452 L1227 496 L1185 518 L1143 496 L1143 452 Z"/>
+  </g>
+</svg>
