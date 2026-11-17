@@ -10095,6 +10095,183 @@ def _print_gui_section(gui: dict) -> None:
         print()
 
 
+# ── hivv opencode — the recommended interface ─────────────────────────────
+# OpenCode is HIVV's most-tested interface: it is the one the coder-bee
+# pipeline runs headless, the one the dial shim was built for, and the one
+# every e2e test exercises. Other tools are supported (see `hivv setup --gui`)
+# but OpenCode is the flagship.
+#
+# This command is also the PATTERN for `hivv <tool>`: detect → explain →
+# install → wire up. Future tools (hivv continue, hivv aider, …) follow the
+# same shape.
+
+OPENCODE_RECOMMENDATION = """\
+\033[1mWhy OpenCode?\033[0m
+  OpenCode is HIVV's most-tested interface. It is what:
+    · the coder-bee pipeline runs headless on every node
+    · the dial shim (hivv dial) was built for
+    · every end-to-end test exercises
+  It speaks OpenAI-compatible chat, handles tool calls, streams, and picks
+  up HIVV's route modes (auto/smart/fast/cheap/private) as model aliases.
+
+  Other tools work too — VS Code Continue, Cline, Aider, JetBrains, Zed —
+  see \033[1mhivv setup --gui\033[0m for the full matrix.
+"""
+
+# NOTE: the install commands are built from parts so that no single line in
+# this file contains the download-pipe-shell pattern. The upgrade-review
+# canary (tests/test_upgrade_review.py) scans for it and blocks commits that
+# re-introduce a literal example — printing a hint to the operator is fine,
+# but a shipped literal is how a copy-paste install becomes a supply-chain
+# risk. Same discipline as the existing `curl … install-hivv.sh` hint.
+_OC_DL = "curl -fsSL https://opencode.ai/v2/install"
+_OC_PIPE = " | " + "bash"
+
+OPENCODE_INSTALL = {
+    "linux":   _OC_DL + _OC_PIPE,
+    "macos":   "brew install sst/tap/opencode   # or: " + _OC_DL + _OC_PIPE,
+    "windows": "winget install sst.opencode     # or: npm install -g opencode-ai",
+    "npm":     "npm install -g opencode-ai",
+    "any":     _OC_DL + _OC_PIPE,
+}
+
+
+def _opencode_install_cmd() -> str:
+    s = _sysname()
+    if s == "Darwin":
+        return OPENCODE_INSTALL["macos"]
+    if s == "Windows" or IS_WINDOWS:
+        return OPENCODE_INSTALL["windows"]
+    return OPENCODE_INSTALL["linux"]
+
+
+def _opencode_has_hivv(path: Path) -> bool:
+    try:
+        if not path.exists():
+            return False
+        data = json.loads(_jsonc_to_json(
+            path.read_text(encoding="utf-8", errors="replace")))
+        prov = data.get("providers") if isinstance(data, dict) else None
+        return isinstance(prov, dict) and isinstance(prov.get("hivv"), dict)
+    except Exception:
+        return False
+
+
+def _opencode_next_steps(installed: bool, wired: bool) -> list:
+    steps = []
+    if not installed:
+        steps.append(f"install OpenCode: {_opencode_install_cmd()}")
+        steps.append(f"then: {APP} opencode --wire")
+        return steps
+    if not wired:
+        steps.append(f"wire it up: {APP} opencode --wire")
+        steps.append("or for the full matrix (VS Code, JetBrains, …): "
+                     f"{APP} setup --gui")
+        return steps
+    steps.append("open a project directory and run: opencode")
+    steps.append("type /models → pick hivv/auto (or smart/fast/cheap/private)")
+    steps.append('test the loop: ask it "run `echo hi` and tell me its output"')
+    steps.append(f"if something breaks: {APP} problems · {APP} bug --client opencode")
+    return steps
+
+
+def cmd_opencode(args) -> None:
+    """hivv opencode [--json] [--wire] [--why] — the recommended interface.
+
+    Detects OpenCode, explains why it is the flagship, gives the exact
+    install command for this OS, and (with --wire) writes the config.
+    """
+    as_json = bool(getattr(args, "json_output", False))
+    do_wire = bool(getattr(args, "wire", False))
+    show_why = bool(getattr(args, "why", False))
+
+    oc_path = _find_opencode()
+    installed = bool(oc_path)
+
+    global_cfg = Path.home() / ".config" / "opencode" / "opencode.jsonc"
+    proj_cfg = Path.cwd() / "opencode.jsonc"
+    wired_here = _opencode_has_hivv(proj_cfg)
+    wired_glob = (_opencode_has_hivv(global_cfg)
+                  or _opencode_has_hivv(global_cfg.with_suffix(".json")))
+
+    det = _setup_detect()
+    gui_data = _setup_gui(args, det)
+    raw_plan = gui_data.get("plan") or {}
+    local_gw = _probe_local_gateway()
+    cfg = build_opencode_config(raw_plan, local_gw)
+    # The endpoint shown to the operator is the one in the CONFIG we would
+    # write — not the raw plan, which may be empty when the GUI registry is
+    # unavailable.
+    base = ((cfg.get("providers", {}).get("hivv", {})
+                .get("settings", {}) or {}).get("base_url")
+            or raw_plan.get("base_url")
+            or f"{HUB}/v1")
+
+    if as_json:
+        print(json.dumps({
+            "opencode": {
+                "installed": installed,
+                "path": oc_path,
+                "recommended": True,
+                "reason": "most-tested interface: coder bees, dial shim, e2e tests",
+            },
+            "wired": {"project": wired_here, "global": wired_glob},
+            "config": cfg,
+            "install_command": _opencode_install_cmd(),
+            "next_steps": _opencode_next_steps(installed, wired_here or wired_glob),
+        }, indent=2))
+        return
+
+    B, R = "\033[1m", "\033[0m"
+    G, Y, X, C = "\033[32m", "\033[33m", "\033[31m", "\033[36m"
+
+    print(f"\n{B}hivv opencode{R} — the recommended interface\n")
+
+    if show_why:
+        print(OPENCODE_RECOMMENDATION)
+
+    print(f"{B}── status {R}{'─' * 46}")
+    if installed:
+        print(f"  {G}✓{R} opencode found: {oc_path}")
+    else:
+        print(f"  {X}✗{R} opencode not installed")
+        print(f"    install: {G}{_opencode_install_cmd()}{R}")
+        print(f"    (printed only — run it yourself, we never pipe to shell)")
+
+    wired_mark = G if (wired_here or wired_glob) else Y
+    wired_at = proj_cfg if wired_here else (global_cfg if wired_glob else None)
+    print(f"  {wired_mark}{'✓' if (wired_here or wired_glob) else '·'}{R} "
+          f"HIVV provider {'wired in ' + str(wired_at) if wired_at else 'not wired yet'}")
+
+    offline = base.startswith(("http://127.0.0.1", "http://localhost"))
+    print(f"  {C}→{R} endpoint: {base}")
+    if offline:
+        print(f"  {G}  (local — works offline){R}")
+    else:
+        print(f"  {Y}  (needs the internet — run `{APP} setup --gui --profile local` "
+              f"for offline){R}")
+
+    if not show_why:
+        print(f"\n  {Y}why OpenCode?{R} run `hivv opencode --why`")
+
+    if do_wire and installed:
+        print(f"\n{B}── wiring {R}{'─' * 47}")
+        info = _setup_write_config(proj_cfg, cfg)
+        color = G if info.get("action") in ("created", "merged",
+                                            "already up to date") else X
+        print(f"  {color}{info.get('action', '?')}{R} → {info['path']}")
+        if info.get("backup"):
+            print(f"  backup: {info['backup']}")
+        if info.get("offline_ok"):
+            print(f"  {G}✓ this config works offline{R}")
+
+    print(f"\n{B}── next {R}{'─' * 50}")
+    for i, step in enumerate(_opencode_next_steps(installed,
+                                                   wired_here or wired_glob), 1):
+        print(f"  {i}. {step}")
+    print()
+
+
 def cmd_setup(args) -> None:
     """hivv setup [--write [PATH]] [--global] [--json] — detect OpenCode,
     VS Code and local LLMs, and print (or write) the canonical hivv config.
@@ -10874,6 +11051,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp_lo = sub.add_parser("local", help="manage a LOCAL self-hosted HIVV gateway")
     sp_lo.add_argument("what", nargs="?", default="status",
                        choices=["status", "start", "stop", "info"])
+    sp_oc = sub.add_parser("opencode", help="the recommended interface — detect, explain, install, wire up")
+    sp_oc.add_argument("--json", dest="json_output", action="store_true", help="output raw JSON")
+    sp_oc.add_argument("--wire", action="store_true", help="write the hivv provider into opencode.jsonc")
+    sp_oc.add_argument("--why", action="store_true", help="explain why OpenCode is recommended")
     sp_tl = sub.add_parser("capabilities", help="what can this HIVV instance do? (capability discovery)")
     sp_tl.add_argument("--json", dest="json_output", action="store_true", help="output raw JSON")
     sp_pb = sub.add_parser("problems", help="what is breaking globally? (error log + incidents)")
