@@ -5998,6 +5998,406 @@ def _sev_color(sev: str) -> str:
     }.get(sev.lower(), '')
 
 
+# ── the debugging / support family ────────────────────────────────────────
+# Shared shape: gather context, either query the hub or submit to it, and
+# render human-first with a --json twin for AI callers.
+#
+#   hivv problems   what is breaking globally?
+#   hivv bug <q>    why is THIS broken?
+#   hivv submit <t> I found a bug
+#   hivv request <t> I want a feature
+#   hivv flag <tgt> <t> someone is doing something wrong
+#   hivv support <q> help me right now (existing, AI chat)
+
+def _problem_context() -> dict:
+    """The local context every problem command attaches. Scrubbed of secrets."""
+    st = read_state() or {}
+    pid = read_pid()
+    m = _collect_metrics()
+    hb = st.get("last_heartbeat") or 0
+    hb_age = int(time.time()) - hb if hb else -1
+    log_tail = ""
+    if LOG_FILE.exists():
+        try:
+            lines = LOG_FILE.read_text(errors="replace").splitlines()[-30:]
+            log_tail = "\n".join(_scrub_lines(l) for l in lines)
+        except OSError:
+            pass
+    return {
+        "cli_version": VERSION,
+        "hub": HUB,
+        "hostname": socket.gethostname(),
+        "node_id": st.get("node_id"),
+        "agent_running": bool(pid and _pid_alive_fallback(pid)),
+        "heartbeat_age_s": hb_age,
+        "transport": st.get("transport", "heartbeat-only"),
+        "cpu_pct": m.get("cpu_pct"),
+        "mem_pct": m.get("mem_pct"),
+        "gpus": [{"name": g.get("name"), "util": g.get("util_pct"),
+                  "mem_used_mb": g.get("mem_used_mb"),
+                  "mem_total_mb": g.get("mem_total_mb")} for g in (m.get("gpus") or [])],
+        "log_tail": log_tail[-3000:] if log_tail else None,
+    }
+
+
+def _render_problems(payload: dict, as_json: bool) -> None:
+    if as_json:
+        print(json.dumps(payload, indent=2))
+        return
+    B, R = "\033[1m", "\033[0m"
+    G, Y, X, C = "\033[32m", "\033[33m", "\033[31m", "\033[36m"
+    data = payload.get("data", payload)
+
+    s = data.get("summary") or {}
+    print(f"\n{B}hivv problems{R} — what is breaking\n")
+    if s.get("total"):
+        print(f"  {B}{s.get('total', 0)}{R} issue(s) in the last "
+              f"{round((s.get('window_ms') or 3600000)/60000)} min")
+        by_class = s.get("by_class") or {}
+        for cls, n in sorted(by_class.items(), key=lambda kv: -kv[1]):
+            mark = X if n >= 5 else (Y if n >= 2 else C)
+            print(f"    {mark}{cls}{R} × {n}")
+        by_ep = s.get("by_endpoint") or {}
+        if by_ep:
+            print(f"\n  {B}by endpoint{R}")
+            for k, n in list(by_ep.items())[:8]:
+                print(f"    {n:>4}  {k}")
+    else:
+        print(f"  {G}✓ no errors recorded in this window{R}")
+
+    incidents = data.get("incidents") or []
+    if incidents:
+        print(f"\n  {B}open incidents{R}")
+        for inc in incidents[:8]:
+            sev = str(inc.get("severity", "?"))
+            mark = X if sev in ("critical", "high") else Y
+            print(f"    {mark}{sev}{R} {inc.get('node_id') or '?'} — "
+                  f"{str(inc.get('title') or '')[:70]}")
+
+    diag = data.get("top_diagnosis")
+    if diag:
+        print(f"\n  {B}most common problem{R}")
+        print(f"    {Y}{diag.get('class')}{R}: {diag.get('advice', '')}")
+
+
+def cmd_problems(args) -> None:
+    """hivv problems [--json] [--window 3600] — see what is breaking globally."""
+    as_json = bool(getattr(args, "json_output", False))
+    window = int(getattr(args, "window", 0) or 3600)
+    payload: dict = {"data": {}}
+
+    try:
+        code, s_body = http("GET", f"/api/errors/summary?window={window}", timeout=15, sign=False)
+        if code == 200 and isinstance(s_body, dict):
+            payload["data"]["summary"] = s_body.get("data", s_body)
+    except Exception as e:
+        payload.setdefault("errors", []).append(f"summary: {e}")
+
+    try:
+        code, i_body = http("GET", "/api/incidents?state=active", timeout=15, sign=False)
+        if code == 200 and isinstance(i_body, dict):
+            payload["data"]["incidents"] = i_body.get("incidents") or i_body.get("data") or []
+    except Exception:
+        pass
+
+    # The single most common failure, with advice.
+    try:
+        code, r_body = http("GET", "/api/errors/recent?limit=1", timeout=15, sign=False)
+        if code == 200 and isinstance(r_body, dict) and r_body.get("data"):
+            top = r_body["data"][0]
+            payload["data"]["top_diagnosis"] = {
+                "class": top.get("class"), "advice": top.get("diagnosis"),
+                "endpoint": top.get("endpoint"), "message": top.get("message"),
+            }
+    except Exception:
+        pass
+
+    _render_problems(payload, as_json)
+    if not as_json:
+        print(f"\n  drill in:   {APP} bug <what broke>")
+        print(f"  report:     {APP} submit \"<what you saw>\"")
+        print(f"  ask an AI:  {APP} support \"<question>\"")
+    sys.exit(0)
+
+
+def cmd_bug(args) -> None:
+    """hivv bug [query] [--json] [--limit N] [--client NAME] — research a problem.
+
+    Searches the live error log for matching entries, then shows the
+    diagnosis for each. `--client` filters to one client (opencode, continue,
+    cline, vscode, …) so you can study what OpenCode specifically is doing.
+    Falls back to the local agent log when the hub has nothing.
+    """
+    query = " ".join(getattr(args, "query", []) or []).strip().lower()
+    as_json = bool(getattr(args, "json_output", False))
+    limit = int(getattr(args, "limit", 0) or 20)
+    client = (getattr(args, "client", None) or "").strip().lower() or None
+
+    rows: list = []
+    try:
+        q = urllib.parse.quote(query) if query else ""
+        url = f"/api/errors/recent?limit={limit}"
+        if q and " " not in query:
+            url += f"&class={q}"
+        if client:
+            url += f"&client={urllib.parse.quote(client)}"
+        code, body = http("GET", url, timeout=15, sign=False)
+        if code == 200 and isinstance(body, dict):
+            rows = body.get("data") or []
+    except Exception:
+        pass
+
+    # Local fallback: scan the agent log for matching lines.
+    if not rows and LOG_FILE.exists():
+        try:
+            lines = LOG_FILE.read_text(errors="replace").splitlines()[-200:]
+            for ln in lines:
+                if query and query not in ln.lower():
+                    continue
+                rows.append({"class": "local_log", "endpoint": "agent",
+                             "message": _scrub_lines(ln)[:400],
+                             "diagnosis": None, "ts": None})
+                if len(rows) >= limit:
+                    break
+        except OSError:
+            pass
+
+    if query:
+        rows = [r for r in rows
+                if query in str(r.get("class", "")).lower()
+                or query in str(r.get("endpoint", "")).lower()
+                or query in str(r.get("message", "")).lower()]
+
+    if as_json:
+        print(json.dumps({"query": query, "count": len(rows), "results": rows},
+                         indent=2))
+        sys.exit(0 if rows else 1)
+
+    B, R = "\033[1m", "\033[0m"
+    G, Y, X, C = "\033[32m", "\033[33m", "\033[31m", "\033[36m"
+    print(f"\n{B}hivv bug{R} — {query or 'recent issues'}\n")
+    if not rows:
+        print(f"  {G}✓ nothing matching in the last {limit} entries{R}")
+        print(f"    try: {APP} problems   (global view)")
+        print(f"          {APP} debug      (local snapshot)")
+        print(f"          {APP} support    (ask the AI)")
+        sys.exit(0)
+    for r in rows[:limit]:
+        cls = str(r.get("class", "?"))
+        mark = X if cls in ("context_overflow", "truncated_response",
+                            "connection_refused", "timeout") else Y
+        ts = r.get("iso") or (str(r.get("ts")) if r.get("ts") else "?")
+        cli = r.get("client") or "?"
+        print(f"  {mark}{cls}{R}  {C}{r.get('endpoint','?')}{R}  "
+              f"[{cli}]  {ts}")
+        msg = str(r.get("message", ""))[:200]
+        if msg:
+            print(f"      {msg}")
+        d = r.get("diagnosis")
+        if d:
+            print(f"      {G}→ {d}{R}")
+        bits = []
+        for k in ("model", "node", "input_tokens", "max_tokens", "trimmed",
+                  "dropped_messages", "status"):
+            if r.get(k) not in (None, "", False):
+                bits.append(f"{k}={r[k]}")
+        if bits:
+            print(f"      {C}{' '.join(bits)}{R}")
+        print()
+    if not as_json:
+        print(f"  report this: {APP} submit \"<what you saw>\"")
+    sys.exit(0)
+
+
+def _submit_feedback(kind: str, subject: str, message: str,
+                     target: str | None = None, evidence: str | None = None,
+                     severity: str | None = None, as_json: bool = False) -> None:
+    """Shared submit path for submit / request / flag."""
+    body: dict = {"type": kind, "message": message}
+    if subject:
+        body["subject"] = subject
+    if target:
+        body["target"] = target
+    if evidence:
+        body["evidence"] = evidence
+    if severity:
+        body["severity"] = severity
+
+    # Attach local context so the maintainer sees the environment it broke in.
+    ctx = _problem_context()
+    ctx.pop("log_tail", None)   # keep the payload small; tail is in the CLI
+    body["subject"] = body.get("subject") or f"{kind}: {message[:60]}"
+
+    try:
+        code, resp = http("POST", "/api/feedback", body=body, timeout=30)
+    except Exception as e:
+        if as_json:
+            print(json.dumps({"ok": False, "error": str(e)}))
+        else:
+            print(f"\033[31m✗ could not submit: {e}\033[0m")
+            print(f"  (offline? the report is below — paste it into "
+                  f"{APP} support when you are back online)")
+            print()
+            print(json.dumps({**body, "context": ctx}, indent=2))
+        sys.exit(2)
+
+    ok = code in (200, 201) and isinstance(resp, dict) and resp.get("ok")
+    fb = (resp or {}).get("feedback") or {}
+
+    if as_json:
+        print(json.dumps({"ok": ok, "http_status": code, "feedback": fb,
+                          "context": ctx}, indent=2))
+        sys.exit(0 if ok else 1)
+
+    B, R = "\033[1m", "\033[0m"
+    G, X = "\033[32m", "\033[31m"
+    if ok:
+        print(f"\n{G}✓ submitted{R} — id {B}{fb.get('id','?')}{R} "
+              f"({fb.get('status','?')})")
+        print(f"  type: {fb.get('type', kind)}")
+        if fb.get("subject"):
+            print(f"  subject: {fb['subject']}")
+        print(f"\n  view your reports: {APP} support \"show my reports\"")
+        print(f"  or:                curl -s {HUB}/api/feedback")
+    else:
+        print(f"\n{X}✗ submission failed{R} (HTTP {code})")
+        print(f"  {str(resp)[:200]}")
+        print(f"\n  paste this into {APP} support instead:")
+        print(json.dumps({**body, "context": ctx}, indent=2))
+    sys.exit(0 if ok else 1)
+
+
+def cmd_submit(args) -> None:
+    """hivv submit "<what you saw>" [--json] — file a bug report."""
+    text = " ".join(getattr(args, "text", []) or []).strip()
+    if not text:
+        die(f'usage: {APP} submit "<what you saw>" [--subject S] [--json]')
+    _submit_feedback("bug", getattr(args, "subject", None), text,
+                     as_json=bool(getattr(args, "json_output", False)))
+
+
+def cmd_request(args) -> None:
+    """hivv request "<what you want>" [--json] — request a feature."""
+    text = " ".join(getattr(args, "text", []) or []).strip()
+    if not text:
+        die(f'usage: {APP} request "<what you want>" [--json]')
+    _submit_feedback("suggestion", getattr(args, "subject", None), text,
+                     as_json=bool(getattr(args, "json_output", False)))
+
+
+def cmd_flag(args) -> None:
+    """hivv flag <target> "<what they are doing>" — flag another node/user.
+
+    target is a node name (e.g. `hivv flag spammy-bee "floods relay jobs"`),
+    a principal id, or a URL/content reference. The report goes to the hub's
+    feedback queue with the target attached so an operator can act on it.
+    """
+    parts = getattr(args, "parts", None) or []
+    if len(parts) < 2:
+        die(f'usage: {APP} flag <target> "<what they are doing>" '
+            f'[--severity low|medium|high|critical] [--evidence TEXT] [--json]')
+    target = parts[0]
+    text = " ".join(parts[1:]).strip()
+    _submit_feedback("complaint", f"flag: {target}", text,
+                     target=target,
+                     evidence=getattr(args, "evidence", None),
+                     severity=getattr(args, "severity", None),
+                     as_json=bool(getattr(args, "json_output", False)))
+
+
+def cmd_capabilities(args) -> None:
+    """hivv capabilities [--json] — what can this HIVV instance do?
+
+    Shows the capability discovery document: the OpenAI-compatible surface,
+    the route-mode aliases, the deterministic tools, the hive's shared tools,
+    and the MCP endpoint. This is what a client probes before it decides what
+    to offer its user.
+    """
+    as_json = bool(getattr(args, "json_output", False))
+    try:
+        code, body = http("GET", "/v1/capabilities", timeout=15, sign=False)
+    except Exception as e:
+        if as_json:
+            print(json.dumps({"ok": False, "error": str(e)}))
+        else:
+            print(f"\033[31m✗ could not reach the gateway: {e}\033[0m")
+        sys.exit(2)
+
+    if code != 200 or not isinstance(body, dict):
+        if as_json:
+            print(json.dumps({"ok": False, "http_status": code, "body": body}))
+        else:
+            print(f"\033[31m✗ HTTP {code}\033[0m")
+        sys.exit(1)
+
+    data = body.get("data", body)
+
+    if as_json:
+        print(json.dumps(data, indent=2))
+        sys.exit(0)
+
+    B, R = "\033[1m", "\033[0m"
+    G, Y, C = "\033[32m", "\033[33m", "\033[36m"
+    print(f"\n{B}hivv tools{R} — what this instance offers\n")
+    print(f"  {B}service{R}: {data.get('name','?')} {data.get('version','')}")
+    print(f"  {B}tagline{R}: {data.get('tagline','')}")
+
+    oc = data.get("openai_compatible") or {}
+    print(f"\n  {B}OpenAI-compatible surface{R}")
+    print(f"    base URL : {oc.get('base_url','?')}")
+    print(f"    chat     : {oc.get('chat','?')}")
+    print(f"    models   : {oc.get('models','?')}")
+    print(f"    streaming: {oc.get('streaming')}  tools: {oc.get('tools')}")
+    print(f"    auth     : {oc.get('auth','?')}")
+
+    modes = data.get("route_modes") or {}
+    if modes:
+        print(f"\n  {B}route modes{R} (model aliases)")
+        for k, v in modes.items():
+            print(f"    {C}{k:<10}{R} {v}")
+
+    tools = data.get("hivv_tools") or []
+    if tools:
+        print(f"\n  {B}HIVV tools{R} (deterministic + signed)")
+        for t in tools:
+            cost = t.get("cost", "?")
+            mark = G if cost == "free" else Y
+            print(f"    {mark}{t['name']:<20}{R} {t.get('endpoint','')}")
+            desc = str(t.get("description", ""))[:110]
+            print(f"      {desc}{'…' if len(t.get('description','')) > 110 else ''}")
+
+    shared = data.get("hive_shared_tools") or []
+    if shared:
+        print(f"\n  {B}hive-shared tools{R} (served by volunteer bees)")
+        print(f"    {', '.join(shared)}")
+
+    caps = data.get("capabilities") or []
+    if caps:
+        print(f"\n  {B}capability registry{R} ({len(caps)} entries)")
+        for c in caps[:12]:
+            print(f"    {c.get('key','?'):<28} {c.get('tier','?'):<14} "
+                  f"{c.get('default_verdict','?')}")
+
+    mcp = data.get("mcp") or {}
+    if mcp:
+        print(f"\n  {B}MCP{R} — {mcp.get('endpoint','?')} "
+              f"({mcp.get('transport','?')})")
+        print(f"    tools: {', '.join(mcp.get('tools') or [])}")
+
+    receipts = data.get("receipts") or {}
+    if receipts:
+        print(f"\n  {B}response receipts{R}")
+        for k, v in receipts.items():
+            print(f"    {C}{k:<24}{R} {v}")
+
+    notes = data.get("notes") or []
+    if notes:
+        print(f"\n  {B}notes{R}")
+        for n in notes:
+            print(f"    · {n}")
+    print()
+
+
 def cmd_debug(args) -> None:
     """Show debug info: gateway connection, node registration, local AI detection."""
     print(f"\n\033[1m{APP} debug\033[0m\n")
@@ -9366,11 +9766,124 @@ def _setup_detect() -> dict:
     return det
 
 
-def _setup_write_config(target: Path) -> dict:
-    """Merge OPENCODE_CONFIG into target (JSONC-aware). Never overwrites
-    without a backup: an existing file is copied to <file>.bak-<ts> first;
-    an unparseable file is backed up and replaced with the canonical config."""
-    info = {"path": str(target), "action": None, "backup": None}
+def _probe_local_gateway(timeout: float = 1.5) -> str | None:
+    """Is a local HIVV gateway running? Returns its base URL, or None.
+
+    This decides where OpenCode points under the `hybrid` profile: the local
+    GATEWAY does local-first → hive fallback, so pointing OpenCode at it keeps
+    working when hivv.org is down (as long as a local model is up).
+    """
+    import urllib.parse
+    import urllib.request
+
+    for port in (3011, 3012, 3013, 3020, 3099):
+        url = f"http://127.0.0.1:{port}"
+        try:
+            with urllib.request.urlopen(url + "/api/health", timeout=timeout) as r:
+                if r.status == 200:
+                    return url
+        except Exception:
+            continue
+    return None
+
+
+def _is_local_url(url: str) -> bool:
+    import urllib.parse
+    try:
+        host = (urllib.parse.urlparse(str(url)).hostname or "").lower()
+        return host in ("127.0.0.1", "localhost", "::1")
+    except Exception:
+        return False
+
+
+def build_opencode_config(plan: dict | None = None,
+                          local_gateway: str | None = None) -> dict:
+    """The OpenCode provider config for the chosen backend.
+
+    THIS IS WHAT MAKES `hivv setup` SURVIVE HIVV.ORG GOING DOWN.
+    The old config hardcoded `https://hivv.org/v1`, so an offline box got a
+    dead baseURL. Now:
+
+      local   → the local model endpoint directly (no hub, no internet)
+      hybrid  → the LOCAL GATEWAY (which itself does local-first → hive
+                fallback), falling back to the hive if no gateway runs
+      hive    → the public hub (the original behaviour)
+      cloud   → the provider endpoint
+
+    `local` yields a SINGLE model (no route modes — there is nothing to route
+    between). The other three keep the five aliases because they all go
+    through HIVV's router.
+    """
+    plan = plan or {}
+    mode = plan.get("mode") or "hive"
+    hub = str(plan.get("hub") or HUB).rstrip("/")
+    model = plan.get("model") or "auto"
+    local_model = plan.get("local_model")
+
+    if mode == "local":
+        endpoint = plan.get("base_url") or ""
+        if not endpoint:
+            raise ValueError("local profile needs a local model endpoint")
+        model_id = local_model or model
+        return {
+            "$schema": "https://opencode.ai/config.json",
+            "providers": {
+                "hivv": {
+                    "name": "HIVV (local model)",
+                    "env": [],
+                    "package": "@opencode-ai/providers/openai-compatible",
+                    "settings": {"baseURL": endpoint},
+                    "models": {
+                        model_id: {
+                            "name": local_model or model_id,
+                            "capabilities": {"tools": True},
+                        },
+                    },
+                }
+            },
+            "model": f"hivv/{model_id}",
+        }
+
+    # hive / hybrid / cloud: the full route-mode alias set.
+    if mode == "hybrid" and local_gateway:
+        endpoint = f"{local_gateway}/v1"
+    else:
+        endpoint = plan.get("base_url") or f"{hub}/v1"
+
+    return {
+        "$schema": "https://opencode.ai/config.json",
+        "providers": {
+            "hivv": {
+                "name": "HIVV",
+                "env": ["HIVV_API_KEY"],
+                "package": "@opencode/ai/providers/openai-compatible",
+                "settings": {"baseURL": endpoint},
+                "models": {
+                    "auto":    {"name": "HIVV Auto", "capabilities": {"tools": True}},
+                    "smart":   {"modelID": "auto", "name": "HIVV Smart",
+                                "body": {"route": {"mode": "quality"}},  "capabilities": {"tools": True}},
+                    "fast":    {"modelID": "auto", "name": "HIVV Fast",
+                                "body": {"route": {"mode": "fast"}},     "capabilities": {"tools": True}},
+                    "cheap":   {"modelID": "auto", "name": "HIVV Cheap",
+                                "body": {"route": {"mode": "cost"}},     "capabilities": {"tools": True}},
+                    "private": {"modelID": "auto", "name": "HIVV Private",
+                                "body": {"route": {"mode": "private"}},  "capabilities": {"tools": True}},
+                },
+            }
+        },
+        "model": "hivv/auto",
+    }
+
+
+def _setup_write_config(target: Path, config: dict | None = None) -> dict:
+    """Merge `config` (default: OPENCODE_CONFIG) into target (JSONC-aware).
+    Never overwrites without a backup: an existing file is copied to
+    <file>.bak-<ts> first; an unparseable file is backed up and replaced."""
+    cfg = config if config is not None else OPENCODE_CONFIG
+    info = {"path": str(target), "action": None, "backup": None,
+            "offline_ok": _is_local_url(
+                (cfg.get("providers", {}).get("hivv", {})
+                     .get("settings", {}) or {}).get("baseURL", ""))}
 
     def _backup() -> str:
         b = target.with_name(target.name + ".bak-" + time.strftime("%Y%m%d-%H%M%S"))
@@ -9388,7 +9901,7 @@ def _setup_write_config(target: Path) -> dict:
                 prov = existing.get("providers")
                 if isinstance(prov, dict) and "hivv" in prov and not isinstance(prov["hivv"], dict):
                     del prov["hivv"]
-                merged = _deep_merge(existing, OPENCODE_CONFIG)
+                merged = _deep_merge(existing, cfg)
                 if merged == existing:
                     info["action"] = "already up to date"
                     return info
@@ -9397,12 +9910,12 @@ def _setup_write_config(target: Path) -> dict:
                 info["action"] = "merged"
             except (json.JSONDecodeError, ValueError):
                 info["backup"] = _backup()
-                target.write_text(json.dumps(OPENCODE_CONFIG, indent=2) + "\n",
+                target.write_text(json.dumps(cfg, indent=2) + "\n",
                                   encoding="utf-8")
                 info["action"] = "rewrote (was unparseable)"
         else:
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(json.dumps(OPENCODE_CONFIG, indent=2) + "\n",
+            target.write_text(json.dumps(cfg, indent=2) + "\n",
                               encoding="utf-8")
             info["action"] = "created"
     except OSError as e:
@@ -10346,6 +10859,30 @@ def build_parser() -> argparse.ArgumentParser:
     sp_lo = sub.add_parser("local", help="manage a LOCAL self-hosted HIVV gateway")
     sp_lo.add_argument("what", nargs="?", default="status",
                        choices=["status", "start", "stop", "info"])
+    sp_tl = sub.add_parser("capabilities", help="what can this HIVV instance do? (capability discovery)")
+    sp_tl.add_argument("--json", dest="json_output", action="store_true", help="output raw JSON")
+    sp_pb = sub.add_parser("problems", help="what is breaking globally? (error log + incidents)")
+    sp_pb.add_argument("--json", dest="json_output", action="store_true", help="output raw JSON")
+    sp_pb.add_argument("--window", type=int, default=3600, help="look-back window in seconds (default 3600)")
+    sub.add_parser("errors", help="alias for problems")
+    sp_bg = sub.add_parser("bug", help="research a specific problem (searches the live error log)")
+    sp_bg.add_argument("query", nargs="*", help="what broke (class, endpoint, or message fragment)")
+    sp_bg.add_argument("--json", dest="json_output", action="store_true", help="output raw JSON")
+    sp_bg.add_argument("--limit", type=int, default=20, help="max entries (default 20)")
+    sp_bg.add_argument("--client", default=None, help="filter by client: opencode, continue, cline, vscode, …")
+    sp_sb = sub.add_parser("submit", help="file a bug report to the hub")
+    sp_sb.add_argument("text", nargs="+", help="what you saw")
+    sp_sb.add_argument("--subject", default=None, help="short summary line")
+    sp_sb.add_argument("--json", dest="json_output", action="store_true", help="output raw JSON")
+    sp_rq = sub.add_parser("request", help="request a feature")
+    sp_rq.add_argument("text", nargs="+", help="what you want")
+    sp_rq.add_argument("--subject", default=None, help="short summary line")
+    sp_rq.add_argument("--json", dest="json_output", action="store_true", help="output raw JSON")
+    sp_fl = sub.add_parser("flag", help="flag something another node/user is doing")
+    sp_fl.add_argument("parts", nargs="+", help='<target> "<what they are doing>"')
+    sp_fl.add_argument("--severity", default=None, choices=["low", "medium", "high", "critical"])
+    sp_fl.add_argument("--evidence", default=None, help="supporting detail (ids, timestamps, log lines)")
+    sp_fl.add_argument("--json", dest="json_output", action="store_true", help="output raw JSON")
     sp = sub.add_parser("nodes",       help="GET /api/control/nodes")
     sp.add_argument("--json", dest="json_output", action="store_true", help="output raw JSON")
     sp_n = sub.add_parser("node",       help="show details or chat with a specific node")
@@ -10598,6 +11135,13 @@ COMMANDS = {
     "fastscan":        cmd_fast_scan,
     "partner":         cmd_partner,
     "local":           cmd_local,
+    "capabilities":    cmd_capabilities,
+    "problems":        cmd_problems,
+    "errors":          cmd_problems,
+    "bug":             cmd_bug,
+    "submit":          cmd_submit,
+    "request":         cmd_request,
+    "flag":            cmd_flag,
     "nodes":           cmd_nodes,
     "node":            cmd_node,
     "node-chat":       cmd_node_chat,
@@ -10712,6 +11256,11 @@ def main(argv: list[str]) -> None:
     if cmd_name == "upgrade":
         cmd_name = "update"
         argv[0] = "update"
+    # `capability` is a documented alias for `cap` but had no parser, so
+    # `hivv capability` died in parse_args. Map it like `upgrade` does.
+    if cmd_name == "capability":
+        cmd_name = "cap"
+        argv[0] = "cap"
 
     # Smart default: if argv[0] doesn't match a known subcommand and isn't a flag,
     # treat the whole argv as a chat message to hivv.org. So:
@@ -10735,7 +11284,17 @@ def main(argv: list[str]) -> None:
         cmd_llm_help(None)
         return
 
-    args = build_parser().parse_args(argv)
+    # ── parse args, with a SELF-HEAL path ──────────────────────────────
+    # A bug in the parser (a duplicate subparser, a bad default) makes the
+    # CLI unable to run ANY command — including `hivv update`, which is how
+    # it would normally fix itself. So a parser failure must offer to
+    # re-download the CLI rather than just dying with a traceback.
+    try:
+        args = build_parser().parse_args(argv)
+    except (SystemExit, Exception) as parse_err:
+        _self_heal_from_parse_error(parse_err, cmd_name)
+        return
+
     # Global flags
     global PLAIN_OUTPUT, NO_THINK
     PLAIN_OUTPUT = bool(getattr(args, "plain", False))
@@ -10744,6 +11303,81 @@ def main(argv: list[str]) -> None:
     if getattr(args, "hub", None):
         HUB = args.hub
     COMMANDS[cmd_name](args)
+
+
+def _self_heal_from_parse_error(parse_err, cmd_name: str) -> None:
+    """Offer to repair a CLI whose own parser is broken.
+
+    The installed file is the thing that is broken, so the only real fix is
+    to replace it with the copy the hub is serving. This function:
+      1. prints the actual error (so the operator can report it),
+      2. re-downloads hivv-cli.py from the hub into THIS file's location,
+      3. verifies the download is not an HTML error page,
+      4. tells the operator to re-run their command.
+
+    It deliberately does NOT auto-restart — the operator should see what
+    happened and confirm.
+    """
+    B, R = "\033[1m", "\033[0m"
+    G, Y, X = "\033[32m", "\033[33m", "\033[31m"
+
+    here = Path(__file__).resolve()
+    print(f"\n{X}✗ {APP} could not start — its own command parser failed{R}")
+    print(f"  {B}error{R}: {parse_err}")
+    print(f"  {B}file{R}:  {here}")
+    print(f"  {B}command{R}: {APP} {cmd_name}")
+    print()
+    print(f"  {Y}this means the installed CLI is broken, including "
+          f"`{APP} update`.{R}")
+    print(f"  {Y}the fix is to replace it with the copy the hub serves.{R}")
+    print()
+
+    # `--healthcheck` and `--version` return before build_parser(), so they
+    # still work — prove it so the operator has a working foothold.
+    print(f"  {B}still working{R}: {APP} --healthcheck · {APP} --version")
+    print()
+
+    # Offer the repair.
+    print(f"  {B}to repair now{R}:")
+    print(f"    {G}curl -fsSL {HUB}/{APP}-cli.py -o {here}{R}")
+    print(f"    {G}python3 {here} --healthcheck{R}   # verify it works")
+    print(f"    {G}{APP} {cmd_name}{R}            # re-run what you wanted")
+    print()
+
+    # Or from source, if the hub is unreachable.
+    print(f"  {B}or from source{R}:")
+    print(f"    {G}git clone https://github.com/htmlfarmer/hivv.git{R}")
+    print(f"    {G}cp hivv/public_html/{APP}-cli.py {here}{R}")
+    print()
+
+    # An explicit repair flag, so the operator can do it in one shot.
+    if "--yes" in sys.argv or "-y" in sys.argv:
+        print(f"  {Y}--yes given — attempting repair…{R}")
+        try:
+            import urllib.request
+            url = f"{HUB}/{APP}-cli.py"
+            with urllib.request.urlopen(url, timeout=30) as r:
+                body = r.read()
+            head = body[:200].lower()
+            if b"<!doctype" in head or b"<html" in head:
+                print(f"  {X}✗ the hub returned HTML, not a script — "
+                      f"not overwriting{R}")
+                return
+            # Atomic-ish: write a temp file next to the target, then swap.
+            tmp = here.with_name(here.name + ".new")
+            tmp.write_bytes(body)
+            tmp.chmod(here.stat().st_mode)
+            tmp.replace(here)
+            print(f"  {G}✓ repaired {here} ({len(body)} bytes){R}")
+            print(f"  now run: {APP} {cmd_name}")
+        except Exception as e:
+            print(f"  {X}✗ repair failed: {e}{R}")
+            print(f"  the hub may be down — try the git clone path above")
+        return
+
+    print(f"  {Y}add --yes to repair automatically:{R}")
+    print(f"    {APP} {cmd_name} --yes")
+    print()
 
 
 def _print_root_help() -> None:
@@ -10791,6 +11425,16 @@ hub = {HUB}   version = {VERSION}
    partner [manifest|health|network|models|capabilities]  the public partner surface
    fast-scan FILE     deterministic, AI-free source screen (free · instant · no AI)
    local [status|start|stop|info]  a LOCAL self-hosted gateway (no database)
+   capabilities       what this instance offers (capability discovery)
+
+\033[1mDebugging & support:\033[0m
+   problems           what is breaking globally? (live error log + incidents)
+   bug [query]        research a specific problem  --client opencode|vscode|…
+   submit "<text>"    file a bug report to the hub
+   request "<text>"   request a feature
+   flag <tgt> "<text>"  flag another node/user  --severity high
+   support "<question>"  ask the AI for help (attaches your diagnostics)
+   debug              full local snapshot: hub, agent, local AI, network
 
 \033[1mhivv OS — capabilities · policy · routing · approvals 🐝:\033[0m
    cap [list|can|node]  the capability layer — what the hive can do
@@ -10862,6 +11506,13 @@ def _print_sub_help(cmd: str) -> None:
         "test":      "doctor + speed end-to-end smoke test",
         "volunteer": "opt in/out of contributing compute to the network\n  usage: hivv volunteer [on|off|status]   (default: status)",
         "setup":     "configure OpenCode + VS Code + local LLM with hivv\n  flags: --write [PATH]  write/merge ./opencode.jsonc (default)\n         --global        with --write: use ~/.config/opencode/opencode.jsonc\n         --json          detection dict + config as JSON\n         --profile P    local | hybrid | hive | cloud (default hybrid)\n         --backend M    pin one specific local model\n         --tools IDS    only these tool ids, comma-separated\n         --gui          also write the GUI tool configs\n         --dry-run      show what would be written, write nothing",
+        "capabilities": "what can this HIVV instance do? (capability discovery)\n  shows the OpenAI surface, route modes, deterministic tools, hive tools, MCP\n  flag: --json   machine-readable",
+        "problems":  "what is breaking globally? (live error log + open incidents)\n  flag: --window N   look-back seconds (default 3600)\n  flag: --json\n  alias: errors",
+        "errors":    "alias for problems",
+        "bug":       "research a specific problem (searches the live error log)\n  usage: hivv bug [query] [--client opencode] [--limit N] [--json]\n  --client filters to one client (opencode, continue, cline, vscode, …)\n  shows the class, endpoint, client, message and a diagnosis for each hit",
+        "submit":    "file a bug report to the hub\n  usage: hivv submit \"<what you saw>\" [--subject S] [--json]",
+        "request":   "request a feature\n  usage: hivv request \"<what you want>\" [--subject S] [--json]",
+        "flag":      "flag something another node/user is doing\n  usage: hivv flag <target> \"<what they are doing>\" [--severity L] [--evidence T] [--json]\n  target is a node name, principal id, or content reference",
         "code":      "ask a coder bee to do a task in a git repo\n  usage: hivv code \"<task>\" --repo <git-url> [--ref BR] [--timeout S] [--wait] [--json]",
         "dial":      "local OpenAI-compatible proxy shim — hub dials once, then forwards straight to the bee\n  usage: hivv dial [--port N] [--hub URL]   (default port 3911)\n  point OpenCode at http://127.0.0.1:3911/v1 — hub only on dial + report",
         "panic":     "emergency help — diagnostics + how to report a bug (paste this in support)",
