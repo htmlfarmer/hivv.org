@@ -9341,6 +9341,13 @@ def _setup_detect() -> dict:
         if c == 200:
             det["local_llm"].append(
                 {"name": name, "port": port, "url": f"http://localhost:{port}"})
+    # The GUI matrix needs the MODEL ids too, not just "something is there".
+    try:
+        _gui = _load_gui_setup()
+        if _gui:
+            det["local_llm_detail"] = _gui.probe_local_models()
+    except Exception:
+        det["local_llm_detail"] = []
     try:
         det["llm_runtimes"] = _llm_detect()
     except Exception:
@@ -9403,9 +9410,174 @@ def _setup_write_config(target: Path) -> dict:
     return info
 
 
+# ── hivv setup: the GUI-tool matrix ───────────────────────────────────────
+def _load_gui_setup():
+    """Import the GUI-tool registry (ships next to the CLI)."""
+    import importlib.util
+    here = Path(__file__).resolve().parent
+    mod_path = here / "hivv-gui-setup.py"
+    if not mod_path.exists():
+        return None
+    spec = importlib.util.spec_from_file_location("hivv_gui_setup", mod_path)
+    mod = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(mod)
+    except Exception:
+        return None
+    return mod
+
+
+def _setup_gui(args, det) -> dict:
+    """Build the GUI-tool plan and (optionally) write the configs.
+
+    Returns a dict so `--json` can print exactly what happened.
+    """
+    gui = _load_gui_setup()
+    if not gui:
+        return {"available": False, "reason": "hivv-gui-setup.py not found"}
+
+    profile = (getattr(args, "profile", None) or "hybrid").lower()
+    if profile not in gui.PROFILES:
+        profile = "hybrid"
+    backend = getattr(args, "backend", None)
+    hub = getattr(args, "hub", None) or HUB
+    api_key = os.environ.get("HIVV_API_KEY") or None
+
+    local_models = det.get("local_llm_detail") or []
+    if not local_models:
+        try:
+            local_models = gui.probe_local_models()
+        except Exception:
+            local_models = []
+
+    try:
+        plan = gui.build_plan(profile=profile, hub=hub, local_models=local_models,
+                              api_key=api_key, backend=backend)
+        plan_error = None
+    except Exception as e:
+        plan = {
+            "mode": profile,
+            "base_url": f"{hub.rstrip('/')}/v1",
+            "api_key": api_key,
+            "model": "auto",
+            "local_url": None,
+            "local_model": None,
+            "hub": hub,
+        }
+        plan_error = str(e)
+
+    detected = gui.detect_tools()
+    wanted = getattr(args, "tools", None)
+    selected = []
+    for d in detected:
+        if wanted:
+            ids = [x.strip() for x in str(wanted).split(",") if x.strip()]
+            if d["id"] not in ids:
+                continue
+        if not d["detected"]:
+            continue
+        selected.append(d["id"])
+
+    results = []
+    if getattr(args, "gui", False) or getattr(args, "dry_run", False):
+        dry = bool(getattr(args, "dry_run", False))
+        for t in gui.TOOL_REGISTRY:
+            if t["id"] not in selected:
+                continue
+            if dry:
+                paths = t["paths"]()
+                dest = next((p for p in paths if p.exists()), paths[0])
+                results.append({
+                    "ok": True, "tool": t["id"], "label": t["label"],
+                    "action": "would write", "path": str(dest),
+                    "kind": t["kind"], "note": t.get("note", ""),
+                })
+            else:
+                r = gui.apply_tool(t, plan)
+                r["kind"] = t["kind"]
+                r["note"] = t.get("note", "")
+                results.append(r)
+
+    return {
+        "available": True,
+        "profile": profile,
+        "profile_description": gui.PROFILE_DESCRIPTIONS.get(profile, ""),
+        "plan": plan,
+        "plan_error": plan_error,
+        "local_models": local_models,
+        "tools": detected,
+        "selected": selected,
+        "results": results,
+        "dry_run": bool(getattr(args, "dry_run", False)),
+    }
+
+
+def _print_gui_section(gui: dict) -> None:
+    """Render the GUI-tool matrix."""
+    B, R = "\033[1m", "\033[0m"
+    G, Y, X = "\033[32m", "\033[33m", "\033[31m"
+    C = "\033[36m"
+
+    print(f"{B}── GUI tools {R}{'─' * 46}")
+    if not gui.get("available"):
+        print(f"  {Y}·{R} gui registry unavailable ({gui.get('reason','?')})")
+        print()
+        return
+
+    plan = gui.get("plan", {})
+    print(f"  {B}profile{R}: {C}{gui.get('profile','?')}{R} — {gui.get('profile_description','')}")
+    print(f"  {B}endpoint{R}: {plan.get('base_url','?')}")
+    if plan.get("local_model"):
+        print(f"  {B}local model{R}: {plan['local_model']}")
+    if plan.get("fallback_url"):
+        print(f"  {B}fallback{R}: {plan['fallback_url']}")
+    if gui.get("plan_error"):
+        print(f"  {Y}note{R}: {gui['plan_error']}")
+    print()
+
+    tools = gui.get("tools", [])
+    by_kind: dict = {}
+    for t in tools:
+        by_kind.setdefault(t["kind"], []).append(t)
+    kind_names = {
+        "vscode": "VS Code family", "jetbrains": "JetBrains", "editor": "Editors",
+        "chat": "Chat front-ends", "cli": "CLI tools", "mcp": "MCP hosts",
+    }
+    for kind in ("vscode", "jetbrains", "editor", "chat", "cli", "mcp"):
+        group = by_kind.get(kind) or []
+        if not group:
+            continue
+        print(f"  {B}{kind_names.get(kind,kind)}{R}")
+        for t in group:
+            mark = f"{G}●{R}" if t["detected"] else f"{Y}○{R}"
+            print(f"    {mark} {t['label']}")
+            if t.get("note"):
+                print(f"       {R}{t['note']}{R}")
+        print()
+
+    results = gui.get("results") or []
+    if results:
+        print(f"  {B}written{R}")
+        for r in results:
+            if r.get("ok"):
+                print(f"    {G}✓{R} {r['label']}")
+                print(f"      {r.get('action','?')} → {r.get('path','?')}")
+            else:
+                print(f"    {X}✗{R} {r.get('label','?')}: {r.get('error','?')}")
+        print()
+
+
 def cmd_setup(args) -> None:
     """hivv setup [--write [PATH]] [--global] [--json] — detect OpenCode,
-    VS Code and local LLMs, and print (or write) the canonical hivv config."""
+    VS Code and local LLMs, and print (or write) the canonical hivv config.
+
+    ALSO: the GUI-tool matrix.
+      --profile local|hybrid|hive|cloud   which backend the tools should use
+      --backend MODEL                    pin one specific local model
+      --tools a,b,c                      only these tool ids (default: all detected)
+      --gui                             write the GUI tool configs too
+      --dry-run                          show what would be written
+    """
     det = _setup_detect()
     as_json = bool(getattr(args, "json_output", False))
     write_arg = getattr(args, "write", None)     # None = no --write, "" = default path
@@ -9440,9 +9612,12 @@ def cmd_setup(args) -> None:
     installed = installed_here or installed_glob
     installed_path = target if installed_here else (global_cfg if installed_glob else None)
 
+    # ── GUI tool matrix ────────────────────────────────────────────
+    gui = _setup_gui(args, det)
+
     if as_json:
         print(json.dumps({"detect": det, "config": OPENCODE_CONFIG,
-                          "write": write_info}, indent=2))
+                          "write": write_info, "gui": gui}, indent=2))
         return
 
     B, R = "\033[1m", "\033[0m"
@@ -9497,6 +9672,9 @@ def cmd_setup(args) -> None:
     print(f'     "vscode-acp.agentPaths": {{"opencode": "{oc_path}"}}')
     print()
 
+    # ── 2b. The GUI-tool matrix ───────────────────────────────────
+    _print_gui_section(gui)
+
     # ── 3. Local LLM + hivv ───────────────────────────────────────
     print(f"{B}── Local LLM + hivv {R}{'─' * 39}")
     print(f"  two paths:")
@@ -9516,6 +9694,27 @@ def cmd_setup(args) -> None:
         print(f"  agent: {G}running{R} (node {ag.get('node_id') or '?'}, pid {ag['pid']})")
     else:
         print(f"  agent: {Y}not running{R} → run `{APP} start`")
+    print()
+
+    # ── 3b. Donating your idle capacity ───────────────────────────
+    print(f"{B}── Donating your idle capacity {R}{'─' * 30}")
+    try:
+        _vol = (read_state() or {}).get("volunteer")
+    except Exception:
+        _vol = None
+    donating = bool(_vol) if _vol is not None else None
+    if donating is True:
+        print(f"  {G}✓{R} volunteering ON — the hive may use your idle CPU/GPU")
+    elif donating is False:
+        print(f"  {Y}·{R} volunteering OFF — your machine serves you only")
+    else:
+        print(f"  {Y}·{R} volunteer state unknown — run `{APP} drone` to check")
+    print(f"  {B}how it works{R}: while your own model is busy, the hive")
+    print(f"  can send work to your machine; when it is idle, it earns")
+    print(f"  {B}honey{R} (ranking, streaks, leaderboard place).")
+    print(f"  toggle: {G}{APP} volunteer on{R} / {G}{APP} volunteer off{R}")
+    print(f"  {Y}your IDE traffic is private either way — donation shares")
+    print(f"  compute, never your prompts or files.{R}")
     print()
 
     # ── 4. Verify ─────────────────────────────────────────────────
@@ -10305,6 +10504,22 @@ def build_parser() -> argparse.ArgumentParser:
                        help="with --write: target ~/.config/opencode/opencode.jsonc")
     sp_su.add_argument("--json", dest="json_output", action="store_true",
                        help="output detection dict + config as JSON")
+    sp_su.add_argument("--profile", default="hybrid",
+                       choices=["local", "hybrid", "hive", "cloud"],
+                       help="which backend the GUI tools should use: "
+                            "local (your model only), hybrid (local first, hive fallback), "
+                            "hive (global network), cloud (a provider key)")
+    sp_su.add_argument("--backend", default=None, metavar="MODEL",
+                       help="pin one specific local model (name or model id)")
+    sp_su.add_argument("--tools", default=None, metavar="IDS",
+                       help="only these tool ids, comma-separated "
+                            "(default: every detected tool)")
+    sp_su.add_argument("--gui", action="store_true",
+                       help="also write the GUI tool configs (VS Code, JetBrains, Zed, …)")
+    sp_su.add_argument("--dry-run", dest="dry_run", action="store_true",
+                       help="show what would be written without writing anything")
+    sp_su.add_argument("--hub", default=None, metavar="URL",
+                       help="the HIVV hub to point at (default: the public hive)")
 
     # coder bees: hand a coding task to a node running opencode
     sp_cd = sub.add_parser("code", help="ask a coder bee to do a task in a git repo")
@@ -10646,7 +10861,7 @@ def _print_sub_help(cmd: str) -> None:
         "speed":     "latency benchmark (DNS, TCP, hub ping x3, chat TTFB, CPU/RAM/disk)",
         "test":      "doctor + speed end-to-end smoke test",
         "volunteer": "opt in/out of contributing compute to the network\n  usage: hivv volunteer [on|off|status]   (default: status)",
-        "setup":     "configure OpenCode + VS Code + local LLM with hivv\n  flags: --write [PATH]  write/merge ./opencode.jsonc (default)\n         --global        with --write: use ~/.config/opencode/opencode.jsonc\n         --json          detection dict + config as JSON",
+        "setup":     "configure OpenCode + VS Code + local LLM with hivv\n  flags: --write [PATH]  write/merge ./opencode.jsonc (default)\n         --global        with --write: use ~/.config/opencode/opencode.jsonc\n         --json          detection dict + config as JSON\n         --profile P    local | hybrid | hive | cloud (default hybrid)\n         --backend M    pin one specific local model\n         --tools IDS    only these tool ids, comma-separated\n         --gui          also write the GUI tool configs\n         --dry-run      show what would be written, write nothing",
         "code":      "ask a coder bee to do a task in a git repo\n  usage: hivv code \"<task>\" --repo <git-url> [--ref BR] [--timeout S] [--wait] [--json]",
         "dial":      "local OpenAI-compatible proxy shim — hub dials once, then forwards straight to the bee\n  usage: hivv dial [--port N] [--hub URL]   (default port 3911)\n  point OpenCode at http://127.0.0.1:3911/v1 — hub only on dial + report",
         "panic":     "emergency help — diagnostics + how to report a bug (paste this in support)",
