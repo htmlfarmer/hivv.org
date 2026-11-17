@@ -1,0 +1,2993 @@
+#!/usr/bin/env python3
+"""hivv — the HIVV.org client CLI / local agent.
+
+Pure stdlib (no pip install). Connects to hivv.org as a CLIENT.
+
+Subcommands (operator / local):
+  start              start the local hivv agent (background)
+  stop               stop the local hivv agent
+  restart            stop + start
+  status             pid, uptime, last heartbeat, last error
+  logs [N] [-f]      tail ~/.local/share/hivv/agent.log
+  free               host mem + swap + disk + per-process RSS
+  pct [--watch=N]    live CPU%/MEM% line (refreshes like top)
+  info               hub URL, version, node_id, install path
+  update             pull the latest hivv-cli.py from hivv.org
+  uninstall          stop + remove install (keep ~/.config/hivv/)
+  --help, help       list every subcommand
+
+Subcommands (one-shot / talk to hivv.org):
+  health             GET /api/health
+  metrics            GET /api/control/metrics/global
+  nodes              GET /api/control/nodes
+  chat MSG           POST /api/chat   (smart default — see below)
+  completions MSG    POST /v1/chat/completions (OpenAI-compatible)
+  whoami             GET /api/control/health (cheap "am I talking to hivv?" check)
+
+Smart default — if no subcommand matches and the first arg isn't a flag,
+the whole rest is treated as a streaming chat message:
+
+  hivv whats the meaning of life
+  hivv write me a haiku about kubernetes
+  hivv explain the Monty Hall problem in 3 sentences
+
+Per-subcommand --help also works.
+"""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import hmac
+import json
+import os
+import re
+import secrets
+import shutil
+import signal
+import socket
+import subprocess
+import sys
+import tempfile
+import textwrap
+import time
+import uuid
+import urllib.error
+import urllib.parse
+import urllib.request
+from pathlib import Path
+
+# ── configuration ──────────────────────────────────────────────────────
+APP       = "hivv"
+HUB       = os.environ.get("HIVV_HUB",  "https://hivv.org")
+HUB_NAME  = "HIVV.org"
+VERSION   = "0.1.0"
+
+# XDG-ish paths (with fallback to ~/.hivv for legacy)
+CONFIG_DIR    = Path(os.environ.get("HIVV_CONFIG_DIR")  or (Path.home() / ".config" / APP))
+STATE_DIR     = Path(os.environ.get("HIVV_STATE_DIR")   or (Path.home() / ".local" / "share" / APP))
+
+# Where the client + wrapper actually live. If we were installed to a non-default
+# prefix, derive from this file's location: client is in <prefix>/lib/hivv/, wrapper
+# is in <prefix>/bin/hivv. Fall back to /usr/local when running in-place (e.g. dev).
+_THIS_DIR = Path(__file__).resolve().parent
+if _THIS_DIR.name == "hivv" and _THIS_DIR.parent.name == "lib":
+    INSTALL_DIR = Path(os.environ.get("HIVV_INSTALL_DIR") or _THIS_DIR)
+    BIN_DIR     = Path(os.environ.get("HIVV_BIN_DIR")     or _THIS_DIR.parent.parent / "bin")
+else:
+    INSTALL_DIR = Path(os.environ.get("HIVV_INSTALL_DIR") or ("/usr/local/lib/" + APP))
+    BIN_DIR     = Path(os.environ.get("HIVV_BIN_DIR")     or "/usr/local/bin")
+
+CONFIG_FILE   = CONFIG_DIR  / "config.toml"
+STATE_FILE    = STATE_DIR   / "state.json"
+LOG_FILE      = STATE_DIR   / "agent.log"
+PID_FILE      = STATE_DIR   / "agent.pid"
+AUTH_FILE     = CONFIG_DIR  / "auth.json"   # 0600 — per-install bearer token
+VISITOR_FILE  = STATE_DIR   / "visitor_id"  # persistent per-install device ID
+
+# Heartbeat cadence
+HEARTBEAT_S = int(os.environ.get("HIVV_HEARTBEAT_S", "60"))
+
+
+# ── tiny utilities ─────────────────────────────────────────────────────
+def log(msg: str) -> None:
+    print(f"\033[1;34m[{APP}]\033[0m {msg}", file=sys.stderr)
+
+def ok(msg: str) -> None:
+    print(f"\033[1;32m[{APP}]\033[0m {msg}")
+
+def warn(msg: str) -> None:
+    print(f"\033[1;33m[{APP}]\033[0m {msg}", file=sys.stderr)
+
+def die(msg: str, code: int = 1) -> None:
+    print(f"\033[0;31m[{APP}]\033[0m {msg}", file=sys.stderr)
+    sys.exit(code)
+
+def _get_visitor_id() -> str:
+    """Per-machine ID for per-user rate limiting.
+    Uses /etc/machine-id (D-Bus system ID) as primary identity — tied to the
+    OS install, not a stored file, so it survives reinstalls and can't be
+    casually deleted. Falls back to VISITOR_FILE for non-Linux systems."""
+    for path in ("/etc/machine-id", "/var/lib/dbus/machine-id"):
+        try:
+            mid = Path(path).read_text().strip()
+            if mid:
+                return f"cli_{mid}"
+        except (OSError, IOError):
+            pass
+    try:
+        if VISITOR_FILE.exists():
+            return VISITOR_FILE.read_text().strip()
+    except OSError:
+        pass
+    vid = f"cli_{uuid.uuid4().hex[:16]}"
+    try:
+        VISITOR_FILE.write_text(vid)
+    except OSError:
+        pass
+    return vid
+
+def ensure_dirs() -> None:
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+
+def read_state() -> dict:
+    if not STATE_FILE.exists():
+        return {}
+    try:
+        return json.loads(STATE_FILE.read_text())
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+def write_state(d: dict) -> None:
+    ensure_dirs()
+    STATE_FILE.write_text(json.dumps(d, indent=2, sort_keys=True))
+
+
+# ── security primitives (Phase A — graceful degrade if hub doesn't support) ──
+
+# Patterns we strip from logs and `support` output before printing.
+# Each pattern MUST be paired with a replacement that keeps log structure intact.
+_SCRUB_RULES = [
+    # authorization: bearer xxx
+    (re.compile(r"(?i)(authorization\s*[:=]\s*)(?:bearer\s+)?[\w\-\.]{6,}"), r"\1***REDACTED***"),
+    # api_key=xxx / api-key: xxx / apikey="xxx" / API_KEY='xxx'
+    (re.compile(r"""(?i)\b(api[_-]?key|api[_-]?token|secret[_-]?key|access[_-]?token|auth[_-]?token)\b(\s*[:=]\s*)(?:["'])?[\w\-\.]{6,}"""), r"\1\2***REDACTED***"),
+    # password=xxx / passwd=xxx / pwd=xxx  (but not "shadow passwords" in copy)
+    (re.compile(r"(?i)\b(password|passwd|pwd)\b(\s*[:=]\s*)(?:[\"'])?[^\s\"']{6,}"), r"\1\2***REDACTED***"),
+    # ?token=...&foo=bar  (and ?access_token=, ?api_key=)
+    (re.compile(r"([?&])(token|access_token|api_key|apikey|password|secret)=([\w\-\.%]+)"), r"\1\2=***"),
+    # raw JWTs that survive the above (real ones are typically 100+ chars)
+    (re.compile(r"\beyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\b"), "***JWT***"),
+    # AKIA / ghp_ / xoxb- style keys that survive
+    (re.compile(r"\b(AKIA[0-9A-Z]{16}|ghp_[A-Za-z0-9]{36}|xox[baprs]-[A-Za-z0-9\-]{10,})\b"), "***KEY***"),
+]
+
+def _scrub(text: str) -> str:
+    """Strip likely secrets from a chunk of text (logs, error messages, support bundles)."""
+    if not text:
+        return text
+    out = text
+    for pat, repl in _SCRUB_RULES:
+        out = pat.sub(repl, out)
+    return out
+
+def _scrub_lines(text: str) -> str:
+    """Apply scrub line-by-line so we keep newlines tidy."""
+    return "\n".join(_scrub(line) for line in text.splitlines())
+
+def _machine_id() -> str | None:
+    """Best-effort cross-platform hardware identifier. Used to bind node_id to
+    this physical box so a copied state.json can't impersonate on another host.
+    Returns None if the platform doesn't expose one cleanly."""
+    # Linux: /etc/machine-id (systemd, present on all modern Linux)
+    try:
+        p = Path("/etc/machine-id")
+        if p.exists():
+            mid = p.read_text().strip()
+            if mid:
+                return f"linux-{mid[:32]}"
+    except OSError:
+        pass
+    # macOS: IOPlatformUUID from IOKit
+    if sys.platform == "darwin":
+        try:
+            out = subprocess.run(
+                ["ioreg", "-rd1", "-c", "IOPlatformExpertDevice"],
+                capture_output=True, text=True, timeout=3
+            )
+            if out.returncode == 0:
+                m = re.search(r'"IOPlatformUUID"\s*=\s*"([^"]+)"', out.stdout)
+                if m:
+                    return f"macos-{m.group(1)}"
+        except (subprocess.SubprocessError, OSError):
+            pass
+    # Windows: wmic csproduct get uuid  (or registry HKLM\SOFTWARE\Microsoft\Cryptography\MachineGuid)
+    if sys.platform.startswith("win"):
+        try:
+            out = subprocess.run(
+                ["wmic", "csproduct", "get", "uuid"],
+                capture_output=True, text=True, timeout=3
+            )
+            if out.returncode == 0:
+                m = re.search(r"[0-9A-Fa-f\-]{36}", out.stdout)
+                if m:
+                    return f"windows-{m.group(0)}"
+        except (subprocess.SubprocessError, OSError, FileNotFoundError):
+            pass
+        try:
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
+                                r"SOFTWARE\Microsoft\Cryptography") as k:
+                v, _ = winreg.QueryValueEx(k, "MachineGuid")
+                if v:
+                    return f"windows-{v}"
+        except (OSError, ImportError):
+            pass
+    return None
+
+def _get_or_create_auth_token() -> str:
+    """Return the per-install bearer token, creating one on first call.
+    Stored in ~/.config/<app>/auth.json with mode 0600. Survives `update`."""
+    ensure_dirs()
+    f = AUTH_FILE
+    if f.exists():
+        try:
+            d = json.loads(f.read_text())
+            tok = d.get("token")
+            if isinstance(tok, str) and len(tok) >= 32:
+                return tok
+        except (OSError, json.JSONDecodeError):
+            pass
+    tok = secrets.token_hex(32)   # 256-bit
+    fd = os.open(str(f), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, json.dumps({
+            "token": tok,
+            "created_at": int(time.time()),
+            "version": 1,
+        }, indent=2).encode())
+    finally:
+        os.close(fd)
+    return tok
+
+def _signed_headers(method: str, path: str, body_bytes: bytes | None,
+                    token: str | None = None) -> dict:
+    """Produce HMAC-signed headers. The signature covers:
+        ts + '\\n' + nonce + '\\n' + method + '\\n' + path + '\\n' + sha256(body)
+    so the server can reject replays (5-min window) and verify request integrity.
+    If no token is available (very early boot), returns {}."""
+    if not token:
+        return {}
+    ts = str(int(time.time()))
+    nonce = secrets.token_hex(8)
+    body_hash = hashlib.sha256(body_bytes or b"").hexdigest()
+    msg = f"{ts}\n{nonce}\n{method.upper()}\n{path}\n{body_hash}"
+    sig = hmac.new(token.encode(), msg.encode(), hashlib.sha256).hexdigest()
+    return {
+        "X-Auth-Timestamp": ts,
+        "X-Auth-Nonce":     nonce,
+        "X-Auth-Signature": sig,
+    }
+
+def _support_token(token: str | None) -> str:
+    """Mark whether this hub expects auth+signing or not. After one 401 the
+    CLI strips headers and remembers — so old hubs don't kill us."""
+    if token is None:
+        return "no-token"
+    return "ok"
+
+
+# ── HTTP helper ────────────────────────────────────────────────────────
+def _auth_rejected() -> bool:
+    """Has this hub already told us it doesn't want Authorization headers?
+    Cached in state so we don't re-send auth headers every request after a 401."""
+    try:
+        return bool((read_state() or {}).get("auth_rejected"))
+    except Exception:
+        return False
+
+def _mark_auth_rejected(v: bool = True) -> None:
+    try:
+        st = read_state() or {}
+        st["auth_rejected"] = bool(v)
+        st["auth_rejected_at"] = int(time.time())
+        write_state(st)
+    except OSError:
+        pass
+
+def http(method: str, path: str, *, body=None, token: str | None = None,
+         timeout: float = 15.0, sign: bool = True) -> tuple[int, dict | str]:
+    """Make an authenticated, signed request to the hub.
+
+    Auto-degrades:
+      • if the hub returns 401/403 for the Authorization header, retry once
+        without auth/signing and remember via state.auth_rejected=True so we
+        don't re-send every request.
+      • token is auto-loaded from AUTH_FILE if not passed explicitly.
+    """
+    url = HUB.rstrip("/") + path
+    headers = {
+        "user-agent": f"{APP}/{VERSION}",
+        "accept": "application/json",
+        "x-visitor-id": _get_visitor_id()
+    }
+    data = None
+    if body is not None:
+        data = json.dumps(body).encode()
+        headers["content-type"] = "application/json"
+
+    # auto-load token if caller didn't pass one
+    if token is None:
+        try:
+            token = _get_or_create_auth_token()
+        except OSError:
+            token = None
+
+    use_auth = bool(token) and not _auth_rejected() and sign
+    if use_auth:
+        headers["authorization"] = f"Bearer {token}"
+        headers.update(_signed_headers(method, path, data, token))
+
+    def _do() -> tuple[int, dict | str]:
+        req = urllib.request.Request(url, data=data, method=method, headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                raw = r.read().decode("utf-8", errors="replace")
+                try:
+                    return r.status, json.loads(raw)
+                except json.JSONDecodeError:
+                    return r.status, raw
+        except urllib.error.HTTPError as e:
+            raw = e.read().decode("utf-8", errors="replace") if e.fp else ""
+            try:
+                return e.code, json.loads(raw)
+            except json.JSONDecodeError:
+                return e.code, raw
+        except (urllib.error.URLError, socket.timeout, ConnectionError) as e:
+            return 0, f"network error: {e}"
+
+    code, payload = _do()
+
+    # Graceful degrade: hub didn't like our auth headers → retry once unauthenticated
+    if use_auth and code in (401, 403):
+        _mark_auth_rejected(True)
+        headers.pop("authorization", None)
+        for h in ("X-Auth-Timestamp", "X-Auth-Nonce", "X-Auth-Signature"):
+            headers.pop(h, None)
+        log("hub rejected Authorization headers — falling back to legacy mode")
+        return _do()
+
+    return code, payload
+
+
+# ── pid management ─────────────────────────────────────────────────────
+def pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except (ProcessLookupError, PermissionError):
+        return pid > 0 and (Path(f"/proc/{pid}").exists() or _pid_alive_fallback(pid))
+
+def _pid_alive_fallback(pid: int) -> bool:
+    try:
+        subprocess.run(["kill", "-0", str(pid)], check=True, capture_output=True)
+        return True
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return False
+
+def read_pid() -> int | None:
+    if not PID_FILE.exists():
+        return None
+    try:
+        pid = int(PID_FILE.read_text().strip())
+    except ValueError:
+        return None
+    return pid if pid_alive(pid) else None
+
+
+# ── update helpers (atomic swap + rollback + healthcheck) ───────────────
+def _parse_ver(s) -> tuple:
+    """Parse '0.2.3' (or any string with embedded numbers) into (0,2,3).
+    Tolerant of prefixes/suffixes. Returns (0,) on empty/no-digits."""
+    if not s:
+        return (0,)
+    parts = re.findall(r"\d+", str(s))
+    return tuple(int(p) for p in parts[:3]) if parts else (0,)
+
+def _atomic_write(path: Path, data: bytes) -> None:
+    """Atomic write: tempfile + fsync + chmod + shutil.move into place."""
+    tmp = tempfile.NamedTemporaryFile("wb", delete=False, dir=str(path.parent))
+    try:
+        tmp.write(data)
+        tmp.flush()
+        os.fsync(tmp.fileno())
+        tmp.close()
+        os.chmod(tmp.name, 0o644)
+        shutil.move(tmp.name, path)
+    finally:
+        if os.path.exists(tmp.name):
+            try:
+                os.unlink(tmp.name)
+            except OSError:
+                pass
+
+def _apply_update(data: bytes, expected_sha256=None, source: str = "") -> tuple:
+    """Atomic swap with rollback. Returns (ok: bool, msg: str, target: Path).
+
+    Steps:
+      1. Verify SHA256 (if provided).
+      2. Backup current → <target>.bak (only if .bak doesn't already exist;
+         preserve the last known-good across re-attempts).
+      3. Write new → <target>.new.
+      4. Healthcheck: spawn `python3 <target>.new --healthcheck` (timeout 10s).
+         Exit 0 → atomic rename .new → target.
+         Non-zero / timeout → rename target → .bad, restore .bak → target.
+    Never raises.
+    """
+    target = INSTALL_DIR / f"{APP}-cli.py"
+    if not target.exists():
+        target = Path(__file__).resolve()
+    bak = target.with_suffix(target.suffix + ".bak")
+    bad = target.with_suffix(target.suffix + ".bad")
+    new = target.with_suffix(target.suffix + ".new")
+    try:
+        if expected_sha256:
+            actual = hashlib.sha256(data).hexdigest()
+            if actual.lower() != expected_sha256.lower():
+                return (False, f"sha256 mismatch (got {actual[:12]}…, want {expected_sha256[:12]}…)", target)
+        # Preserve the original good copy. Only create .bak on first apply
+        # (so re-attempts don't clobber a known-good with a known-bad).
+        if target.exists() and not bak.exists():
+            shutil.copy2(target, bak)
+        _atomic_write(new, data)
+        # Run healthcheck on the .new file (not the running binary).
+        proc = subprocess.run(
+            [sys.executable, str(new), "--healthcheck"],
+            capture_output=True, timeout=10,
+        )
+        if proc.returncode != 0:
+            # Preserve the FAILED new file as .bad for inspection.
+            try:
+                shutil.move(str(new), str(bad))
+            except OSError:
+                pass
+            # Restore the last good from .bak. target should never have been
+            # overwritten (new_data went to .new), but copy from .bak to be safe.
+            if bak.exists():
+                try:
+                    shutil.copy2(bak, target)
+                except OSError:
+                    pass
+            return (False, f"healthcheck failed (rc={proc.returncode}, source={source})", target)
+        os.replace(new, target)
+        return (True, f"applied (source={source})", target)
+    except Exception as e:
+        return (False, f"unexpected: {e}", target)
+
+def _http_get_bytes(url: str, timeout: float = 30.0) -> bytes:
+    """GET a URL and return raw bytes. Stdlib only; sets user-agent.
+    Resolves relative URLs (e.g. '/hivv-cli.py') against HUB."""
+    from urllib.parse import urljoin
+    full = url if "://" in url else urljoin(HUB.rstrip("/") + "/", url.lstrip("/"))
+    req = urllib.request.Request(full, headers={"user-agent": f"{APP}/{VERSION}"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return r.read()
+
+def _nag_if_behind() -> None:
+    """GET /api/version from the hub; print a colored one-liner if hub > local.
+    Never blocks; swallows all errors."""
+    try:
+        with urllib.request.urlopen(f"{HUB.rstrip('/')}/api/version", timeout=3) as r:
+            meta = json.loads(r.read())
+        hub_ver = meta.get("version") if isinstance(meta, dict) else None
+        if hub_ver and _parse_ver(hub_ver) > _parse_ver(VERSION):
+            sys.stderr.write(
+                f"\033[1;33m[{APP}]\033[0m hub v{hub_ver} is available "
+                f"(you're on v{VERSION}). run: \033[1;36m{APP} update\033[0m\n"
+            )
+    except Exception:
+        pass
+
+def _nag_if_update_available() -> None:
+    """Check if hub CLI differs from local; print a reminder if so.
+    Runs on bare `hivv` invocations. Never blocks; swallows all errors."""
+    target = INSTALL_DIR / f"{APP}-cli.py"
+    if not target.exists():
+        return
+    try:
+        req = urllib.request.Request(
+            f"{HUB.rstrip('/')}/{APP}-cli.py",
+            headers={"User-Agent": f"{APP}/{VERSION}"}
+        )
+        with urllib.request.urlopen(req, timeout=5) as r:
+            hub_data = r.read()
+        hub_sha = hashlib.sha256(hub_data).hexdigest()
+        local_sha = hashlib.sha256(target.read_bytes()).hexdigest()
+        if hub_sha != local_sha:
+            sys.stderr.write(
+                f"\033[1;33m[{APP}]\033[0m a new CLI is available "
+                f"(sha256 differs). run: \033[1;36m{APP} update\033[0m\n"
+            )
+    except Exception:
+        pass
+
+
+# ── local metrics ──────────────────────────────────────────────────────
+def _meminfo_kb() -> dict:
+    out = {}
+    try:
+        for line in Path("/proc/meminfo").read_text().splitlines():
+            k, _, v = line.partition(":")
+            out[k.strip()] = v.strip().split()[0]
+    except OSError:
+        pass
+    return out
+
+def _swapinfo_kb() -> dict:
+    if not Path("/proc/meminfo").exists():
+        return {}
+    m = _meminfo_kb()
+    return {"total": int(m.get("SwapTotal", "0")), "free": int(m.get("SwapFree", "0"))}
+
+def _disk(path: str) -> str:
+    try:
+        st = os.statvfs(path)
+        total = st.f_blocks * st.f_frsize
+        free  = st.f_bavail * st.f_frsize
+        used  = total - free
+        def h(b): return f"{b/1024/1024/1024:.1f}G"
+        return f"{h(used)}/{h(total)} ({(used*100/max(1,total)):.0f}%)"
+    except OSError:
+        return "?"
+
+def _process_rss_kb(pid: int) -> int | None:
+    try:
+        for line in Path(f"/proc/{pid}/status").read_text().splitlines():
+            if line.startswith("VmRSS:"):
+                return int(line.split()[1])
+    except OSError:
+        return None
+    return None
+
+def _local_ip() -> str | None:
+    """Return the machine's LAN IP (e.g. 192.168.1.100), or None if undetectable."""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.settimeout(1)
+        s.connect(("10.255.255.255", 1))  # doesn't actually send packets
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        pass
+    # Fallback: parse 'ip route' output
+    try:
+        r = subprocess.run(["ip", "route", "get", "1.1.1.1"],
+                           capture_output=True, text=True, timeout=3)
+        for word in r.stdout.split():
+            if word[0].isdigit() and "." in word:
+                return word
+    except Exception:
+        pass
+    return None
+
+def _cpu_model() -> str | None:
+    """Return the CPU model name string from /proc/cpuinfo, or None."""
+    try:
+        with open("/proc/cpuinfo") as f:
+            for line in f:
+                if line.startswith("model name"):
+                    return line.split(":", 1)[1].strip()
+                if line.startswith("Model"):
+                    return line.split(":", 1)[1].strip()
+    except OSError:
+        pass
+    return None
+
+# Cache location lookups to avoid hammering the geoIP API
+_location_cache: dict | None = None
+_location_cache_time: float = 0
+
+def _location_info() -> dict:
+    """Return {city, country, country_code, region, lat, lon, isp, org} via ip-api.com.
+    Cached for 1 hour. Returns {} if unavailable."""
+    global _location_cache, _location_cache_time
+    now = time.time()
+    if _location_cache is not None and (now - _location_cache_time) < 3600:
+        return _location_cache
+    try:
+        import json as _json
+        url = "http://ip-api.com/json/?fields=status,country,countryCode,regionName,city,lat,lon,isp,org"
+        r = subprocess.run(["curl", "-s", "--max-time", "5", url],
+                           capture_output=True, text=True, timeout=8)
+        if r.returncode == 0 and r.stdout.strip():
+            data = _json.loads(r.stdout)
+            if data.get("status") == "success":
+                _location_cache = {
+                    "city":     data.get("city", ""),
+                    "country":  data.get("country", ""),
+                    "country_code": data.get("countryCode", ""),
+                    "region":   data.get("regionName", ""),
+                    "lat":      data.get("lat"),
+                    "lon":      data.get("lon"),
+                    "isp":      data.get("isp", ""),
+                    "org":      data.get("org", ""),
+                }
+                _location_cache_time = now
+                return _location_cache
+    except Exception:
+        pass
+    return {}
+
+def _detect_local_ai() -> list[dict]:
+    """Detect running local AI servers (llama.cpp or ollama) and return model info."""
+    results = []
+    # Check llama.cpp server (default port 8080)
+    for port in (8080, 8081, 8082):
+        try:
+            import urllib.request
+            req = urllib.request.Request(f"http://localhost:{port}/v1/models",
+                                       headers={"User-Agent": f"{APP}/{VERSION}"})
+            with urllib.request.urlopen(req, timeout=3) as r:
+                data = json.loads(r.read())
+                for m in (data.get("data") or []):
+                    results.append({
+                        "provider": f"llama.cpp:{port}",
+                        "model": m.get("id", "unknown"),
+                        "loaded": True,
+                        "port": port
+                    })
+                break
+        except Exception:
+            pass
+    # Check ollama
+    try:
+        import urllib.request
+        req = urllib.request.Request("http://localhost:11434/api/tags",
+                                   headers={"User-Agent": f"{APP}/{VERSION}"})
+        with urllib.request.urlopen(req, timeout=3) as r:
+            data = json.loads(r.read())
+            for m in (data.get("models") or []):
+                results.append({
+                    "provider": "ollama",
+                    "model": m.get("name", "unknown"),
+                    "loaded": bool(m.get("size")),
+                    "port": 11434
+                })
+    except Exception:
+        pass
+    return results
+
+def _gpu_info(timeout: float = 3.0) -> list[dict]:
+    """Return [{index, name, mem_total_mb, mem_used_mb, util_pct, temp_c}] via nvidia-smi.
+    Empty list if no NVIDIA GPU or nvidia-smi missing. Never raises."""
+    try:
+        import subprocess
+        r = subprocess.run(
+            ["nvidia-smi",
+             "--query-gpu=index,name,memory.total,memory.used,utilization.gpu,temperature.gpu",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=timeout)
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return []
+    if r.returncode != 0 or not r.stdout.strip():
+        return []
+    gpus = []
+    for line in r.stdout.strip().splitlines():
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) < 6:
+            continue
+        try:
+            gpus.append({
+                "index": int(parts[0]),
+                "name": parts[1],
+                "mem_total_mb": int(parts[2]),
+                "mem_used_mb": int(parts[3]),
+                "util_pct": int(parts[4]),
+                "temp_c": int(parts[5]),
+            })
+        except ValueError:
+            continue
+    return gpus
+
+def _collect_metrics() -> dict:
+    """Single-pass snapshot of system state for the heartbeat payload.
+    Stdlib only. Missing fields are simply absent (hub should default sensibly)."""
+    m: dict = {"ts": int(time.time())}
+
+    # CPU: load average over 1/5/15 min, plus logical core count
+    try:
+        la = os.getloadavg()
+        m["load_1"], m["load_5"], m["load_15"] = (round(x, 2) for x in la)
+    except (OSError, AttributeError):
+        pass
+    try:
+        m["cpu_count"] = os.cpu_count()
+    except Exception:
+        pass
+
+    # Memory (from /proc/meminfo; MemAvailable is the kernel's "free + reclaimable")
+    try:
+        mi = _meminfo_kb()
+        total = int(mi.get("MemTotal", 0))
+        avail = int(mi.get("MemAvailable", 0))
+        if total:
+            m["mem_total_mb"] = total // 1024
+            m["mem_avail_mb"] = avail // 1024
+            m["mem_used_mb"] = (total - avail) // 1024
+            m["mem_pct"] = round((total - avail) * 100 / total, 1)
+        swap_total = int(mi.get("SwapTotal", 0))
+        swap_free = int(mi.get("SwapFree", 0))
+        if swap_total:
+            m["swap_total_mb"] = swap_total // 1024
+            m["swap_used_mb"] = (swap_total - swap_free) // 1024
+    except (OSError, ValueError):
+        pass
+
+    # Disk (root filesystem)
+    try:
+        st = os.statvfs("/")
+        total = st.f_blocks * st.f_frsize
+        free = st.f_bavail * st.f_frsize
+        if total:
+            m["disk_total_gb"] = round(total / 1024**3, 1)
+            m["disk_free_gb"] = round(free / 1024**3, 1)
+            m["disk_used_gb"] = round((total - free) / 1024**3, 1)
+            m["disk_pct"] = round((total - free) * 100 / total, 1)
+    except (OSError, AttributeError):
+        pass
+
+    # Uptime (Linux)
+    try:
+        with open("/proc/uptime") as f:
+            m["uptime_s"] = int(float(f.read().split()[0]))
+    except (OSError, ValueError, IndexError):
+        pass
+
+    # CPU model name
+    cpu_model = _cpu_model()
+    if cpu_model:
+        m["cpu_model"] = cpu_model
+
+    # LAN IP address
+    lan_ip = _local_ip()
+    if lan_ip:
+        m["lan_ip"] = lan_ip
+
+    # GPU (optional — empty list on boxes without nvidia-smi)
+    gpus = _gpu_info()
+    if gpus:
+        m["gpus"] = gpus
+        m["gpu_count"] = len(gpus)
+        m["gpu_mem_used_mb"] = sum(g["mem_used_mb"] for g in gpus)
+        m["gpu_util_pct"] = round(sum(g["util_pct"] for g in gpus) / len(gpus), 1)
+
+    # Location (city, country, region via geoIP — cached 1hr)
+    loc = _location_info()
+    if loc:
+        m["location"] = loc
+
+    return m
+
+def _print_metrics_local(m: dict) -> None:
+    """Pretty-print a metrics snapshot to stdout."""
+    def pct(v): return f"{v}%" if v is not None else "?"
+    def mb(v): return f"{v} MB" if v is not None else "?"
+    print(f"\033[1m{APP} bee metrics\033[0m — local snapshot (ts={m.get('ts')})")
+    cpu = m.get("cpu_count")
+    print(f"  cpu:    {cpu} cores   load: {m.get('load_1','?')} / {m.get('load_5','?')} / {m.get('load_15','?')}")
+    print(f"  mem:    {mb(m.get('mem_used_mb'))} / {mb(m.get('mem_total_mb'))} ({pct(m.get('mem_pct'))})")
+    if m.get("swap_total_mb"):
+        print(f"  swap:   {mb(m.get('swap_used_mb'))} / {mb(m.get('swap_total_mb'))}")
+    print(f"  disk:   {m.get('disk_used_gb','?')}G / {m.get('disk_total_gb','?')}G ({pct(m.get('disk_pct'))})")
+    if m.get("uptime_s") is not None:
+        up = m["uptime_s"]
+        days, rem = divmod(up, 86400)
+        hrs, rem = divmod(rem, 3600)
+        mins, _ = divmod(rem, 60)
+        print(f"  uptime: {days}d {hrs}h {mins}m ({up}s)")
+    gpus = m.get("gpus") or []
+    if gpus:
+        print(f"  gpus:   {len(gpus)}")
+        for g in gpus:
+            print(f"    [{g['index']}] {g['name']}  util={g['util_pct']}%  mem={g['mem_used_mb']}/{g['mem_total_mb']} MB  temp={g.get('temp_c','?')}°C")
+    else:
+        print(f"  gpus:   (none detected)")
+
+
+# ── agent: long-running daemon ─────────────────────────────────────────
+def cmd_agent(stop_event) -> None:
+    """The background agent — registers once, then heartbeats + inbox-polls."""
+    ensure_dirs()
+    PID_FILE.write_text(str(os.getpid()))
+    write_state({"started_at": int(time.time()), "pid": os.getpid(),
+                 "node_id": None, "last_heartbeat": None, "last_error": None,
+                 "transport": "heartbeat-only"})
+
+    log_path = LOG_FILE.open("a", buffering=1)
+    print(f"[{time.strftime('%H:%M:%S')}] agent started (pid={os.getpid()}, hub={HUB})", file=log_path)
+
+    def shutdown(*_a):
+        stop_event.set()
+    signal.signal(signal.SIGTERM, shutdown)
+    signal.signal(signal.SIGINT,  shutdown)
+
+    # Get/create per-install bearer token (Phase A)
+    try:
+        auth_token = _get_or_create_auth_token()
+    except OSError as e:
+        auth_token = None
+        print(f"[{time.strftime('%H:%M:%S')}] WARN could not create auth token: {e}", file=log_path)
+
+    # 1. register once on startup
+    hostname = socket.gethostname()
+    if not hostname or hostname in ("localhost", "localhost.localdomain"):
+        hostname = os.environ.get("USER", os.environ.get("USERNAME", "unknown"))
+    node_name = hostname.split(".")[0]  # short name, no domain suffix
+    hw_id = _machine_id()
+    # Use just hostname as node_id — simple and human. Only add hw_tag if hub
+    # already has this hostname (collision), in which case append short hw suffix.
+    stable_id = node_name.replace(".", "-").replace(" ", "_")
+    capabilities = ["heartbeat", "cli", "metrics", "signed-requests", "long-poll"]
+    metrics = _collect_metrics()
+    local_models = _detect_local_ai()
+    body = {"id": stable_id, "token": stable_id,
+            "hostname": hostname, "version": VERSION, "name": node_name,
+            "lan_ip": metrics.get("lan_ip") or "",
+            "location": metrics.get("location") or {},
+            "cpu_model": metrics.get("cpu_model") or "",
+            "capabilities": capabilities, "max_concurrent_jobs": 1,
+            "hw_id": hw_id, "auth_token": auth_token,
+            "client": f"{APP}/{VERSION}",
+            "metrics": metrics,
+            "local_models": local_models}
+    code, payload = http("POST", "/api/nodes/register", body=body)
+    st = read_state()
+    if code == 200 and isinstance(payload, dict):
+        nid = payload.get("node_id") or stable_id
+        st["node_id"] = nid
+        st["hw_id"] = hw_id
+        print(f"[{time.strftime('%H:%M:%S')}] registered as {nid} (hw={hw_id or 'soft'})", file=log_path)
+    else:
+        st["last_error"] = f"register failed: http {code}: {str(payload)[:200]}"
+        print(f"[{time.strftime('%H:%M:%S')}] register failed {code}: {str(payload)[:120]}", file=log_path)
+    write_state(st)
+
+    # 2. heartbeat + inbox-poll loop
+    inbox_supported = True   # optimistic; flipped off on 404
+    last_inbox_at = 0
+    while not stop_event.is_set():
+        node_id = (read_state() or {}).get("node_id")
+        # Track stats delta since last heartbeat
+        st = read_state() or {}
+        prev = st.get("_stats", {})
+        stats_delta = {
+            "tasks_completed": max(0, (st.get("tasks_completed") or 0) - (prev.get("tasks_completed") or 0)),
+            "tasks_failed": max(0, (st.get("tasks_failed") or 0) - (prev.get("tasks_failed") or 0)),
+            "total_tokens_processed": max(0, (st.get("tokens_processed") or 0) - (prev.get("tokens_processed") or 0)),
+            "total_requests": max(0, (st.get("local_requests") or 0) - (prev.get("local_requests") or 0)),
+            "total_cost": max(0, (st.get("local_cost") or 0.0) - (prev.get("local_cost") or 0.0)),
+        }
+        st["_stats"] = {
+            "tasks_completed": st.get("tasks_completed") or 0,
+            "tasks_failed": st.get("tasks_failed") or 0,
+            "tokens_processed": st.get("tokens_processed") or 0,
+            "local_requests": st.get("local_requests") or 0,
+            "local_cost": st.get("local_cost") or 0.0,
+        }
+        write_state(st)
+        if node_id:
+            code, payload = http("POST", f"/api/nodes/{node_id}/heartbeat",
+                                 body={"hostname": hostname, "version": VERSION,
+                                       "ts": int(time.time()),
+                                       "metrics": _collect_metrics(),
+                                       "local_models": _detect_local_ai(),
+                                       "stats": stats_delta})
+        else:
+            code, payload = http("POST", "/api/nodes/register", body=body)
+            if code == 200 and isinstance(payload, dict):
+                body["metrics"] = _collect_metrics()
+                st = read_state() or {}
+                st["node_id"] = payload.get("node_id") or stable_id
+                write_state(st)
+
+        st = read_state() or {}
+        st["last_heartbeat"] = int(time.time())
+        st["last_status"]    = code
+        if code == 200 and isinstance(payload, dict) and payload.get("node_id") and not st.get("node_id"):
+            st["node_id"] = payload["node_id"]
+        elif code and code >= 400:
+            st["last_error"] = f"http {code}: {str(payload)[:120]}"
+        elif code == 0:
+            st["last_error"] = str(payload)[:120]
+        write_state(st)
+        print(f"[{time.strftime('%H:%M:%S')}] hb={code} node={st.get('node_id')}", file=log_path)
+
+        # 3. inbox poll (long-poll) — gives the hub a way to push to us
+        #    without opening an inbound port.
+        if inbox_supported and node_id and code == 200:
+            wait_s = max(2, HEARTBEAT_S - 5)  # long-poll for up to HB-5 seconds
+            ic, ipayload = http("GET", f"/api/agents/{node_id}/inbox?wait={wait_s}",
+                                timeout=wait_s + 10)
+            last_inbox_at = int(time.time())
+            if ic == 404:
+                # hub doesn't have this endpoint yet → graceful degrade
+                inbox_supported = False
+                st["transport"] = "heartbeat-only"
+                write_state(st)
+                print(f"[{time.strftime('%H:%M:%S')}] inbox 404 → heartbeat-only mode", file=log_path)
+            elif ic == 200 and isinstance(ipayload, dict):
+                msgs = ipayload.get("messages") or []
+                if msgs:
+                    print(f"[{time.strftime('%H:%M:%S')}] inbox: {len(msgs)} message(s)", file=log_path)
+                    for msg in msgs:
+                        _dispatch_inbox_message(msg, st, log_path)
+                    st["transport"] = "long-poll"
+                else:
+                    st["transport"] = "long-poll"
+                write_state(st)
+            elif ic and ic >= 400:
+                # other error — log + try again next cycle
+                print(f"[{time.strftime('%H:%M:%S')}] inbox http {ic}: {str(ipayload)[:80]}", file=log_path)
+
+        # 4. interruptible sleep until next cycle (use remaining time after inbox)
+        elapsed = max(0, int(time.time()) - last_inbox_at) if last_inbox_at else 0
+        sleep_for = max(1, HEARTBEAT_S - elapsed)
+        if stop_event.wait(sleep_for):
+            break
+
+    print(f"[{time.strftime('%H:%M:%S')}] agent stopping", file=log_path)
+    log_path.close()
+    try:
+        PID_FILE.unlink()
+    except OSError:
+        pass
+
+
+def _dispatch_inbox_message(msg: dict, st: dict, log_path) -> None:
+    """Dispatch a single inbox message from the hub.
+
+    v1 handles: update_available, log, shutdown_requested. Anything else is
+    logged but ignored (so we can extend safely)."""
+    if not isinstance(msg, dict):
+        return
+    kind = msg.get("type") or msg.get("kind") or "unknown"
+    ts = time.strftime("%H:%M:%S")
+    payload = msg.get("payload") or msg.get("data") or {}
+    print(f"[{ts}] inbox[{kind}]: {str(payload)[:200]}", file=log_path)
+    log_path.flush()
+
+    if kind == "update_available":
+        new_ver = payload.get("version")
+        sha     = payload.get("sha256")
+        url     = payload.get("url") or f"{HUB.rstrip('/')}/{APP}-cli.py"
+        if new_ver and _parse_ver(new_ver) <= _parse_ver(VERSION):
+            print(f"[{ts}] update_available ignored: already on v{VERSION} or newer", file=log_path)
+        else:
+            try:
+                print(f"[{ts}] pulling new client from {url}…", file=log_path)
+                data = _http_get_bytes(url, timeout=30)
+                ok, msg, target = _apply_update(data, expected_sha256=sha, source="inbox")
+                print(f"[{ts}] {msg}", file=log_path)
+                if ok:
+                    print(f"[{ts}] updated → {target}; restarting agent", file=log_path)
+                    os.execv(sys.executable, [sys.executable, str(target)] + ["_agent"])
+                else:
+                    print(f"[{ts}] auto-update FAILED: {msg}", file=log_path)
+            except Exception as e:
+                print(f"[{ts}] auto-update exception: {e}", file=log_path)
+
+    elif kind == "shutdown_requested":
+        print(f"[{ts}] hub requested shutdown", file=log_path)
+        os.kill(os.getpid(), signal.SIGTERM)
+
+    elif kind == "log":
+        # the hub just wants us to record something (audit trail)
+        print(f"[{ts}] [hub-log] {payload}", file=log_path)
+
+    # unknown kinds: already logged above; future-extension hook.
+
+
+# ── command implementations ────────────────────────────────────────────
+def cmd_start(args) -> None:
+    _nag_if_behind()
+    if read_pid():
+        die(f"already running (pid={(read_pid())}) — try: {APP} restart")
+    ensure_dirs()
+    log_path = LOG_FILE.open("a")
+    proc = subprocess.Popen(
+        [sys.executable, __file__, "_agent"],
+        stdout=log_path, stderr=subprocess.STDOUT,
+        stdin=subprocess.DEVNULL, start_new_session=True,
+    )
+    PID_FILE.write_text(str(proc.pid))
+    ok(f"started (pid={proc.pid}, log={LOG_FILE})")
+    # give the agent a moment to register
+    for _ in range(20):
+        time.sleep(0.1)
+        st = read_state()
+        if st.get("node_id"):
+            ok(f"registered with {HUB_NAME} as node {st['node_id']}")
+            return
+    warn("registered heartbeat not yet received; check `hivv status` in a moment")
+
+def cmd_stop(args) -> None:
+    pid = read_pid()
+    if not pid:
+        die("not running")
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        die("process already gone")
+    # wait up to 5s
+    for _ in range(50):
+        if not pid_alive(pid):
+            break
+        time.sleep(0.1)
+    if pid_alive(pid):
+        warn("did not exit gracefully; sending SIGKILL")
+        try: os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError: pass
+    try: PID_FILE.unlink()
+    except OSError: pass
+    ok(f"stopped (was pid={pid})")
+
+def cmd_restart(args) -> None:
+    pid = read_pid()
+    if pid:
+        cmd_stop(args)
+    cmd_start(args)
+
+def cmd_status(args) -> None:
+    pid = read_pid()
+    st  = read_state()
+    print(f"  hub:           {HUB}")
+    print(f"  state:         {'online' if pid else 'stopped'}")
+    if pid:
+        print(f"  pid:           {pid}")
+        uptime_s = int(time.time()) - st.get("started_at", int(time.time()))
+        print(f"  uptime:        {uptime_s}s")
+        rss = _process_rss_kb(pid)
+        if rss:                       print(f"  rss:           {rss/1024:.1f} MB")
+        print(f"  node_id:       {st.get('node_id') or '(pending)'}")
+        print(f"  last_heartbeat:{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(st['last_heartbeat'])) if st.get('last_heartbeat') else '(none yet)'}")
+        print(f"  last_status:   {st.get('last_status', '?')}")
+        if st.get("last_error"):      print(f"  last_error:    {st['last_error']}")
+    code, payload = http("GET", "/api/health", timeout=5)
+    print(f"\n  {HUB_NAME} health: {code}", end="")
+    if code == 200 and isinstance(payload, dict):
+        print(f" — {payload.get('status', '?')}")
+        if payload.get('database') == 'connected':
+            print(f"    database: connected")
+        if payload.get('nodes_online'):
+            print(f"    nodes online: {payload['nodes_online']}")
+        if payload.get('providers'):
+            print(f"    AI providers: {payload['providers']} configured")
+    else:
+        print()
+
+def cmd_logs(args) -> None:
+    n = args.n or 50
+    if not LOG_FILE.exists():
+        die(f"no log file at {LOG_FILE} — start the agent first")
+    if args.follow:
+        # simple `tail -n N -f` substitute
+        with LOG_FILE.open() as f:
+            data = f.readlines()[-n:]
+            sys.stdout.write("".join(data)); sys.stdout.flush()
+            while True:
+                line = f.readline()
+                if not line:
+                    time.sleep(0.2); continue
+                sys.stdout.write(line); sys.stdout.flush()
+    else:
+        # tail -n
+        with LOG_FILE.open("rb") as f:
+            try: f.seek(0, os.SEEK_END); size = f.tell()
+            except OSError: size = 0
+            f.seek(max(0, size - 64*1024))
+            data = f.read().decode("utf-8", errors="replace")
+        sys.stdout.write("\n".join(data.splitlines()[-n:]) + "\n")
+
+def cmd_free(args) -> None:
+    print(f"  hub:           {HUB}")
+    mi = _meminfo_kb()
+    if mi:
+        total = int(mi.get("MemTotal", 0)); free = int(mi.get("MemAvailable", mi.get("MemFree", 0))); used = total - free
+        print(f"  mem:           {used/1024/1024:.1f}G used / {total/1024/1024:.1f}G total ({free/1024/1024:.1f}G avail)")
+        sw = _swapinfo_kb()
+        if sw["total"]:
+            print(f"  swap:          {(sw['total']-sw['free'])/1024/1024:.1f}G used / {sw['total']/1024/1024:.1f}G total")
+    print(f"  disk (~):      {_disk(str(STATE_DIR))}  on {STATE_DIR}")
+    pid = read_pid()
+    print(f"\n  agent:         {'running (pid '+str(pid)+')' if pid else 'stopped'}")
+    if pid:
+        rss = _process_rss_kb(pid)
+        if rss: print(f"  rss:           {rss/1024:.1f} MB")
+
+def cmd_pct(args) -> None:
+    # simple in-process sampling
+    def sample():
+        pid = read_pid()
+        if not pid:
+            return f"{time.strftime('%H:%M:%S')}  hivv:  not running"
+        rss = _process_rss_kb(pid) or 0
+        # CPU%: read /proc/PID/stat utime+stime once; on a busy box this is just
+        # a hint — good enough for a status line.
+        try:
+            with open(f"/proc/{pid}/stat"): pass
+            cpu_pct = _quick_cpu_pct(pid)
+        except OSError:
+            cpu_pct = 0.0
+        return f"{time.strftime('%H:%M:%S')}  hivv:  cpu={cpu_pct:5.1f}%  mem={rss/1024:6.1f}MB  pid={pid}"
+    if args.watch <= 0:
+        print(sample()); return
+    try:
+        while True:
+            print(sample(), flush=True)
+            time.sleep(args.watch)
+    except KeyboardInterrupt:
+        return
+
+def _quick_cpu_pct(pid: int) -> float:
+    """Instantaneous CPU% using /proc/PID/stat and /proc/stat."""
+    try:
+        with open(f"/proc/{pid}/stat") as f: s = f.read().split()
+        with open("/proc/stat")     as f: t = f.readline().split()
+        proc_j = int(s[13]) + int(s[14])
+        tot_j  = sum(int(x) for x in t[1:])
+        return max(0.0, min(100.0, proc_j / max(1, tot_j) * 100))
+    except (OSError, ValueError, IndexError):
+        return 0.0
+
+def cmd_ping(args) -> None:
+    """Ping the hub — measure round-trip latency."""
+    start = time.time()
+    code, payload = http("GET", "/api/health", timeout=10)
+    elapsed_ms = (time.time() - start) * 1000
+    if code == 200:
+        ok(f"hub alive — {elapsed_ms:.0f}ms")
+    else:
+        die(f"hub unreachable (HTTP {code}) after {elapsed_ms:.0f}ms")
+
+TOOLS_PORT = 18789
+TOOLS_PID_FILE = Path.home() / ".local/share/hivv/tools.pid"
+
+def _tools_running() -> bool:
+    """Check if hivv-tools server is running on TOOLS_PORT."""
+    pid_file = TOOLS_PID_FILE
+    if pid_file.exists():
+        try:
+            pid = int(pid_file.read_text().strip())
+            if pid == os.getpid():
+                return True
+            os.kill(pid, 0)
+            return True
+        except (ValueError, OSError):
+            pass
+    # Fallback: check if port is open
+    try:
+        with socket.create_connection(("localhost", TOOLS_PORT), timeout=1):
+            return True
+    except OSError:
+        pass
+    return False
+
+def cmd_tools(args) -> None:
+    """Manage the local hivv-tools server (time, calculate, fetch, search, sysinfo).
+    These tools run on YOUR computer — others on the hive can use them!"""
+    tool_script = INSTALL_DIR / f"{APP}-tools.py"
+    if not tool_script.exists():
+        print(f"[{APP}] tools server not installed — downloading...")
+        try:
+            data = _http_get_bytes(f"{HUB}/{APP}-tools.py")
+            tool_script.write_bytes(data)
+            tool_script.chmod(0o755)
+        except Exception as e:
+            die(f"download failed: {e}")
+
+    if args.action == "status":
+        if _tools_running():
+            pid_file = TOOLS_PID_FILE
+            pid = int(pid_file.read_text().strip()) if pid_file.exists() else "?"
+            print(f"[{APP}] tools server running on port {TOOLS_PORT} (PID {pid})")
+            try:
+                with socket.create_connection(("localhost", TOOLS_PORT), timeout=2) as s:
+                    import urllib.request
+                    with urllib.request.urlopen(f"http://localhost:{TOOLS_PORT}/tools", timeout=3) as r:
+                        data = json.loads(r.read())
+                        print(f"[{APP}] available tools: {', '.join(data.get('tools', []))}")
+            except Exception as e:
+                print(f"[{APP}] health check: {e}")
+        else:
+            print(f"[{APP}] tools server not running")
+        return
+
+    if args.action == "list":
+        print(f"\n\033[1m{APP} tools — available on this machine\033[0m")
+        if _tools_running():
+            try:
+                with socket.create_connection(("localhost", TOOLS_PORT), timeout=2):
+                    import urllib.request
+                    with urllib.request.urlopen(f"http://localhost:{TOOLS_PORT}/tools", timeout=3) as r:
+                        data = json.loads(r.read())
+                        tools = data.get("tools", [])
+                        print(f"  \033[32mlocal\033[0m  {', '.join(tools)}  (you)")
+            except Exception as e:
+                print(f"  \033[31mcould not reach local tools server: {e}\033[0m")
+        else:
+            print(f"  \033[2mlocal  (not running — run: hivv tools on)\033[0m")
+
+        print(f"\n\033[1m{APP} tools — available on the hive\033[0m")
+        code, resp = http("GET", "/api/tools", timeout=5, sign=False)
+        if code == 200 and isinstance(resp, dict):
+            nodes = resp.get("nodes", [])
+            if nodes:
+                for n in nodes:
+                    tools = n.get("tools", [])
+                    name = n.get("name", n.get("node_id", "?"))
+                    ip = n.get("lan_ip", n.get("ip", "?"))
+                    loc_city = n.get("location", {}).get("city", "?")
+                    print(f"  \033[33m{loc_city}\033[0m  {', '.join(tools)}  ({name}@{ip})")
+            else:
+                print(f"  \033[2m  no tools shared on the hive yet\033[0m")
+                print(f"  \033[2m  → hivv tools on && hivv tools share\033[0m to share yours")
+        else:
+            print(f"  \033[31mcould not reach hub: HTTP {code}\033[0m")
+        print()
+        return
+
+    if args.action == "on":
+        if _tools_running():
+            print(f"[{APP}] tools server already running")
+        else:
+            print(f"[{APP}] starting tools server on port {TOOLS_PORT}...")
+            subprocess.Popen([sys.executable, str(tool_script), "start"],
+                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            time.sleep(1)
+            if _tools_running():
+                ok(f"tools server live on http://localhost:{TOOLS_PORT}")
+                print(f"[{APP}] others on the hive can now use your tools!")
+            else:
+                die("failed to start tools server")
+        return
+
+    if args.action == "off":
+        pid_file = TOOLS_PID_FILE
+        if pid_file.exists():
+            try:
+                pid = int(pid_file.read_text().strip())
+                os.kill(pid, 15)
+            except OSError: pass
+            try: pid_file.unlink()
+            except OSError: pass
+        ok("tools server stopped")
+        return
+
+    if args.action == "share":
+        # Announce tools availability to hub
+        if not _tools_running():
+            die("tools server not running — run: hivv tools on")
+        try:
+            import urllib.request
+            with urllib.request.urlopen(f"http://localhost:{TOOLS_PORT}/tools", timeout=3) as r:
+                data = json.loads(r.read())
+                tools = data.get("tools", [])
+        except Exception as e:
+            die(f"could not reach tools server: {e}")
+        st = read_state()
+        node_id = st.get("node_id")
+        if not node_id:
+            die("node not registered — run: hivv start")
+        code, resp = http("POST", f"/api/nodes/{node_id}/tools",
+                         body={"tools": tools, "port": TOOLS_PORT})
+        if code == 200:
+            ok(f"tools {tools} shared with hive")
+        else:
+            die(f"failed to share tools (HTTP {code})")
+        return
+
+    print(f"\033[1m{APP} tools\033[0m — local server for the hive")
+    print(f"  port:   {TOOLS_PORT}")
+    print(f"  status: {'running' if _tools_running() else 'stopped'}")
+    print()
+    print(f"  {APP} tools on       — start the tools server")
+    print(f"  {APP} tools off      — stop the tools server")
+    print(f"  {APP} tools status   — check if running")
+    print(f"  {APP} tools share   — announce your tools to the hive")
+    print()
+    print(f"  Available tools: time, calculate, fetch, search, sysinfo")
+    print(f"  Other bees can use your computer's tools!")
+
+def cmd_call(args) -> None:
+    """Invoke a tool through the hive (no local LLM needed).
+    hivv call time
+    hivv call time --tz=America/New_York
+    hivv call calculate --expr="2+2"
+    hivv call fetch --url=https://example.com
+    hivv call search --q="weather"
+    hivv call sysinfo
+    """
+    tool = args.tool
+    params = {}
+    if args.tz:
+        params["tz"] = args.tz
+    if args.expr:
+        params["expr"] = args.expr
+    if args.url:
+        params["url"] = args.url
+    if args.q:
+        params["q"] = args.q
+
+    query = "&".join(f"{k}={urllib.parse.quote(str(v))}" for k, v in params.items())
+    path = f"/api/tools/{tool}/invoke" + (f"?{query}" if query else "")
+    code, resp = http("GET", path, timeout=15, sign=False)
+    if code == 200:
+        data = resp if isinstance(resp, dict) else {}
+        if tool == "sysinfo":
+            _print_sysinfo(data)
+        elif tool == "time":
+            print(f"{data.get('time', '')}  (node: {data.get('node', '?')})")
+        elif tool == "calculate":
+            print(f"{data.get('result', data)}  (node: {data.get('node', '?')})")
+        else:
+            print(json.dumps(data, indent=2) if isinstance(data, (dict, list)) else data)
+    elif code == 404:
+        die(f"tool '{tool}' is not available — no bee on the hive is sharing it yet\n"
+            f"  → ask a bee with tools to run: hivv tools on && hivv tools share")
+    else:
+        die(f"tool call failed (HTTP {code}): {resp}")
+
+def _print_sysinfo(data: dict) -> None:
+    if not data:
+        die("sysinfo returned no data")
+    print(f"  node:        {data.get('node', data.get('provider', '?'))}")
+    for k in ("cpu_model", "cpu_count", "cpu_percent", "memory_total_gb",
+              "memory_free_gb", "memory_used_gb", "swap_total_gb", "swap_free_gb",
+              "disk_total_gb", "disk_free_gb", "uptime_days", "loadavg"):
+        v = data.get(k)
+        if v is not None:
+            print(f"  {k:<20} {v}")
+
+def _volunteer_load() -> dict:
+    try:
+        return json.loads(_VOLUNTEER_FILE.read_text())
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+def _hms(seconds: int) -> str:
+    d, s = divmod(seconds, 86400); h, s = divmod(s, 3600); m, s = divmod(s, 60)
+    return f"{d}d {h}h {m}m" if d else f"{h}h {m}m {s}s"
+
+def cmd_donate(args) -> None:
+    """Run a system diagnostic and get personalized recommendations on what
+    you can donate to the hivv network (compute, tools, bandwidth, or all three)."""
+    print(f"\n\033[1m╭── hivv donate ── system diagnostic ─────────────────\033[0m\033[0m\n")
+
+    m = _collect_metrics()
+    gpus = m.get("gpus", [])
+    tools_ok = _tools_running()
+    vol = _volunteer_load()
+    vol_on = bool(vol.get("share_cpu"))
+
+    # ── hardware ──
+    cpu = m.get("cpu_model") or "unknown CPU"
+    cores = m.get("cpu_count") or 0
+    load = m.get("load_1") or 0.0
+    mem_total = round(m.get("mem_total_mb", 0) / 1024, 1)
+    mem_avail = round(m.get("mem_avail_mb", 0) / 1024, 1)
+    mem_used_pct = m.get("mem_pct") or 0
+    disk_free = m.get("disk_free_gb") or 0
+    uptime_s = m.get("uptime_s") or 0
+    loc = m.get("location") or {}
+    location_str = f"{loc.get('city', '')}, {loc.get('country', '')}" if loc else "unknown"
+
+    print(f"  \033[1mHardware\033[0m")
+    print(f"    CPU:       {cpu}  ({cores} cores, load {load})")
+    print(f"    RAM:       {mem_total}GB total, ~{mem_avail}GB free ({100-mem_used_pct:.0f}% available)")
+    print(f"    Disk:      ~{disk_free}GB free on root")
+    if gpus:
+        for g in gpus:
+            mem_free_gb = round((g["mem_total_mb"] - g["mem_used_mb"]) / 1024, 1)
+            print(f"    GPU:       {g['name']}  {mem_free_gb}GB / {round(g['mem_total_mb']/1024,1)}GB free  ({g['util_pct']}% busy, {g['temp_c']}°C)")
+    else:
+        print(f"    GPU:       none detected (NVIDIA only)")
+    print(f"    Location:  {location_str}")
+    print(f"    Uptime:   {_hms(uptime_s)}")
+    print()
+
+    # ── current contributions ──
+    vol_label = f"\033[32m✓ volunteering\033[0m" if vol_on else f"\033[2mnot volunteering\033[0m  (run: hivv volunteer on)"
+    tools_label = f"\033[32m✓ sharing\033[0m  (port 18789)" if tools_ok else f"\033[2mnot sharing\033[0m  (run: hivv tools on)"
+    print(f"  \033[1mCurrent contributions\033[0m")
+    print(f"    compute:   {vol_label}")
+    print(f"    tools:     {tools_label}")
+    print()
+
+    # ── recommendations ──
+    print(f"  \033[1mRecommendations for you\033[0m\n")
+
+    can_do_tools = not tools_ok
+    can_do_compute = not vol_on
+    suggestions = []
+
+    # Tools assessment
+    if tools_ok:
+        suggestions.append(("tools", "share your tool server",
+            f"  \033[32m→ hivv tools share\033[0m  (you already have the server running!)"))
+    else:
+        suggestions.append(("tools", "run a tool server",
+            f"  \033[36m→ hivv tools on && hivv tools share\033[0m\n"
+            f"    Your computer would handle: time, calculate, fetch, search, sysinfo\n"
+            f"    for other users who don't have an LLM. Zero compute cost to you."))
+
+    # Compute assessment
+    if vol_on:
+        suggestions.append(("compute", "keep volunteering compute", "  \033[32m✓ already a volunteer bee!\033[0m"))
+    else:
+        load_ok = load < cores * 0.7
+        mem_ok = mem_avail >= 4
+        if load_ok and mem_ok:
+            suggestions.append(("compute", "donate idle CPU cycles",
+                f"  \033[36m→ hivv volunteer on\033[0m\n"
+                f"    Your box is plenty idle (load {load} < {cores*0.7:.1f}) with ~{mem_avail}GB RAM free.\n"
+                f"    The hive can use your CPU for inference tasks while you sleep."))
+        elif not load_ok:
+            suggestions.append(("compute", "your CPU is busy right now",
+                f"  \033[2m→ load is {load} (> {cores*0.7:.1f} threshold); re-run when idle\033[0m"))
+        elif not mem_ok:
+            suggestions.append(("compute", "not enough free RAM to volunteer",
+                f"  \033[2m→ only ~{mem_avail}GB free; need ~4GB headroom for LLM tasks\033[0m"))
+
+    # GPU assessment
+    if gpus:
+        for g in gpus:
+            mem_free_gb = (g["mem_total_mb"] - g["mem_used_mb"]) / 1024
+            if mem_free_gb >= 4:
+                suggestions.append(("gpu", f"donate your {g['name']} GPU",
+                    f"  \033[36m→ hivv volunteer on\033[0m  (GPU compute is especially valuable to the hive)"))
+            else:
+                suggestions.append(("gpu", f"GPU has only {mem_free_gb:.1f}GB free",
+                    f"  \033[2m→ not enough free GPU memory to run inference tasks\033[0m"))
+
+    for tag, title, detail in suggestions:
+        print(f"  {detail}")
+
+    print()
+    if not any("✓" in detail for _, _, detail in suggestions):
+        print(f"  \033[1mQuick start:\033[0m  \033[36mhivv tools on && hivv tools share\033[0m  +  \033[36mhivv volunteer on\033[0m")
+    print(f"\n\033[1m╰──────────────────────────────────────────────────\033[0m\033[0m\n")
+
+def cmd_info(args) -> None:
+    _nag_if_behind()
+    print(f"\033[1m{APP} info\033[0m — {VERSION}  (hub: {HUB})")
+    st = read_state()
+
+    # Hub health
+    code, payload = http("GET", "/api/health", timeout=5)
+    print(f"\n  hub:           {HUB} [{code}]")
+    if code == 200 and isinstance(payload, dict):
+        print(f"    status:       {payload.get('status','?')}")
+        print(f"    nodes online: {payload.get('nodes_online','?')}")
+        print(f"    AI providers: {payload.get('providers','?')}")
+
+    # Local hardware
+    m = _collect_metrics()
+    print(f"\n  \033[1mhardware\033[0m")
+    if m.get("cpu_model"):   print(f"    cpu:         {m['cpu_model']}")
+    print(f"    cores:       {m.get('cpu_count','?')} logical")
+    if m.get("load_1") is not None:
+        print(f"    load:        {m['load_1']} / {m.get('load_5','?')} / {m.get('load_15','?')}")
+    print(f"    mem:         {m.get('mem_used_mb','?')} / {m.get('mem_total_mb','?')} MB ({m.get('mem_pct','?')}%)")
+    if m.get("swap_total_mb"):
+        print(f"    swap:        {m.get('swap_used_mb','?')} / {m.get('swap_total_mb','?')} MB")
+    print(f"    disk:        {m.get('disk_used_gb','?')} / {m.get('disk_total_gb','?')} GB ({m.get('disk_pct','?')}%)")
+    if m.get("gpus"):
+        for g in m["gpus"]:
+            print(f"    gpu:         {g['name']}  {g['mem_used_mb']}/{g['mem_total_mb']} MB  {g['util_pct']}% util  {g['temp_c']}°C")
+    else:
+        print(f"    gpu:         none detected (or no nvidia-smi)")
+    if m.get("lan_ip"):      print(f"    lan_ip:      {m['lan_ip']}")
+    if m.get("location"):
+        loc = m["location"]
+        print(f"    location:    {loc.get('city','?')}, {loc.get('country','?')} ({loc.get('region','?')})")
+        print(f"    isp:         {loc.get('isp','?')}")
+    if m.get("uptime_s"):
+        up = m["uptime_s"]
+        days, rem = divmod(up, 86400)
+        hrs, rem = divmod(rem, 3600)
+        mins = rem // 60
+        print(f"    uptime:      {days}d {hrs}h {mins}m")
+
+    # Install paths
+    print(f"\n  \033[1minstall\033[0m")
+    print(f"    cli:         {INSTALL_DIR / (APP + '-cli.py')}")
+    print(f"    wrapper:     {BIN_DIR / APP}")
+    print(f"    config:      {CONFIG_FILE}")
+    print(f"    state:       {STATE_DIR}")
+    print(f"    log:         {LOG_FILE}")
+    print(f"    pid:         {PID_FILE}")
+
+    # Agent state
+    print(f"\n  \033[1magent\033[0m")
+    pid = read_pid()
+    print(f"    state:       {'online' if pid else 'stopped'}")
+    if pid: print(f"    pid:         {pid}")
+    print(f"    node_id:     {st.get('node_id') or '(pending)'}")
+    print(f"    hw_id:       {_machine_id() or '(unavailable)'}")
+    print(f"    auth_token:  {'set' if AUTH_FILE.exists() else 'NOT SET'}")
+    print(f"    transport:   {st.get('transport', 'heartbeat-only')}  {'(2-way active)' if st.get('transport') == 'long-poll' else '(1-way)'}")
+    if st.get("last_heartbeat"):
+        print(f"    last_hb:    {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(st['last_heartbeat']))}")
+
+def cmd_update(args) -> None:
+    url = getattr(args, "from_url", None) or f"{HUB.rstrip('/')}/hivv-cli.py"
+    sha = getattr(args, "sha256", None)
+    target = INSTALL_DIR / f"{APP}-cli.py"
+    if not target.exists():
+        target = Path(__file__).resolve()
+    try:
+        data = _http_get_bytes(url, timeout=30)
+    except Exception as e:
+        die(f"download failed: {e}")
+    remote_sha = hashlib.sha256(data).hexdigest()
+    if target.exists():
+        local_sha = hashlib.sha256(target.read_bytes()).hexdigest()
+        if local_sha == remote_sha:
+            ok(f"already up to date — version {VERSION} (sha256 unchanged)")
+            return
+    log(f"fetching {url}")
+    update_ok, msg, target = _apply_update(data, expected_sha256=sha, source="cli")
+    if not update_ok:
+        die(msg, code=20)
+    ok(f"{msg} → {target}")
+    if read_pid():
+        log("restarting agent to pick up new code")
+        cmd_stop(args); cmd_start(args)
+
+def cmd_uninstall(args) -> None:
+    pid = read_pid()
+    if pid: cmd_stop(args)
+    for f in (PID_FILE,):
+        try: f.unlink()
+        except OSError: pass
+    # remove install but KEEP config + log
+    for p in (INSTALL_DIR / f"{APP}-cli.py", BIN_DIR / APP):
+        try:
+            if p.exists(): p.unlink(); log(f"removed {p}")
+        except OSError as e:
+            warn(f"could not remove {p}: {e}")
+    ok(f"uninstalled (kept config: {CONFIG_DIR}, logs: {STATE_DIR})")
+
+# ── one-shot commands ──────────────────────────────────────────────────
+def cmd_health(args) -> None:
+    code, p = http("GET", "/api/health")
+    print(json.dumps(p, indent=2) if isinstance(p, (dict, list)) else p)
+    sys.exit(0 if code == 200 else 2)
+
+def cmd_metrics(args) -> None:
+    if getattr(args, "local", False):
+        _print_metrics_local(_collect_metrics())
+        return
+    code, p = http("GET", "/api/control/metrics/global")
+    print(json.dumps(p, indent=2) if isinstance(p, (dict, list)) else p)
+    sys.exit(0 if code == 200 else 2)
+
+def cmd_nodes(args) -> None:
+    code, p = http("GET", "/api/control/nodes")
+    print(json.dumps(p, indent=2) if isinstance(p, (dict, list)) else p)
+    sys.exit(0 if code == 200 else 2)
+
+def cmd_chat(args) -> None:
+    msg = " ".join(args.message)
+    if not msg: die("chat needs a message (hivv chat 'hello')")
+    _do_chat(msg, stream=True)
+
+def _do_chat(msg: str, stream: bool = True) -> None:
+    """Talk to hivv.org. Streams SSE chunks as they arrive when stream=True,
+    otherwise buffers the whole response and prints the assembled reply.
+    Retries once on 429 (rate limit) with backoff."""
+    if not stream:
+        code, p = http("POST", "/api/chat", body={"message": msg})
+        if isinstance(p, dict):
+            for k in ("reply", "response", "text", "content", "message"):
+                if k in p:
+                    print(p[k]); return
+        print(json.dumps(p, indent=2) if isinstance(p, (dict, list)) else p)
+        return
+
+    # Streaming path with retry on 429
+    url = HUB.rstrip("/") + "/api/chat"
+    max_retries = 2
+    for attempt in range(max_retries + 1):
+        req = urllib.request.Request(url, data=json.dumps({"message": msg}).encode(),
+                                     method="POST",
+                                     headers={"content-type": "application/json",
+                                              "accept": "text/event-stream",
+                                              "user-agent": f"{APP}/{VERSION}",
+                                              "x-visitor-id": _get_visitor_id()})
+        try:
+            with urllib.request.urlopen(req, timeout=60) as r:
+                buf = b""
+                while True:
+                    chunk = r.read(4096)
+                    if not chunk:
+                        break
+                    buf += chunk
+                    while b"\n" in buf:
+                        line, buf = buf.split(b"\n", 1)
+                        line_str = line.decode("utf-8", errors="replace").rstrip("\r\n")
+                        if not line_str or line_str.startswith(":"):
+                            continue
+                        if line_str.startswith("data:"):
+                            payload = line_str[5:].strip()
+                            if payload in ("[DONE]", ""):
+                                print(); return
+                            try:
+                                evt = json.loads(payload)
+                                choices = evt.get("choices") or []
+                                if choices:
+                                    delta = choices[0].get("delta") or {}
+                                    content = delta.get("content")
+                                    if content:
+                                        sys.stdout.write(content); sys.stdout.flush()
+                            except json.JSONDecodeError:
+                                sys.stdout.write(payload); sys.stdout.flush()
+                print()
+                return  # Success
+        except urllib.error.HTTPError as e:
+            body = e.read().decode("utf-8", errors="replace") if e.fp else ""
+            if e.code == 429:
+                retry_after = e.headers.get("Retry-After") or "5"
+                wait_s = int(retry_after) if retry_after.isdigit() else 3
+                if attempt < max_retries:
+                    sys.stderr.write(f"[{APP}] rate limited — waiting {wait_s}s before retry...\n")
+                    time.sleep(wait_s)
+                    continue
+                die(f"rate limited — hub is busy. wait {retry_after}s and try again")
+            die(f"chat http {e.code}: {body[:200]}")
+        except (urllib.error.URLError, socket.timeout, ConnectionError, OSError) as e:
+            die(f"chat network: {e}")
+
+def cmd_completions(args) -> None:
+    msg = " ".join(args.message)
+    if not msg: die("completions needs a prompt (hivv completions 'hello')")
+    code, p = http("POST", "/v1/chat/completions",
+                   body={"model": "hivv", "messages": [{"role": "user", "content": msg}], "stream": False})
+    if isinstance(p, dict):
+        try:
+            print(p["choices"][0]["message"]["content"])
+            sys.exit(0 if code == 200 else 2)
+        except (KeyError, IndexError, TypeError):
+            pass
+    print(json.dumps(p, indent=2) if isinstance(p, (dict, list)) else p)
+    sys.exit(0 if code == 200 else 2)
+
+def cmd_whoami(args) -> None:
+    code, p = http("GET", "/api/control/health", timeout=5)
+    print(f"hub={HUB}  status={code}  payload={p}")
+    sys.exit(0 if code == 200 else 2)
+
+def _ok(s): return f"\033[32m✓\033[0m {s}"
+def _warn(s): return f"\033[33m!\033[0m {s}"
+def _fail(s): return f"\033[31m✗\033[0m {s}"
+
+def cmd_doctor(args) -> None:
+    """One-glance health report: install + hub + agent + local bee + version.
+    Output is pasteable for support — pure text + ANSI colors only."""
+    print(f"\033[1m{APP} doctor\033[0m — {time.strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"hub = {HUB}   client = {VERSION}")
+
+    # --- install -----------------------------------------------------------
+    print("\n\033[1minstall\033[0m")
+    bin_path = Path(__file__).resolve()
+    print(f"  wrapper:  {BIN_DIR / APP}   " + (_ok("exists") if (BIN_DIR / APP).exists() else _fail("MISSING")))
+    print(f"  client:   {bin_path}   " + (_ok("exists") if bin_path.exists() else _fail("MISSING")))
+    cfg = Path.home() / ".config" / APP
+    st  = Path.home() / ".local" / "share" / APP
+    print(f"  config:   {cfg}   " + (_ok("exists") if cfg.exists() else _warn("missing (will be created on first run)")))
+    print(f"  state:    {st}   " + (_ok("exists") if st.exists() else _warn("missing")))
+
+    # --- hub ---------------------------------------------------------------
+    print("\n\033[1mhub\033[0m")
+    try:
+        t0 = time.time()
+        code, p = http("GET", "/api/health", timeout=5)
+        ms = int((time.time() - t0) * 1000)
+        if code == 200:
+            providers = (p or {}).get("providers", "?") if isinstance(p, dict) else "?"
+            print(f"  {_ok(f'{HUB} reachable ({ms}ms)')}   providers online: {providers}")
+        else:
+            print(f"  {_fail(f'{HUB} returned HTTP {code}')}")
+    except Exception as e:
+        print(f"  {_fail(f'{HUB} unreachable: {e}')}")
+
+    # --- agent -------------------------------------------------------------
+    print("\n\033[1magent\033[0m")
+    pid = read_pid()
+    if pid and _pid_alive_fallback(pid):
+        st_data = read_state() or {}
+        nid = st_data.get("node_id") or "?"
+        hb = st_data.get("last_heartbeat") or 0
+        hb_age = int(time.time()) - hb if hb else -1
+        hb_str = f"{hb_age}s ago" if hb_age >= 0 else "never"
+        hb_ok = hb_age >= 0 and hb_age < 120
+        print(f"  {_ok(f'running (pid {pid}, node {nid})')}   last heartbeat: {hb_str}")
+    else:
+        print(f"  {_warn('not running')}   start with `{APP} start`")
+
+    # --- local bee ---------------------------------------------------------
+    print("\n\033[1mlocal bee\033[0m")
+    m = _collect_metrics()
+    cpu_str = f"{m.get('cpu_count','?')} cores, load {m.get('load_1','?')}/{m.get('load_5','?')}/{m.get('load_15','?')}"
+    mem_str = f"{m.get('mem_used_mb','?')}/{m.get('mem_total_mb','?')} MB ({m.get('mem_pct','?')}%)"
+    disk_str = f"{m.get('disk_used_gb','?')}/{m.get('disk_total_gb','?')} GB ({m.get('disk_pct','?')}%)"
+    print(f"  cpu:  {cpu_str}")
+    print(f"  mem:  {mem_str}")
+    print(f"  disk: {disk_str}")
+    gpus = m.get("gpus") or []
+    if gpus:
+        for g in gpus:
+            print(f"  gpu:  [{g['index']}] {g['name']}  util={g['util_pct']}%  mem={g['mem_used_mb']}/{g['mem_total_mb']} MB  temp={g.get('temp_c','?')}°C")
+    else:
+        print(f"  gpu:  (none detected — nvidia-smi missing or no NVIDIA GPU)")
+
+    # --- update check ------------------------------------------------------
+    print("\n\033[1mupdate\033[0m")
+    try:
+        req = urllib.request.Request(f"{HUB.rstrip('/')}/{APP}-cli.py", headers={"user-agent": f"{APP}/{VERSION}"})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            data = r.read().decode("utf-8", errors="replace")
+        # crude version sniff — pull the first `VERSION   = "x.y.z"` line
+        import re as _re
+        match = _re.search(r'VERSION\s*=\s*"([^"]+)"', data)
+        hub_ver = match.group(1) if match else "unknown"
+        if hub_ver == VERSION:
+            print(f"  {_ok(f'up to date (client {VERSION} = hub {hub_ver})')}")
+        else:
+            arrow = "↑ newer on hub" if hub_ver > VERSION else "↓ local is newer"
+            print(f"  {_warn(f'client {VERSION} vs hub {hub_ver}')}   {arrow}   run `{APP} update`")
+    except Exception as e:
+        print(f"  {_warn(f'could not check hub version: {e}')}")
+
+    print()  # trailing newline
+
+def cmd_up(args) -> None:
+    """Quick 3-line status check — the "you good?" command."""
+    ok = "\033[32m●\033[0m"
+    warn = "\033[33m●\033[0m"
+    fail = "\033[31m●\033[0m"
+
+    # service
+    pid = read_pid()
+    if pid and _pid_alive_fallback(pid):
+        st = read_state() or {}
+        hb = st.get("last_heartbeat") or 0
+        age = int(time.time()) - hb if hb else -1
+        hb_str = f"{age}s ago" if age >= 0 else "?"
+        print(f"{ok} service  running (pid {pid}, hb {hb_str})")
+    else:
+        print(f"{warn} service  not running — {APP} start")
+
+    # hub
+    try:
+        code, _ = http("GET", "/api/health", timeout=5)
+        print(f"{ok} hub      {HUB} reachable")
+    except Exception:
+        print(f"{fail} hub      {HUB} unreachable")
+
+    # version
+    print(f"  version  {VERSION}")
+
+
+def cmd_speed(args) -> None:
+    """Latency benchmark: DNS, TLS, hub ping, chat round-trip."""
+    print(f"\033[1m{APP} speed\033[0m — latency benchmark")
+    hub_host = HUB.replace("https://", "").replace("http://", "").split("/")[0]
+    hub_scheme = "https" if HUB.startswith("https://") else "http"
+
+    # 1. DNS
+    t0 = time.time()
+    try:
+        ip = socket.gethostbyname(hub_host)
+        dns_ms = int((time.time() - t0) * 1000)
+        print(f"  dns   {hub_host:30s} → {ip:15s}   {dns_ms:4d}ms")
+    except Exception as e:
+        print(f"  dns   {hub_host:30s} → \033[31mFAIL\033[0m ({e})")
+        return
+
+    # 2. TCP connect
+    t0 = time.time()
+    try:
+        s = socket.create_connection((hub_host, 443 if hub_scheme == "https" else 80), timeout=5)
+        tcp_ms = int((time.time() - t0) * 1000)
+        s.close()
+        print(f"  tcp   {hub_host}:443                      {tcp_ms:4d}ms")
+    except Exception as e:
+        print(f"  tcp   {hub_host}:443                      \033[31mFAIL\033[0m ({e})")
+        return
+
+    # 3. hub ping x3
+    pings = []
+    for i in range(3):
+        t0 = time.time()
+        try:
+            code, _ = http("GET", "/api/health", timeout=5)
+            ms = int((time.time() - t0) * 1000)
+            pings.append(ms)
+            mark = _ok(f"{ms}ms") if code == 200 else _fail(f"{ms}ms HTTP {code}")
+            print(f"  ping  GET /api/health       #{i+1}            {mark}")
+        except Exception as e:
+            print(f"  ping  GET /api/health       #{i+1}            \033[31mFAIL\033[0m ({e})")
+    if pings:
+        print(f"  ping  min/avg/max = {min(pings)}/{sum(pings)//len(pings)}/{max(pings)}ms")
+
+    # 4. chat round-trip (time to first byte + total)
+    print()
+    print(f"  chat  POST /api/chat (short prompt)")
+    try:
+        # Stream one short chat and measure time-to-first-byte
+        url = HUB.rstrip("/") + "/api/chat"
+        req = urllib.request.Request(url, data=json.dumps({"message": "say hi in 3 words"}).encode(),
+                                     method="POST",
+                                     headers={"content-type": "application/json",
+                                              "accept": "text/event-stream",
+                                              "user-agent": f"{APP}/{VERSION}"})
+        t0 = time.time()
+        with urllib.request.urlopen(req, timeout=30) as r:
+            ttfb = int((time.time() - t0) * 1000)
+            buf = b""
+            total_bytes = 0
+            while True:
+                chunk = r.read(1)
+                if not chunk: break
+                buf += chunk
+                total_bytes += 1
+                if buf.endswith(b"\n"):
+                    line = buf.decode("utf-8", errors="replace").strip()
+                    buf = b""
+                    if line.startswith("data:") and line[5:].strip() not in ("", "[DONE]"):
+                        try:
+                            evt = json.loads(line[5:].strip())
+                            choices = evt.get("choices") or []
+                            if choices and (choices[0].get("delta") or {}).get("content"):
+                                total_ms = int((time.time() - t0) * 1000)
+                                print(f"        time-to-first-byte: {ttfb}ms   total: {total_ms}ms   bytes: {total_bytes}")
+                                # drain the rest so we close cleanly
+                                while r.read(4096): pass
+                                break
+                        except json.JSONDecodeError:
+                            pass
+    except Exception as e:
+        print(f"  chat  \033[31mFAIL\033[0m ({e})")
+    else:
+        if total_bytes == 0:
+            print(f"        (stream ended with no bytes)")
+        else:
+            print(f"        (stream ended without a content chunk — {total_bytes} bytes)")
+
+    # 5. CPU/RAM/disk (delegate to llm bench)
+    print()
+    print(f"  bench CPU/RAM/disk:")
+    try:
+        cmd_llm_bench(args)  # reuse the existing llm bench routine
+    except Exception as e:
+        print(f"        \033[31mFAIL\033[0m ({e})")
+
+def cmd_test(args) -> None:
+    """End-to-end smoke test: doctor + speed + a chat round-trip."""
+    print(f"\033[1m{APP} test\033[0m — full end-to-end smoke test\n")
+    cmd_doctor(args)
+    print()
+    cmd_speed(args)
+    print()
+    print(f"\033[1m{APP} test\033[0m — \033[32mcomplete\033[0m")
+
+
+# ── friendly / fun commands ────────────────────────────────────────────
+_VOLUNTEER_FILE = CONFIG_DIR / "contribute.json"
+
+def _volunteer_default() -> dict:
+    return {"share_cpu": False, "max_cpu_pct": 25, "pause_on_battery": True,
+            "sandbox": "subprocess", "opted_in_at": None, "tags": []}
+
+def _volunteer_load() -> dict:
+    if not _VOLUNTEER_FILE.exists():
+        return _volunteer_default()
+    try:
+        d = json.loads(_VOLUNTEER_FILE.read_text())
+        # backfill any new keys
+        base = _volunteer_default()
+        base.update({k: v for k, v in d.items() if k in base})
+        return base
+    except (OSError, json.JSONDecodeError):
+        return _volunteer_default()
+
+def cmd_volunteer(args) -> None:
+    """Opt in/out of contributing compute to the network.
+    Sets ~/.config/hivv/contribute.json. The agent reads this on next start."""
+    action = getattr(args, "action", None) or "status"
+    ensure_dirs()
+    cfg = _volunteer_load()
+
+    if action == "on":
+        cfg["share_cpu"] = True
+        cfg["opted_in_at"] = int(time.time())
+        _VOLUNTEER_FILE.write_text(json.dumps(cfg, indent=2))
+        print(f"\033[1;32m{APP} volunteer\033[0m — \033[32m✓ you're now a volunteer bee!\033[0m\n")
+        print(f"When {HUB_NAME} has a chat request that fits your box, your bee will help.")
+        print(f"You can leave the volunteer corps anytime with \033[1m{APP} volunteer off\033[0m.\n")
+        print(f"settings (in {_VOLUNTEER_FILE}):")
+        for k, v in cfg.items():
+            if k == "opted_in_at" and v: v = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(v))
+            print(f"  {k:18s} {v}")
+        # poke the user to (re)start the agent so it picks up the new flag
+        pid = read_pid()
+        if pid and pid_alive(pid):
+            print(f"\n\033[1;33m!\033[0m agent is already running (pid {pid}); restart it to pick up the new setting:")
+            print(f"  {APP} restart")
+        else:
+            print(f"\n\033[1;34m>\033[0m start your bee to begin contributing:")
+            print(f"  {APP} start")
+        return
+
+    if action == "off":
+        cfg["share_cpu"] = False
+        cfg["opted_in_at"] = None
+        _VOLUNTEER_FILE.write_text(json.dumps(cfg, indent=2))
+        print(f"\033[1;32m{APP} volunteer\033[0m — \033[33m✓ thanks for the help — you've left the volunteer corps.\033[0m")
+        print(f"Your bee will no longer accept work from {HUB_NAME}.")
+        print(f"Run \033[1m{APP} volunteer on\033[0m to rejoin anytime.")
+        pid = read_pid()
+        if pid and pid_alive(pid):
+            print(f"\n\033[1;33m!\033[0m restart the agent to stop accepting work immediately:")
+            print(f"  {APP} restart")
+        return
+
+    # status (default)
+    print(f"\033[1m{APP} volunteer\033[0m — status")
+    if cfg.get("share_cpu"):
+        since = cfg.get("opted_in_at")
+        since_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(since)) if since else "?"
+        print(f"  state:    \033[1;32m✓ volunteering\033[0m  (since {since_str})")
+    else:
+        print(f"  state:    \033[2mnot volunteering\033[0m")
+    print(f"  config:   {_VOLUNTEER_FILE}")
+    for k, v in cfg.items():
+        if k == "opted_in_at":
+            v = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(v)) if v else "(never)"
+        print(f"    {k:18s} {v}")
+    if not cfg.get("share_cpu"):
+        print(f"\n  to join:   \033[1m{APP} volunteer on\033[0m")
+
+
+def cmd_share(args) -> None:
+    """Broadcast what you're working on to the hivv network.
+    Usage: hivv share "working on climate models" [--problem=abc123]
+    """
+    st = read_state()
+    node_id = st.get("node_id")
+    if not node_id:
+        print(f"\033[1;33m!\033[0m your bee isn't registered yet — start it first:")
+        print(f"  \033[1m{APP} start\033[0m  then try \033[1m{APP} share\033[0m again")
+        return
+
+    msg = getattr(args, "message", None) or ""
+    problem_id = getattr(args, "problem", None)
+
+    if not msg:
+        print(f"\033[1m{APP} share\033[0m — broadcast what you're working on to the hive\n")
+        print(f"  \033[1m{APP} share \"<message>\"\033[0m           tell the hive what you're doing")
+        print(f"  \033[1m{APP} share \"fixing bug\" --problem=123\033[0m  link to a problem ID")
+        print(f"  \033[1m{APP} share --clear\033[0m                  clear your work status")
+        print(f"  \033[1m{APP} feed\033[0m                       see what others are working on\n")
+        return
+
+    if getattr(args, "clear", False):
+        msg = ""
+        problem_id = None
+
+    if msg and len(msg) > 280:
+        print(f"\033[1;31m!\033[0m message too long (max 280 chars, got {len(msg)})")
+        return
+
+    body = {"work_status": msg}
+    if problem_id:
+        body["problem_id"] = problem_id
+
+    code, payload = http("POST", f"/api/nodes/{node_id}/work-status", body=body, timeout=10)
+    if code == 200:
+        print(f"\033[1;32m✓\033[0m work status updated — the hive now knows what you're doing 🐝")
+        if msg:
+            print(f"  \033[2m\"{msg[:80]}{'...' if len(msg) > 80 else ''}\"\033[0m")
+    else:
+        print(f"\033[1;31m!\033[0m failed (HTTP {code}): {payload}")
+
+
+def cmd_feed(args) -> None:
+    """See what the hive is working on — real-time collaboration feed."""
+    code, payload = http("GET", "/api/collaboration/feed", timeout=10)
+    if code != 200:
+        print(f"\033[1;31m!\033[0m could not reach feed (HTTP {code})")
+        return
+
+    items = payload.get("items", []) if isinstance(payload, dict) else []
+    if not items:
+        print(f"\033[1m{APP} feed\033[0m — what is the hivv hive working on?\n")
+        print(f"  \033[2m(no one has shared what they're working on yet)\033[0m")
+        print(f"  \033[1mbe the first!\033[0m  \033[1m{APP} share \"what you're doing\"\033[0m\n")
+        return
+
+    print(f"\033[1m{APP} feed\033[0m — what the hivv hive is working on ({len(items)} active)\n")
+    print(f"\033[2m  {'node':<22} {'what':<40} {'problem':<12} updated\033[0m")
+    print(f"  \033[2m{'─'*22} {'─'*40} {'─'*12} {'─'*8}\033[0m")
+    now = time.time()
+    for item in items[:20]:
+        name = item.get("name", "unknown")[:22]
+        work = item.get("work_status", "")[:40]
+        prob = item.get("problem_id", "")[:12] or "-"
+        age = item.get("last_update", 0)
+        age_str = f"{int(now-age)}s ago" if age else "-"
+        print(f"  \033[32m{name:<22}\033[0m \033[1m{work:<40}\033[0m \033[2m{prob:<12}\033[0m {age_str}")
+    print()
+
+
+def cmd_help_bang(args) -> None:
+    """Panic button — show how to get help."""
+    print(f"\033[1;31m{APP} help!\033[0m — emergency help\n")
+    print(f"  \033[1mstep 1: what does your bee say?\033[0m")
+    print(f"    {APP} doctor       \033[2m# pasteable health report\033[0m")
+    print(f"    {APP} logs 30      \033[2m# last 30 lines of the agent log\033[0m")
+    print(f"    {APP} status       \033[2m# agent pid + heartbeat state\033[0m")
+    print(f"    {APP} speed        \033[2m# latency benchmark\033[0m")
+    print()
+    print(f"  \033[1mstep 2: stop the bleeding (if needed)\033[0m")
+    print(f"    {APP} stop         \033[2m# stop the local agent\033[0m")
+    print(f"    {APP} uninstall    \033[2m# full removal (keeps ~/.config/{APP}/)\033[0m")
+    print()
+    print(f"  \033[1mstep 3: get human help\033[0m")
+    print(f"    bug/issue:  https://github.com/{APP}/issues  (paste `doctor` output)")
+    print(f"    email:      support@{HUB.replace('https://','').rstrip('/')}")
+    print(f"    chat:       \033[1m{APP} help\033[0m  \033[2m# sends your last 20 log lines + doctor to support\033[0m")
+    print()
+    print(f"  \033[1mstep 4: tell the AI\033[0m")
+    print(f"    {APP} 'summarize what's wrong and how to fix it'")
+    print(f"    \033[2m# any args become a streaming chat message\033[0m")
+
+def cmd_hi(args) -> None:
+    """Friendly greeter — quick chat round-trip."""
+    print(f"\033[1m{APP}\033[0m hi! 👋  trying a quick round-trip...\n")
+    _do_chat("say hi in one friendly sentence", stream=True)
+    print()
+    print(f"  try:")
+    print(f"    {APP} whats the meaning of life")
+    print(f"    {APP} chat 'tell me a joke about kubernetes'")
+    print(f"    {APP} llm detect       \033[2m# find local AI runtimes\033[0m")
+    print(f"    {APP} doctor           \033[2m# full health check\033[0m")
+
+
+def cmd_thanks(args) -> None:
+    """Cute: one-line thanks to the AI."""
+    print(f"\033[1m{APP}\033[0m sending thanks to {HUB_NAME}...\n")
+    _do_chat("the user just said thanks — reply with one warm sentence", stream=True)
+    print()
+
+
+def cmd_support(args) -> None:
+    """Ask the support AI a question. Auto-attaches your bee's context:
+    hub, version, agent status, recent metrics, and the last 10 log lines."""
+    question = " ".join(getattr(args, "question", []) or []).strip()
+
+    # --- gather context ----------------------------------------------------
+    log_tail = ""
+    if LOG_FILE.exists():
+        try:
+            lines = LOG_FILE.read_text(errors="replace").splitlines()[-10:]
+            log_tail = "\n".join(lines)
+        except OSError:
+            pass
+
+    m = _collect_metrics()
+    pid = read_pid()
+    st = read_state() or {}
+    hb = st.get("last_heartbeat") or 0
+    hb_age = int(time.time()) - hb if hb else -1
+    hb_str = f"{hb_age}s ago" if hb_age >= 0 else "never"
+
+    ctx_lines = [
+        f"[HIVV.org CLI support session — client v{VERSION}]",
+        f"hub       = {HUB}",
+        f"hostname  = {socket.gethostname()}",
+        f"hw_id     = {_machine_id() or '(unavailable)'}",
+        f"agent     = {'running (pid ' + str(pid) + ', node ' + str(st.get('node_id','?')) + ')' if pid else 'NOT RUNNING'}",
+        f"heartbeat = {hb_str}",
+        f"transport = {st.get('transport', 'heartbeat-only')}",
+        f"signed    = {'no (hub does not support)' if st.get('auth_rejected') else 'yes'}",
+        f"bee       = {m.get('cpu_count','?')} cores, {m.get('mem_pct','?')}% mem, {m.get('disk_pct','?')}% disk",
+    ]
+    for g in (m.get("gpus") or []):
+        ctx_lines.append(f"  gpu[{g['index']}] {g['name']} util={g['util_pct']}% temp={g.get('temp_c','?')}°C")
+    if log_tail:
+        ctx_lines += ["", "--- recent agent log (last 10 lines, scrubbed) ---", log_tail]
+    # SCRUB secrets before printing — accidental api_key=, ?token=, JWTs etc.
+    ctx_lines = [_scrub_lines(line) for line in ctx_lines]
+
+    sys_msg = ("[System: You are a friendly, expert support agent for the HIVV.org CLI. "
+               "Be brief, concrete, and accurate. Diagnose errors from any log lines provided. "
+               "If a fix needs a command, give the exact command. Use bullet points for steps. No fluff.]")
+
+    full_msg = "\n".join([sys_msg] + ctx_lines)
+    if question:
+        full_msg += f"\n\nUser question: {question}"
+        print(f"\033[1m{APP} support\033[0m — asking: \033[3m{question}\033[0m\n")
+    else:
+        full_msg += ("\n\nThe user just ran `hivv support` with no question. "
+                     "Greet them warmly, summarize what you see in their context "
+                     "(flag any obvious problems — agent not running, old heartbeat, "
+                     "high CPU/mem, etc.), and ask what they need help with.")
+        print(f"\033[1m{APP} support\033[0m — starting session\n")
+
+    _do_chat(full_msg, stream=True)
+    print()
+    if not question:
+        print(f"  follow-up tips:")
+        print(f"    {APP} support 'why is my heartbeat failing?'")
+        print(f"    {APP} support 'how do I volunteer?'")
+        print(f"    {APP} support 'what does the error in my log mean?'")
+
+
+# ── local LLM helper ───────────────────────────────────────────────────
+def _llm_which(cmd: str):
+    """Find a binary on PATH or in common hand-built LLM-runtime dirs."""
+    found = shutil.which(cmd)
+    if found:
+        return found
+    home = os.path.expanduser("~")
+    for extra in (
+        os.path.join(home, "llama.cpp", "build", "bin"),
+        "/usr/local/llama.cpp/build/bin",
+        "/opt/llama.cpp/build/bin",
+        "/opt/homebrew/bin",
+        os.path.join(home, ".local", "bin"),
+    ):
+        cand = os.path.join(extra, cmd)
+        if os.path.isfile(cand) and os.access(cand, os.X_OK):
+            return cand
+    return None
+
+
+def _llm_probe(url: str, timeout: float = 1.0):
+    """GET a local URL. Returns (status_code, body). 0 means network error."""
+    try:
+        req = urllib.request.Request(url, method="GET",
+            headers={"user-agent": f"{APP}/{VERSION}", "accept": "application/json"})
+        with opener().open(req, timeout=timeout) as r:
+            return r.status, r.read().decode("utf-8", errors="replace")
+    except Exception as e:
+        return 0, str(e)
+
+
+def _llm_detect():
+    """Probe for ollama, llama.cpp, lm-studio, vllm on this box."""
+    found = []
+
+    # ollama (binary or running server)
+    ollama_bin = _llm_which("ollama")
+    if ollama_bin:
+        version = ""
+        try:
+            v = subprocess.run([ollama_bin, "--version"], capture_output=True, text=True, timeout=5)
+            text = ((v.stdout or "") + (v.stderr or "")).strip()
+            import re as _re
+            # find a "X.Y.Z" version on any line (handles both clean output and
+            # `Warning: client version is 0.32.4` style when no server is up).
+            m = _re.search(r"\d+\.\d+\.\d+", text)
+            if m:
+                version = m.group(0)
+        except Exception:
+            pass
+        code, _ = _llm_probe("http://localhost:11434/api/version")
+        listening = "running (port 11434)" if code == 200 else "installed, not running"
+        found.append({"name": "ollama", "path": ollama_bin,
+                      "version": version or "(unknown)",
+                      "service": listening, "url": "http://localhost:11434"})
+    else:
+        code, _ = _llm_probe("http://localhost:11434/api/version")
+        if code == 200:
+            found.append({"name": "ollama", "path": "(server only, no CLI on PATH)",
+                          "version": "?", "service": "running on :11434",
+                          "url": "http://localhost:11434"})
+
+    # llama.cpp
+    for bin_name in ("llama-server", "llama-cli", "llama-quantize"):
+        p = _llm_which(bin_name)
+        if p:
+            found.append({"name": "llama.cpp", "path": p, "version": "(git build)",
+                          "service": "n/a (run llama-server manually)", "url": "n/a"})
+            break
+
+    # LM Studio
+    if _llm_which("lms"):
+        found.append({"name": "lm-studio", "path": _llm_which("lms"),
+                      "version": "?", "service": "check `lms status`",
+                      "url": "http://localhost:1234/v1"})
+
+    # vLLM
+    if _llm_which("vllm"):
+        found.append({"name": "vllm", "path": _llm_which("vllm"),
+                      "version": "?", "service": "n/a (run `vllm serve ...`)",
+                      "url": "http://localhost:8000/v1"})
+
+    return found
+
+
+def _llm_sys_specs():
+    """Inspect host: OS, CPU, RAM, GPU."""
+    import platform as _p
+    specs = {
+        "system": _p.system(),
+        "machine": _p.machine(),
+        "release": _p.release(),
+        "python":  _p.python_version(),
+        "cpu_count": os.cpu_count() or 1,
+        "ram_gb": None,
+        "gpu": None,
+        "apple_silicon": False,
+    }
+    # RAM
+    try:
+        if specs["system"] == "Linux":
+            with open("/proc/meminfo") as f:
+                for line in f:
+                    if line.startswith("MemTotal:"):
+                        specs["ram_gb"] = round(int(line.split()[1]) / 1024 / 1024, 1)
+                        break
+        elif specs["system"] == "Darwin":
+            v = subprocess.run(["sysctl", "-n", "hw.memsize"], capture_output=True, text=True, timeout=5)
+            if v.returncode == 0:
+                specs["ram_gb"] = round(int(v.stdout.strip()) / 1024**3, 1)
+        elif specs["system"] == "Windows":
+            v = subprocess.run(["wmic", "OS", "get", "TotalVisibleMemorySize", "/value"],
+                               capture_output=True, text=True, timeout=5)
+            if v.returncode == 0:
+                for line in v.stdout.splitlines():
+                    if "=" in line:
+                        specs["ram_gb"] = round(int(line.split("=", 1)[1].strip()) / 1024 / 1024, 1)
+                        break
+    except Exception:
+        pass
+
+    # GPU (NVIDIA)
+    if shutil.which("nvidia-smi"):
+        try:
+            v = subprocess.run(
+                ["nvidia-smi", "--query-gpu=name,memory.total",
+                 "--format=csv,noheader,nounits"],
+                capture_output=True, text=True, timeout=5)
+            if v.returncode == 0 and v.stdout.strip():
+                parts = v.stdout.strip().split("\n")[0].split(",")
+                specs["gpu"] = {"vendor": "nvidia", "name": parts[0].strip(),
+                                "vram_gb": round(int(parts[1].strip()) / 1024, 1)}
+        except Exception:
+            pass
+
+    # Apple Silicon
+    if specs["system"] == "Darwin" and specs["machine"] in ("arm64", "arm64e"):
+        specs["apple_silicon"] = True
+
+    return specs
+
+
+# Model recommendation tiers (curated for CPU + modest GPU boxes).
+# Order matters: more-specific tiers are checked first. Apple Silicon first,
+# then NVIDIA tiers (any GPU → GPU tier), then CPU tiers in descending spec.
+_LLM_TIERS = [
+    {"tier": "apple-silicon", "min_ram_gb": 8,
+     "require": {"gpu": False, "apple_silicon": True},
+     "models": [
+         ("qwen3:4b",         "~3 GB, Metal accelerated"),
+         ("llama-3.2:3b",     "~2 GB, ANE friendly"),
+         ("gemma4:e2b",       "~2 GB, lean"),
+     ]},
+    {"tier": "nvidia-big",   "vram_lo": 12, "require": {"gpu": True},
+     "models": [
+         ("qwen3:14b",        "~9 GB VRAM"),
+         ("qwen3:32b",        "~20 GB VRAM"),
+         ("llama-3.1:70b-q4", "~40 GB VRAM"),
+         ("mixtral:8x7b",     "~25 GB VRAM"),
+     ]},
+    {"tier": "nvidia-8gb",   "vram_lo": 4, "vram_hi": 12, "require": {"gpu": True},
+     "models": [
+         ("qwen3:8b-q4",      "~5 GB VRAM"),
+         ("llama-3.1:8b-q4",  "~5 GB VRAM"),
+         ("mistral:7b",       "~5 GB VRAM"),
+     ]},
+    {"tier": "no-gpu-8core", "min_ram_gb": 8, "max_ram_gb": 96, "min_cpu": 8,
+     "require": {"gpu": False, "apple_silicon": False},
+     "models": [
+         ("gemma4:e2b",       "~2 GB RAM, fastest on 8c CPU — Google efficient"),
+         ("qwen3:4b",         "~3 GB RAM, very capable"),
+         ("llama-3.2:3b",     "~2 GB RAM, Meta's mid"),
+     ]},
+    {"tier": "no-gpu-low",   "min_ram_gb": 8, "max_ram_gb": 96, "min_cpu": 4, "max_cpu": 7,
+     "require": {"gpu": False, "apple_silicon": False},
+     "models": [
+         ("qwen3:1.7b",       "~1.5 GB RAM, snappy on 4-7 core CPU"),
+         ("llama-3.2:3b",     "~2 GB RAM, Meta's mid"),
+         ("phi-3.5-mini",     "~2.4 GB RAM, Microsoft small"),
+     ]},
+    {"tier": "no-gpu-tiny",  "min_ram_gb": 0, "max_ram_gb": 8,  "max_cpu": 3,
+     "require": {"gpu": False, "apple_silicon": False},
+     "models": [
+         ("qwen3:0.6b",       "~0.6 GB RAM, ultra-tiny — for 2-core boxes"),
+         ("qwen3:1.7b",       "~1.5 GB RAM, fast on any CPU"),
+         ("llama-3.2:1b",     "~1 GB RAM, Meta's tiniest"),
+     ]},
+]
+
+# Fallback target — when nothing matches, use the safest tiny-CPU model.
+_FALLBACK_TIER = next(t for t in _LLM_TIERS if t["tier"] == "no-gpu-tiny")
+
+
+def _llm_pick_model(specs):
+    has_gpu   = specs.get("gpu") is not None
+    vram      = specs.get("gpu", {}).get("vram_gb", 0) if has_gpu else 0
+    ram       = specs.get("ram_gb") or 0
+    cpu_count = specs.get("cpu_count") or 1
+    apple     = bool(specs.get("apple_silicon"))
+
+    for t in _LLM_TIERS:
+        req = t["require"]
+        # Apple Silicon short-circuits everything (Metal acceleration is decisive).
+        if req.get("apple_silicon"):
+            if not apple:
+                continue
+            return (t["tier"], t["models"],
+                    "Apple Silicon detected — Metal acceleration available")
+        # NVIDIA tiers — require a GPU.
+        if req.get("gpu"):
+            if not has_gpu:
+                continue
+            lo = t.get("vram_lo", 0); hi = t.get("vram_hi", 9999)
+            if lo <= vram < hi:
+                return (t["tier"], t["models"],
+                        f"NVIDIA GPU with {vram} GB VRAM detected")
+            continue
+        # CPU-only tiers — explicitly skip when the box has a GPU
+        # (so NVIDIA boxes can't accidentally fall into a CPU tier).
+        if has_gpu:
+            continue
+        # Match on RAM + CPU core count.
+        min_r = t.get("min_ram_gb", 0); max_r = t.get("max_ram_gb", 9999)
+        min_c = t.get("min_cpu", 0);    max_c = t.get("max_cpu", 9999)
+        if min_r <= ram <= max_r and min_c <= cpu_count <= max_c:
+            if t["tier"] == "no-gpu-8core":
+                why = f"{cpu_count}-core CPU, no GPU — gemma4:e2b is the sweet spot"
+            else:
+                why = f"{cpu_count}-core CPU, {ram} GB RAM, no GPU — CPU-friendly models"
+            return (t["tier"], t["models"], why)
+    # Fallback — couldn't classify (very rare; e.g. ram is huge, no GPU, <8 cores).
+    return ("fallback", _FALLBACK_TIER["models"],
+            "could not classify hardware — defaulting to smallest tier")
+
+
+def cmd_llm_help(args):
+    print(f"""\033[1m{APP} llm\033[0m — local AI runtime helper
+
+find local LLM runtimes, recommend a model for your hardware, and benchmark
+your box. works with ollama (recommended) or hand-built llama.cpp.
+
+\033[1msubcommands:\033[0m
+  llm detect                  find ollama, llama.cpp, lm-studio, vllm on this box
+  llm suggest                 recommend a model given CPU / RAM / GPU
+  llm bench                   quick CPU / RAM / disk benchmark
+  llm status                  detect + bench + suggest in one shot
+  llm install [--docker|--auto|--model NAME]   install ollama (print, run, or container)
+  llm pull <model>            run `ollama pull <model>`
+  llm serve [model] [--port]  run `ollama serve` in the foreground
+
+\033[1mexamples:\033[0m
+  {APP} llm detect
+  {APP} llm suggest
+  {APP} llm suggest --json    # machine-readable, used by installers
+  {APP} llm bench
+  {APP} llm install --docker
+  {APP} llm install --auto --model qwen3:1.7b   # install + pull
+  {APP} llm pull qwen3:1.7b
+""")
+
+
+def cmd_llm_detect(args):
+    print(f"\033[1m{APP} llm detect\033[0m — scanning this box for AI runtimes")
+    found = _llm_detect()
+    if not found:
+        print(f"  \033[33m(no local LLM runtimes detected)\033[0m")
+        print()
+        print(f"  \033[1mto install:\033[0m")
+        print(f"    {APP} llm install            # native install for {os.uname().sysname}")
+        print(f"    {APP} llm install --docker   # ollama in a container")
+        print()
+        print(f"  \033[1mthen:\033[0m")
+        print(f"    {APP} llm suggest            # see recommended models")
+        print(f"    {APP} llm pull <model>       # download one")
+        return
+    for r in found:
+        v = f"  v={r['version']}" if r["version"] not in ("", "?", "(unknown)") else ""
+        print(f"  \033[32m●\033[0m {r['name']:<14} {r['path']}{v}")
+        print(f"      service: {r['service']}")
+        print(f"      endpoint: {r['url']}")
+
+
+def cmd_llm_suggest(args):
+    specs = _llm_sys_specs()
+    tier, models, reason = _llm_pick_model(specs)
+
+    # Machine-readable output for installer scripts.
+    if getattr(args, "json", False):
+        import json as _json
+        out = {
+            "tier":    tier,
+            "reason":  reason,
+            "primary": models[0][0] if models else None,
+            "models":  [{"name": n, "desc": d} for n, d in models],
+            "host": {
+                "system":  specs["system"],
+                "machine": specs["machine"],
+                "cpu":     specs["cpu_count"],
+                "ram_gb":  specs.get("ram_gb"),
+                "gpu":     specs.get("gpu"),
+                "apple_silicon": bool(specs.get("apple_silicon")),
+            },
+        }
+        print(_json.dumps(out, indent=2))
+        return
+
+    print(f"\033[1m{APP} llm suggest\033[0m — {reason}")
+    print(f"  OS={specs['system']}  arch={specs['machine']}  cpu={specs['cpu_count']}c  ram={specs.get('ram_gb','?')}GB")
+    if specs.get("gpu"):
+        print(f"  gpu={specs['gpu']['name']}  vram={specs['gpu']['vram_gb']}GB")
+    elif specs["apple_silicon"]:
+        print(f"  gpu=Apple Silicon  (Metal)")
+    else:
+        print(f"  gpu=(none detected)")
+    print()
+    print(f"  \033[1mrecommendation (tier: {tier}):\033[0m")
+    for name, desc in models:
+        print(f"    • {name:<20} {desc}")
+    print()
+    has_ollama = any(r["name"] == "ollama" for r in _llm_detect())
+    if has_ollama:
+        print(f"  to install (ollama is already on this box):")
+        for name, _ in models[:2]:
+            print(f"    ollama pull {name}")
+    else:
+        print(f"  to get ollama first:")
+        print(f"    {APP} llm install --docker    # or: {APP} llm install")
+        print(f"  then:")
+        print(f"    ollama pull {models[0][0]}")
+
+
+def cmd_llm_bench(args):
+    import hashlib, tempfile
+    specs = _llm_sys_specs()
+    print(f"\033[1m{APP} llm bench\033[0m — quick local benchmark")
+    print(f"  OS={specs['system']} {specs['release']}  arch={specs['machine']}  python={specs['python']}  cpus={specs['cpu_count']}")
+
+    # CPU: sha256 throughput
+    data = os.urandom(1024 * 1024)
+    n = 30
+    t0 = time.perf_counter()
+    for _ in range(n):
+        hashlib.sha256(data).digest()
+    dt = max(time.perf_counter() - t0, 1e-9)
+    mb_s = round(n / dt, 1)
+    print(f"  CPU sha256  : {mb_s} MB/s  ({n}× 1 MB blocks)")
+
+    # MEM: alloc + touch 100 MB
+    t0 = time.perf_counter()
+    buf = bytearray(100 * 1024 * 1024)
+    s = 0
+    step = 4096
+    for i in range(0, len(buf), step):
+        s += buf[i]
+    dt = max(time.perf_counter() - t0, 1e-9)
+    gb_s = round(0.1 / dt, 2)
+    print(f"  MEM touch   : {gb_s} GB/s  (100 MB alloc + page-touch)")
+
+    # DISK: write + read 50 MB
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(delete=False) as f:
+            tmp_path = f.name
+        t0 = time.perf_counter()
+        with open(tmp_path, "wb") as f:
+            f.write(b"\x00" * 50 * 1024 * 1024)
+            f.flush(); os.fsync(f.fileno())
+        dt_w = max(time.perf_counter() - t0, 1e-9)
+        mb_s_w = round(50.0 / dt_w, 0)
+        t0 = time.perf_counter()
+        with open(tmp_path, "rb") as f:
+            _ = f.read()
+        dt_r = max(time.perf_counter() - t0, 1e-9)
+        mb_s_r = round(50.0 / dt_r, 0)
+        print(f"  DISK write  : {int(mb_s_w)} MB/s  (50 MB file + fsync)")
+        print(f"  DISK read   : {int(mb_s_r)} MB/s  (50 MB readback)")
+    finally:
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
+
+    if specs.get("gpu"):
+        print(f"  GPU         : {specs['gpu']['name']}  ({specs['gpu']['vram_gb']} GB VRAM, CUDA)")
+    elif specs["apple_silicon"]:
+        print(f"  GPU         : Apple Silicon  (Metal)")
+    else:
+        print(f"  GPU         : (none — CPU-only inference)")
+    if specs.get("ram_gb"):
+        print(f"  RAM         : {specs['ram_gb']} GB")
+
+
+def cmd_llm_status(args):
+    cmd_llm_detect(args)
+    print()
+    cmd_llm_bench(args)
+    print()
+    cmd_llm_suggest(args)
+
+
+def cmd_llm_install(args):
+    import subprocess as _sp
+    sysname = os.uname().sysname
+    do_auto  = bool(getattr(args, "auto", False))
+    pull_arg = getattr(args, "model", None)
+
+    if getattr(args, "docker", False):
+        if not do_auto:
+            print(f"\033[1m{APP} llm install --docker\033[0m — ollama in a container")
+            print()
+            print(f"    docker run -d --name {APP}-ollama \\")
+            print(f"      -p 11434:11434 \\")
+            print(f"      -v {APP}-ollama:/root/.ollama \\")
+            print(f"      --restart unless-stopped \\")
+            print(f"      ollama/ollama")
+            print()
+            print(f"  Wait ~10s for it to start, then:")
+            print(f"    {APP} llm pull <model>")
+            return
+        cmd = ["docker", "run", "-d", "--name", f"{APP}-ollama",
+               "-p", "11434:11434", "-v", f"{APP}-ollama:/root/.ollama",
+               "--restart", "unless-stopped", "ollama/ollama"]
+        print(f"\033[1m{APP} llm install --docker --auto\033[0m")
+        print(f"  $ {' '.join(cmd)}")
+        rc = _sp.call(cmd)
+        if rc != 0:
+            die(f"docker run failed (rc={rc})")
+        print(f"  ✓ ollama container started — wait ~10s then run `{APP} llm pull <model>`")
+        return
+
+    # Pick the native install command for the host OS.
+    if sysname == "Linux":
+        cmd = ["sh", "-c", "curl -fsSL https://ollama.com/install.sh | sh"]
+    elif sysname == "Darwin":
+        cmd = ["brew", "install", "ollama"]
+    elif sysname.startswith("MINGW") or sysname.startswith("MSYS") or sysname == "Windows":
+        if _llm_which("winget"):
+            cmd = ["winget", "install", "--id", "Ollama.Ollama",
+                   "--accept-source-agreements", "--accept-package-agreements"]
+        elif _llm_which("choco"):
+            cmd = ["choco", "install", "ollama", "-y"]
+        else:
+            cmd = None
+    else:
+        cmd = None
+
+    if not do_auto:
+        print(f"\033[1m{APP} llm install\033[0m — install ollama natively ({sysname})")
+        print()
+        if sysname == "Linux":
+            print(f"    curl -fsSL https://ollama.com/install.sh | sh")
+        elif sysname == "Darwin":
+            print(f"    brew install ollama")
+            print(f"  or download from https://ollama.com/download")
+        elif sysname.startswith("MINGW") or sysname.startswith("MSYS") or sysname == "Windows":
+            print(f"    winget install Ollama.Ollama")
+            print(f"  or download from https://ollama.com/download")
+        else:
+            print(f"    see https://ollama.com/download")
+        print()
+        print(f"  Or use docker (works everywhere):")
+        print(f"    {APP} llm install --docker")
+        print()
+        print(f"  Or build llama.cpp from source:")
+        print(f"    git clone https://github.com/ggerganov/llama.cpp")
+        print(f"    cd llama.cpp && cmake -B build && cmake --build build --config Release")
+        return
+
+    # --auto path: actually run the install.
+    print(f"\033[1m{APP} llm install --auto\033[0m — installing ollama on {sysname}")
+    if cmd is None:
+        die(f"no native installer known for {sysname}; try `{APP} llm install --docker --auto`")
+    print(f"  $ {' '.join(cmd)}")
+    rc = _sp.call(cmd)
+    if rc != 0:
+        die(f"install failed (rc={rc}); try `{APP} llm install --docker --auto`")
+
+    # If ollama is on PATH and --model was passed, pull it.
+    if _llm_which("ollama"):
+        if pull_arg:
+            print(f"\n\033[1m{APP} llm pull\033[0m — pulling model")
+            rc = _sp.call(["ollama", "pull", pull_arg])
+            if rc != 0:
+                print(f"  ✗ pull failed (rc={rc}); retry with `ollama pull {pull_arg}`")
+            else:
+                print(f"  ✓ pulled {pull_arg}")
+        else:
+            # No explicit model — suggest one and offer to pull.
+            specs   = _llm_sys_specs()
+            tier, models, reason = _llm_pick_model(specs)
+            primary = models[0][0] if models else "gemma4:e2b"
+            print(f"\n  ✓ ollama installed. recommended model for this box ({tier}): \033[1m{primary}\033[0m")
+            print(f"    ollama pull {primary}")
+            print(f"  or pick another: `hivv llm suggest`")
+    else:
+        print(f"  ✗ ollama not on PATH after install. open a new shell or restart.")
+
+
+def cmd_llm_pull(args):
+    model = getattr(args, "model", None)
+    if not model:
+        die(f"missing model name. e.g. `{APP} llm pull qwen3:1.7b`")
+    ollama = _llm_which("ollama")
+    if not ollama:
+        die(f"ollama not installed. run `{APP} llm install` or `{APP} llm install --docker`")
+    print(f"[{APP}] ollama pull {model}")
+    try:
+        rc = subprocess.call([ollama, "pull", model])
+        sys.exit(rc)
+    except KeyboardInterrupt:
+        sys.exit(130)
+
+
+def cmd_llm_serve(args):
+    port  = getattr(args, "port", 11434) or 11434
+    model = getattr(args, "model", None)
+    ollama = _llm_which("ollama")
+    if not ollama:
+        die(f"ollama not installed. run `{APP} llm install` or `{APP} llm install --docker`")
+    cmd = [ollama, "serve"]
+    env = os.environ.copy()
+    env["OLLAMA_HOST"] = f"127.0.0.1:{port}"
+    if model:
+        print(f"[{APP}] starting ollama on :{port}  (will preload {model})")
+    else:
+        print(f"[{APP}] starting ollama on :{port}  (Ctrl-C to stop)")
+    try:
+        rc = subprocess.call(cmd, env=env)
+        sys.exit(rc)
+    except KeyboardInterrupt:
+        print()
+        sys.exit(0)
+
+
+# ── arg parser ─────────────────────────────────────────────────────────
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog=APP, description=__doc__.splitlines()[1],
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = p.add_subparsers(dest="cmd")
+
+    def add_common(sp):
+        sp.add_argument("--hub", default=None, help=f"override hub URL (default {HUB})")
+
+    # operator / local
+    sp = sub.add_parser("start",    help="start the local hivv agent")
+    sp = sub.add_parser("stop",     help="stop the local hivv agent")
+    sp = sub.add_parser("restart",  help="restart the local hivv agent")
+
+    sp = sub.add_parser("status",   help="pid, uptime, last heartbeat, last error")
+    sp = sub.add_parser("info",     help="hub URL, version, install paths, hub_health")
+    sp = sub.add_parser("uninstall",help="stop + remove install (keep config + logs)")
+
+    sp = sub.add_parser("logs",    help="tail agent log")
+    sp.add_argument("n", nargs="?", type=int, default=50, help="lines (default 50)")
+    sp.add_argument("-f", "--follow", action="store_true", help="follow the log")
+
+    sp = sub.add_parser("free",    help="mem + swap + disk + per-process RSS")
+    sp = sub.add_parser("pct",     help="live CPU%% / MEM%% (use --watch=N to set interval)")
+    sp.add_argument("--watch", type=float, default=1.0, help="refresh interval seconds (default 1; 0 = print once)")
+
+    sp = sub.add_parser("ping",    help="ping the hub — measure round-trip latency")
+
+    sp = sub.add_parser("tools",   help="manage local tool server + list available tools on the hive")
+    sp.add_argument("action", nargs="?", default="list",
+                    choices=["on", "off", "status", "share", "list"],
+                    help="on/off/status/share/list (default: list)")
+
+    sp = sub.add_parser("call",    help="invoke a shared tool through the hive (no local LLM needed)")
+    sp.add_argument("tool", choices=["time", "calculate", "fetch", "search", "sysinfo"],
+                    help="tool to invoke")
+    sp.add_argument("--tz",  default=None, help="timezone for 'time' tool (e.g. America/New_York)")
+    sp.add_argument("--expr", default=None, help="expression for 'calculate' tool (e.g. '2+2')")
+    sp.add_argument("--url",  default=None, help="URL for 'fetch' tool")
+    sp.add_argument("-q", "--query", dest="q", default=None, help="query for 'search' tool")
+
+    sp = sub.add_parser("update",  help="pull latest hivv-cli.py from hivv.org")
+    sp.add_argument("--from-url", dest="from_url", default=None,
+                    help="download from this URL instead of <hub>/hivv-cli.py")
+    sp.add_argument("--sha256", default=None,
+                    help="verify downloaded bytes against this hex SHA256")
+
+    # one-shot
+    sp = sub.add_parser("health",      help="GET /api/health")
+    sp = sub.add_parser("metrics",     help="GET /api/control/metrics/global")
+    sp.add_argument("--local", action="store_true", help="print this bee's local metrics instead of hub global")
+    sp = sub.add_parser("nodes",       help="GET /api/control/nodes")
+    sp = sub.add_parser("whoami",      help="cheap liveness check against hub")
+    sub.add_parser("doctor",     help="one-glance health report (install + hub + agent + bee + version)")
+    sub.add_parser("up",        help="quick 3-line status — the 'you good?' command")
+    sub.add_parser("speed",      help="latency benchmark (DNS, TLS, hub ping, chat TTFB)")
+    sub.add_parser("test",       help="doctor + speed end-to-end smoke test")
+    sp_v = sub.add_parser("volunteer", help="opt in/out of contributing compute to the network (on/off/status)")
+    sp_v.add_argument("action", nargs="?", choices=["on", "off", "status"], default="status")
+    sp_sh = sub.add_parser("share", help="broadcast what you're working on to the hive 🐝")
+    sp_sh.add_argument("message", nargs="?", help="what you're working on (max 280 chars)")
+    sp_sh.add_argument("--problem", dest="problem", metavar="ID", help="link a problem ID")
+    sp_sh.add_argument("--clear", action="store_true", help="clear your work status")
+    sub.add_parser("feed",      help="see what the hive is working on — real-time collaboration")
+    sub.add_parser("whatsup",  help="see what everyone on the hive is working on (alias for feed)")
+    sub.add_parser("whats-up", help="see what everyone on the hive is working on (alias for feed)")
+    sub.add_parser("donate",    help="diagnose your system + get personalized recommendations on what to donate")
+    sub.add_parser("panic",      help="emergency help — diagnostics + how to report (alias for help-bang)")
+    sub.add_parser("help-bang",  help="emergency help — diagnostics + how to report")
+    sub.add_parser("hi",         help="friendly greeter — quick chat round-trip")
+    sub.add_parser("thanks",     help="say thanks to the AI (one-line chat reply)")
+    sp_s = sub.add_parser("support", help="ask the AI for help — auto-attaches doctor + log context")
+    sp_s.add_argument("question", nargs=argparse.REMAINDER, help="optional question (else the AI greets + asks)")
+    sp = sub.add_parser("chat",        help="POST /api/chat MSG")
+    sp.add_argument("message", nargs=argparse.REMAINDER)
+    sp = sub.add_parser("completions", help="POST /v1/chat/completions (OpenAI-compatible)")
+    sp.add_argument("message", nargs=argparse.REMAINDER)
+
+    # local LLM helper
+    sp = sub.add_parser("llm", help="local AI runtime helper (ollama, llama.cpp, ...)")
+    sp_llm = sp.add_subparsers(dest="llm_cmd")
+    sp_llm.add_parser("detect",  help="find ollama, llama.cpp, lm-studio, vllm on this box")
+    sp_sg = sp_llm.add_parser("suggest", help="recommend a model for this hardware")
+    sp_sg.add_argument("--json", action="store_true",
+                       help="emit machine-readable JSON (used by installers)")
+    sp_llm.add_parser("bench",   help="quick CPU / RAM / disk benchmark")
+    sp_llm.add_parser("status",  help="detect + bench + suggest in one shot")
+    sp_i = sp_llm.add_parser("install", help="print install commands (or --docker)")
+    sp_i.add_argument("--docker", action="store_true", help="print docker run command")
+    sp_i.add_argument("--auto",  action="store_true", help="actually run the install (instead of just printing)")
+    sp_i.add_argument("--model", default=None, metavar="NAME",
+                      help="after install, run `ollama pull <NAME>`")
+    sp_p = sp_llm.add_parser("pull", help="ollama pull <model>")
+    sp_p.add_argument("model", help="model name, e.g. qwen3:1.7b")
+    sp_sv = sp_llm.add_parser("serve", help="ollama serve [model]")
+    sp_sv.add_argument("model", nargs="?", default=None)
+    sp_sv.add_argument("--port", type=int, default=11434)
+
+    return p
+
+
+# ── dispatcher ─────────────────────────────────────────────────────────
+COMMANDS = {
+    "_agent":          None,  # internal
+    "start":           cmd_start,
+    "stop":            cmd_stop,
+    "restart":         cmd_restart,
+    "status":          cmd_status,
+    "logs":            cmd_logs,
+    "free":            cmd_free,
+    "pct":             cmd_pct,
+    "ping":            cmd_ping,
+    "tools":           cmd_tools,
+    "info":            cmd_info,
+    "update":          cmd_update,
+    "uninstall":       cmd_uninstall,
+    "health":          cmd_health,
+    "metrics":         cmd_metrics,
+    "nodes":           cmd_nodes,
+    "chat":            cmd_chat,
+    "completions":     cmd_completions,
+    "whoami":          cmd_whoami,
+    "doctor":          cmd_doctor,
+    "donate":          cmd_donate,
+    "up":              cmd_up,
+    "speed":           cmd_speed,
+    "test":            cmd_test,
+    "volunteer":       cmd_volunteer,
+    "share":           cmd_share,
+    "feed":            cmd_feed,
+    "whatsup":         cmd_feed,
+    "whats-up":        cmd_feed,
+    "panic":           cmd_help_bang,
+    "help-bang":       cmd_help_bang,
+    "hi":              cmd_hi,
+    "thanks":          cmd_thanks,
+    "support":         cmd_support,
+    # local LLM helper (dotted names resolved in main())
+    "llm":             cmd_llm_help,
+    "llm detect":      cmd_llm_detect,
+    "llm suggest":     cmd_llm_suggest,
+    "llm bench":       cmd_llm_bench,
+    "llm status":      cmd_llm_status,
+    "llm install":     cmd_llm_install,
+    "llm pull":        cmd_llm_pull,
+    "llm serve":       cmd_llm_serve,
+}
+
+def main(argv: list[str]) -> None:
+    global HUB
+    # Internal: invoked by `hivv start` to fork the agent
+    if argv and argv[0] == "_agent":
+        from threading import Event
+        cmd_agent(Event())
+        return
+
+    # Healthcheck: must run BEFORE the smart-default chat fallback (otherwise
+    # "healthcheck" would be sent to the LLM as a chat message).
+    if argv and argv[0] == "--healthcheck":
+        payload = {"ok": True, "version": VERSION, "hub": HUB, "ts": int(time.time())}
+        try:
+            st = read_state() or {}
+            if isinstance(st, dict) and st.get("node_id"):
+                payload["node_id"] = st["node_id"]
+        except Exception:
+            pass
+        print(json.dumps(payload))
+        sys.exit(0)
+
+    if argv and argv[0] == "--version":
+        print(VERSION)
+        sys.exit(0)
+
+    if not argv or argv[0] in ("-h", "--help", "help"):
+        _print_root_help()
+        return
+
+    cmd_name = argv[0]
+
+    # Resolve dotted subcommand names (e.g. `llm detect` -> `llm detect`).
+    # Skip when the next arg is a flag so `hivv llm --help` still resolves to "llm".
+    # `llm help` is a special case — it's the parent group's own help, not a subcommand.
+    if cmd_name == "llm" and len(argv) > 1 and not argv[1].startswith("-") and argv[1] != "help":
+        cmd_name = "llm " + argv[1]
+
+    # `upgrade` is a friendlier alias for `update`. Without this, `hivv upgrade`
+    # would fall through to the smart-default chat and send the literal word
+    # "upgrade" to the LLM.
+    if cmd_name == "upgrade":
+        cmd_name = "update"
+        argv[0] = "update"
+
+    # Smart default: if argv[0] doesn't match a known subcommand and isn't a flag,
+    # treat the whole argv as a chat message to hivv.org. So:
+    #   hivv whats the meaning of life
+    # becomes a streaming chat call.
+    if cmd_name not in COMMANDS or COMMANDS[cmd_name] is None:
+        if cmd_name.startswith("-"):
+            die(f"unknown flag: {cmd_name} — try `{APP} --help`")
+        _do_chat(" ".join(argv), stream=True)
+        return
+
+    # per-cmd --help (use argv[1] for top-level, argv[2] for dotted like `llm detect`)
+    help_idx = 2 if cmd_name != argv[0] else 1
+    if help_idx < len(argv) and argv[help_idx] in ("-h", "--help"):
+        _print_sub_help(cmd_name)
+        return
+
+    # `llm help` (and `llm` with no subcommand) should show the parent group's
+    # own help — not be parsed as a subcommand choice.
+    if cmd_name == "llm" and (len(argv) == 1 or argv[1] == "help"):
+        cmd_llm_help(None)
+        return
+
+    args = build_parser().parse_args(argv)
+    # apply --hub override
+    if getattr(args, "hub", None):
+        HUB = args.hub
+    COMMANDS[cmd_name](args)
+
+
+def _print_root_help() -> None:
+    print(f"""\033[1m{APP}\033[0m — HIVV.org client CLI / local agent
+hub = {HUB}   version = {VERSION}
+
+\033[1mOperator / local subcommands:\033[0m
+  start              start the local hivv agent (background, heartbeats to hub)
+  stop               stop the local hivv agent
+  restart            stop + start
+  status             pid, uptime, last heartbeat, last error
+  logs [N] [-f]      tail ~/.local/share/hivv/agent.log (last N lines; -f to follow)
+  free               host memory + swap + disk + per-process RSS
+  pct [--watch=N]    live CPU%/MEM% line (refreshes every N seconds)
+  info               hub URL, version, install paths, hub_health
+  update             pull the latest hivv-cli.py from {HUB_NAME}
+  upgrade            alias for `update`
+  uninstall          stop + remove install (keep ~/.config/hivv/ + logs)
+  --help, help       list every subcommand
+
+\033[1mOne-shot subcommands (talk to {HUB_NAME}):\033[0m
+  health             GET /api/health
+  metrics            GET /api/control/metrics/global
+  nodes              GET /api/control/nodes
+  chat MSG...        POST /api/chat  (single message)
+  completions MSG... POST /v1/chat/completions (OpenAI-compatible)
+  whoami             GET /api/control/health (cheap liveness check)
+
+\033[1mLocal LLM helper (talks to your own box, not the hub):\033[0m
+  llm                show llm subcommands
+  llm detect         find ollama, llama.cpp, lm-studio, vllm on this box
+  llm suggest        recommend a model for this hardware (CPU/RAM/GPU)
+  llm bench          quick CPU / RAM / disk benchmark
+  llm status         detect + bench + suggest in one shot
+  llm install [--docker]   print install commands for the detected OS
+  llm pull <model>         ollama pull <model>
+  llm serve [model] [--port]   ollama serve in the foreground
+
+\033[1mExamples:\033[0m
+  hivv whoami
+  hivv health
+  hivv chat 'what is the weather?'
+  hivv llm detect
+  hivv llm suggest
+  hivv llm install --docker
+  hivv start
+  hivv status
+  hivv logs -f
+  hivv pct
+  hivv update
+
+Tip: every subcommand accepts --help (e.g. `hivv logs --help`).
+""")
+    _nag_if_update_available()
+
+def _print_sub_help(cmd: str) -> None:
+    table = {
+        "start":     "start the local hivv agent (background)",
+        "stop":      "stop the local hivv agent",
+        "restart":   "stop + start",
+        "status":    "pid, uptime, last heartbeat, last error, hub_health",
+        "info":      "hub URL, version, install paths",
+        "logs":      "tail ~/.local/share/hivv/agent.log\n  args: [N=50] [-f|--follow]",
+        "free":      "host memory + swap + disk + per-process RSS",
+        "pct":       "live CPU%/MEM% (refreshes every N seconds)\n  flag: --watch=N (default 1; 0 = print once)",
+        "update":    "pull latest hivv-cli.py from hivv.org\n  alias: upgrade",
+        "upgrade":   "alias for `update`",
+        "uninstall": "stop + remove install (keeps ~/.config/hivv/ + logs)",
+        "health":    "GET /api/health",
+        "metrics":   "GET /api/control/metrics/global\n  flag: --local   print this bee's local CPU/GPU/MEM/DISK snapshot",
+        "nodes":     "GET /api/control/nodes",
+        "chat":      "POST /api/chat MSG\n  usage: hivv chat 'hello world'",
+        "completions":"POST /v1/chat/completions (OpenAI-compatible)\n  usage: hivv completions 'hello world'",
+        "whoami":    "GET /api/control/health (cheap liveness check)",
+        "doctor":    "one-glance health report (install + hub + agent + bee + version)\n  output is pasteable for support",
+        "speed":     "latency benchmark (DNS, TCP, hub ping x3, chat TTFB, CPU/RAM/disk)",
+        "test":      "doctor + speed end-to-end smoke test",
+        "volunteer": "opt in/out of contributing compute to the network\n  usage: hivv volunteer [on|off|status]   (default: status)",
+        "panic":     "emergency help — diagnostics + how to report a bug (paste this in support)",
+        "help-bang": "alias for `panic` (the name `help!` is reserved by bash history expansion)",
+        "hi":        "friendly greeter — quick chat round-trip + examples",
+        "thanks":    "say thanks — one-line chat reply",
+        "support":   "ask the AI for help — auto-attaches doctor + last 10 log lines\n  usage: hivv support [question...]   (no args = AI greets + asks)",
+        "llm":       "local AI runtime helper (ollama, llama.cpp, ...)\n  subcommands: detect, suggest, bench, status, install, pull, serve\n  usage: hivv llm <sub> [--flag]",
+        "llm detect":  "scan this box for ollama / llama.cpp / lm-studio / vllm",
+        "llm suggest": "recommend a model for this hardware (CPU/RAM/GPU)\n  flag: --json   emit machine-readable JSON",
+        "llm bench":   "quick CPU sha256 + memory + disk benchmark",
+        "llm status":  "detect + bench + suggest in one shot",
+        "llm install": "print install commands for the detected OS\n  flag: --docker   print the `docker run` for ollama\n  flag: --auto     actually run the install (instead of just printing)\n  flag: --model=X  after install, run `ollama pull X`",
+        "llm pull":    "ollama pull <model>\n  usage: hivv llm pull qwen3:1.7b",
+        "llm serve":   "ollama serve in the foreground\n  args: [model]   preload a model on startup\n  flag: --port=N  listen on port N (default 11434)",
+    }
+    desc = table.get(cmd, "(no help yet)")
+    print(f"{APP} {cmd} — {desc}")
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])
+
