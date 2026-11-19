@@ -45,6 +45,7 @@ import http.server as http_server
 import json
 import math
 import os
+import platform
 import re
 import secrets
 import shutil
@@ -84,6 +85,11 @@ def _get_version(data: bytes | None = None):
     except Exception:
         return "0.2.0"
 VERSION   = _get_version()
+
+# ANSI escape sequences — used to measure the VISIBLE width of a coloured
+# string. A cell that is 22 characters wide must be measured as its text,
+# not as text + escape codes, or every table thinks it is too wide.
+_ANSI_RE = re.compile(r"\033\[[0-9;]*[A-Za-z]")
 
 # Runtime flags (set from CLI args)
 PLAIN_OUTPUT = False
@@ -2525,7 +2531,7 @@ def _self_repair(log_path) -> list:
     import platform as _plat
     _r = lambda c: _sp.run(c, shell=True, capture_output=True, text=True, timeout=30)
     fixes = []
-    system = _plat.system()
+    system = platform.system()
 
     # Crash-loop circuit breaker: track restart attempts in state
     # Max 3 restarts within a 5-minute window, then stop to avoid destabilizing the system
@@ -4281,6 +4287,209 @@ def cmd_restart(args) -> None:
     if pid:
         cmd_stop(args)
     cmd_start(args)
+
+# ── boot: auto-start the agent at login ──────────────────────────────────
+# The user asked for `hivv boot yes` / `hivv boot no`, and for on/off to
+# work everywhere a yes/no is accepted. `_bool_arg` is the shared
+# normaliser: it accepts yes/no/on/off/true/false/1/0/enable/disable and
+# treats anything else as "not specified" so a bare `hivv boot` can REPORT
+# the current state instead of guessing.
+
+_TRUE_WORDS = {"yes", "y", "on", "true", "1", "enable", "enabled", "up",
+               "start", "auto", "always"}
+_FALSE_WORDS = {"no", "n", "off", "false", "0", "disable", "disabled",
+                "stop", "manual", "never"}
+
+
+def _bool_arg(word: str | None) -> bool | None:
+    """Normalise a yes/no/on/off word → True/False, or None if unrecognised.
+
+    One normaliser for EVERY command that takes a yes/no, so `on` and `off`
+    mean the same thing everywhere the user types them.
+    """
+    if word is None:
+        return None
+    w = str(word).strip().lower()
+    if w in _TRUE_WORDS:
+        return True
+    if w in _FALSE_WORDS:
+        return False
+    return None
+
+
+def _boot_state() -> tuple[str, str]:
+    """(state, detail) for the agent's auto-start-on-login setting.
+
+    state is one of: enabled | disabled | not-installed | unsupported
+    """
+    plat = platform.system()
+    if plat == "Darwin":
+        plist = Path.home() / "Library" / "LaunchAgents" / "org.hivv.agent.plist"
+        if not plist.exists():
+            return ("not-installed", "no LaunchAgent (org.hivv.agent.plist)")
+        try:
+            r = subprocess.run(["launchctl", "list"], capture_output=True,
+                               text=True, timeout=10)
+            loaded = "org.hivv.agent" in (r.stdout or "")
+        except Exception:
+            loaded = False
+        # RunAtLoad in the plist is the "auto-start at login" truth
+        try:
+            txt = plist.read_text()
+            auto = "RunAtLoad" in txt and "<true/>" in txt
+        except OSError:
+            auto = False
+        if auto:
+            return ("enabled", "LaunchAgent org.hivv.agent (RunAtLoad)" +
+                    ("" if loaded else " — not currently loaded"))
+        return ("disabled", "LaunchAgent exists but RunAtLoad is off")
+    if plat == "Windows":
+        return ("unsupported", "Windows Task Scheduler is not wired up yet")
+    # Linux / BSD — systemd
+    for scope, label in (("--user", "hivv-agent.service"),):
+        cmd = ["systemctl"] + (["--user"] if scope == "--user" else []) + \
+              ["is-enabled", label]
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        except Exception:
+            continue
+        out = (r.stdout or "").strip() or (r.stderr or "").strip()
+        if out in ("enabled", "enabled-runtime", "static", "indirect"):
+            return ("enabled", f"systemd {label} ({scope}) is {out}")
+        if out in ("disabled", "masked", "not-found", "linked", "generated"):
+            exists = _service_state(label)
+            if exists is None:
+                return ("not-installed", f"no systemd unit {label}")
+            return ("disabled", f"systemd {label} is {out}")
+    exists = _service_state("hivv-agent.service")
+    if exists is None:
+        return ("not-installed", "no systemd unit hivv-agent.service")
+    return ("disabled", "systemd unit exists but is not enabled")
+
+
+def cmd_boot(args) -> None:
+    """Turn the agent's auto-start-at-login on or off.
+
+    `hivv boot`        → report the current setting
+    `hivv boot yes`    → start automatically at login (and now)
+    `hivv boot no`     → do not start automatically (the running agent stays up)
+    `hivv boot on|off` → same as yes|no (accepted by every yes/no in the CLI)
+
+    WHY THIS IS SEPARATE FROM `hivv start`
+    `hivv start` starts the agent NOW. Whether it comes back after a reboot
+    or a logout is a different question, answered by the service manager:
+    systemd's `enable` (user or system scope) on Linux, a LaunchAgent with
+    RunAtLoad on macOS. Mixing the two makes "is it on?" unanswerable, and
+    on a laptop that means the difference between a node that rejoins the
+    hive on wake and one that silently never comes back.
+    """
+    raw = getattr(args, "state", None)
+    want = _bool_arg(raw)
+    plat = platform.system()
+
+    # An UNRECOGNISED word must not be treated as "no" — silently turning
+    # auto-start OFF because someone typed `hivv boot maybe` is the worst
+    # possible outcome. Report it and change nothing.
+    if raw is not None and want is None:
+        die(f"unrecognised option {raw!r} — use yes/no (on/off work too)\n"
+            f"  {APP} boot yes   → start automatically at login\n"
+            f"  {APP} boot no    → do not start automatically\n"
+            f"  {APP} boot       → report the current setting")
+
+    if want is None:
+        state, detail = _boot_state()
+        icon = {"enabled": "\033[32m✓\033[0m",
+                "disabled": "\033[33m○\033[0m"}.get(state, "\033[2m·\033[0m")
+        print(f"\n  {icon} auto-start at login: \033[1m{state}\033[0m")
+        print(f"    {detail}")
+        if state == "not-installed":
+            print(f"    install the agent first:  {APP} start")
+        else:
+            print(f"    change it:                 {APP} boot yes   (or: {APP} boot no)")
+        print()
+
+    elif plat == "Darwin":
+        plist_dir = Path.home() / "Library" / "LaunchAgents"
+        plist_path = plist_dir / "org.hivv.agent.plist"
+        if want:
+            if not plist_path.exists():
+                die(f"no LaunchAgent yet — run `{APP} start` first (it installs one)")
+            txt = plist_path.read_text()
+            if "RunAtLoad" not in txt:
+                txt = txt.replace("<key>KeepAlive</key><true/>",
+                                  "<key>RunAtLoad</key><true/>\n  <key>KeepAlive</key><true/>")
+                plist_path.write_text(txt)
+            subprocess.run(["launchctl", "bootout", f"gui/{os.getuid()}/org.hivv.agent"],
+                           capture_output=True, timeout=20)
+            r = subprocess.run(["launchctl", "bootstrap", f"gui/{os.getuid()}", str(plist_path)],
+                               capture_output=True, text=True, timeout=20)
+            if r.returncode != 0:
+                subprocess.run(["launchctl", "load", "-w", str(plist_path)],
+                               capture_output=True, timeout=20)
+            ok(f"auto-start at login: \033[32mon\033[0m (LaunchAgent org.hivv.agent)")
+            print(f"    {APP} boot no   → turn it off again")
+        else:
+            txt = ""
+            try:
+                txt = plist_path.read_text()
+            except OSError:
+                pass
+            if txt:
+                txt = txt.replace("<key>RunAtLoad</key><true/>",
+                                  "<key>RunAtLoad</key><false/>")
+                plist_path.write_text(txt)
+            subprocess.run(["launchctl", "bootout", f"gui/{os.getuid()}/org.hivv.agent"],
+                           capture_output=True, timeout=20)
+            ok(f"auto-start at login: \033[33moff\033[0m (the running agent stays up)")
+            print(f"    {APP} boot yes  → turn it back on")
+
+    elif plat == "Windows":
+        die("Windows auto-start is not wired up yet — "
+            "the agent runs as a background process there")
+
+    else:
+        # systemd — prefer the USER unit; fall back to the system unit.
+        unit = "hivv-agent.service"
+        scope = "--user"
+        if _service_state(unit) is None:
+            # no user unit — maybe a system-wide one
+            sys_state = None
+            try:
+                r = subprocess.run(["systemctl", "show", unit, "-p", "LoadState",
+                                    "--no-pager"], capture_output=True, text=True, timeout=8)
+                sys_state = (r.stdout or "").strip()
+            except Exception:
+                pass
+            if sys_state and "not-found" not in sys_state:
+                scope = "system"
+            else:
+                die(f"no systemd unit {unit} yet — run `{APP} start` first "
+                    f"(it installs one)")
+        action = "enable" if want else "disable"
+        cmd = ["systemctl"] + (["--user"] if scope == "--user" else []) + [action, unit]
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        except Exception as e:
+            die(f"systemctl {action} failed: {e}")
+        if r.returncode != 0:
+            err = (r.stderr or r.stdout or "").strip().splitlines()
+            hint = err[-1] if err else "unknown error"
+            die(f"systemctl {action} {unit} failed: {hint}\n"
+                f"  try:  sudo systemctl {action} {unit}")
+        if want:
+            # enabling must not leave the agent stopped — start it now too
+            subprocess.run(["systemctl"] + (["--user"] if scope == "--user" else []) +
+                           ["start", unit], capture_output=True, timeout=30)
+            ok(f"auto-start at login: \033[32mon\033[0m ({unit}, {scope})")
+            if scope == "--user":
+                print("    note: a user unit needs the session to start — "
+                      "enable lingering to survive logout:")
+                print(f"      sudo loginctl enable-linger {os.environ.get('USER', '$USER')}")
+        else:
+            ok(f"auto-start at login: \033[33moff\033[0m ({unit}, {scope})")
+            print("    the running agent stays up — only the next reboot changes")
+        print(f"    {APP} boot      → check the current setting")
+
 
 def cmd_status(args) -> None:
     pid = read_pid()
@@ -6169,12 +6378,18 @@ def cmd_metrics(args) -> None:
     print(json.dumps(p, indent=2) if isinstance(p, (dict, list)) else p)
     sys.exit(0 if code == 200 else 2)
 
-def _bee_model_summary(nodes: list, width: int = 112) -> list:
+def _bee_model_summary(nodes: list, width: int | None = None) -> list:
     """One line per bee reporting local models: `name  model (provider) · …`.
 
     Shared by `hivv nodes` (trailing section), `hivv models` (top section)
     and `hivv models --bees`. Pure formatting — no I/O — so the test suite
-    drives it straight from fixtures."""
+    drives it straight from fixtures.
+
+    `width` defaults to the REAL terminal width: a fixed 112 overflowed an
+    80-column terminal and made the whole listing wrap into mush.
+    """
+    if width is None:
+        width = _term_width()
     lines = []
     for n in nodes or []:
         if not isinstance(n, dict):
@@ -6269,6 +6484,180 @@ def _measure_pings(nodes: list, budget: float = 0.7) -> dict:
                 out[str(n["id"])] = ms
     return out
 
+def _term_width(default: int = 100) -> int:
+    """The real terminal width, so a table can FIT instead of wrapping.
+
+    `hivv nodes` used to print a 12-column table ~186 characters wide, which
+    wraps into unreadable mush in any terminal narrower than that. Every
+    table now measures itself against the real width and drops the columns
+    that do not fit, most-valuable-last.
+
+    Falls back to `default` when there is no TTY (piped to a file, run from
+    a cron job) — a fixed width is better than a guess.
+    """
+    try:
+        import shutil
+        w = shutil.get_terminal_size((default, 24)).columns
+    except Exception:
+        w = default
+    # honour an explicit override — CI and the user both know better
+    try:
+        env = os.environ.get("HIVV_COLUMNS") or os.environ.get("COLUMNS")
+        if env and env.isdigit() and int(env) > 20:
+            w = int(env)
+    except Exception:
+        pass
+    return max(40, min(w, 400))
+
+
+def _fit_table(headers: list[str], rows: list[list[str]],
+               widths: list[int], gap: int = 1) -> tuple[list[str], list[list[str]]]:
+    """Drop trailing columns until the table fits the terminal.
+
+    `widths` are the IDEAL widths; a column is shrunk toward its minimum
+    (the width of its longest cell, capped) before it is dropped, so the
+    table degrades gracefully instead of falling off the cliff.
+
+    Returns (headers, rows) with the SAME number of columns.
+    """
+    cols = len(headers)
+    if cols == 0:
+        return headers, rows
+
+    def natural(cols_idx: int) -> int:
+        """The tightest width that still fits every cell in that column."""
+        w = max([len(headers[cols_idx])] +
+                [len(r[cols_idx]) for r in rows]) if rows else len(headers[cols_idx])
+        return w
+
+    limit = _term_width()
+    # visible width, ignoring ANSI escapes
+    def vis(s: str) -> int:
+        return len(_ANSI_RE.sub("", s))
+
+    keep = list(range(cols))
+    while True:
+        total = sum(min(widths[i], natural(i)) for i in keep) + gap * (len(keep) - 1)
+        if total <= limit or len(keep) <= 1:
+            break
+        # drop the LAST kept column that has no fixed meaning. The order is
+        # least→most important, so the tail goes first.
+        keep.pop()
+
+    def cell(i: int, text: str) -> str:
+        w = min(widths[i], natural(i))
+        return _trunc(text, w)
+
+    out_h = [cell(i, headers[i]) for i in keep]
+    out_r = [[cell(i, r[i]) for i in keep] for r in rows]
+    return out_h, out_r
+
+
+def _trunc(s: str, width: int) -> str:
+    """Truncate to `width` VISIBLE characters (ANSI-aware), keeping colour."""
+    if width <= 0:
+        return ""
+    if len(_ANSI_RE.sub("", s)) <= width:
+        return s
+    # walk the string, counting visible chars, keeping escape sequences
+    out, visible, i = [], 0, 0
+    while i < len(s):
+        m = _ANSI_RE.match(s, i)
+        if m:
+            out.append(m.group(0))
+            i = m.end()
+            continue
+        if visible >= width - 1:
+            break
+        out.append(s[i])
+        visible += 1
+        i += 1
+    out.append("…")
+    # re-close the colour if the cell was coloured — a truncated cell that
+    # leaves the colour open bleeds into the next column.
+    if s.endswith("\033[0m"):
+        out.append("\033[0m")
+    return "".join(out)
+
+
+def _wrap_text(text: str, width: int) -> list[str]:
+    """Wrap plain text to `width`, breaking on spaces where possible.
+
+    A long word that cannot fit (a URL, a path) is left intact on its own
+    line rather than chopped — a chopped URL is worse than a long line.
+    """
+    if width <= 0:
+        return [text]
+    words = text.split()
+    if not words:
+        return [text]
+    lines, cur = [], ""
+    for w in words:
+        if not cur:
+            cur = w
+        elif len(cur) + 1 + len(w) <= width:
+            cur += " " + w
+        else:
+            lines.append(cur)
+            cur = w
+    if cur:
+        lines.append(cur)
+    return lines
+
+
+def _hive_totals(nodes: list[dict], pings: dict) -> dict:
+    """Roll the per-bee numbers up into one hive-wide totals row.
+
+    A column of per-bee numbers answers "how is MY bee doing". The totals
+    answer the question operators actually ask — "how big is this hive,
+    and how fast is it running right now?".
+
+    Only ONLINE bees count toward the capacity totals: a bee that has not
+    heartbeated in hours contributes no compute, and counting its RAM would
+    make the hive look bigger than it is.
+    """
+    now = time.time()
+    tot = {
+        "bees": 0, "online": 0, "tps": 0.0, "ping_sum": 0, "ping_n": 0,
+        "cores": 0, "threads": 0, "ram_total_mb": 0, "ram_used_mb": 0,
+        "gpu_count": 0, "gpu_mem_total_mb": 0, "gpu_mem_used_mb": 0,
+        "models": 0, "tokens_total": 0,
+    }
+    for n in nodes:
+        tot["bees"] += 1
+        tot["models"] += len(n.get("local_models") or [])
+        tot["tokens_total"] += (n.get("stats") or {}).get("total_tokens_processed") or 0
+        st = n.get("status")
+        # Match the hub's own definition of "online" (status !== 'offline').
+        # A quarantined bee is still REGISTERED and still heartbeating, so
+        # its capacity is real capacity — counting it offline would make the
+        # hive look smaller than the hub says it is.
+        if st == "offline":
+            continue
+        tot["online"] += 1
+        met = n.get("metrics") or {}
+        sysd = n.get("system") or {}
+        tot["cores"] += int(sysd.get("cpu_physical") or 0)
+        tot["threads"] += int(sysd.get("cpus") or 0)
+        tot["ram_total_mb"] += int(met.get("mem_total_mb") or 0)
+        tot["ram_used_mb"] += int(met.get("mem_used_mb") or 0)
+        for g in (n.get("gpus") or sysd.get("gpus") or []):
+            tot["gpu_count"] += 1
+            tot["gpu_mem_total_mb"] += int(g.get("mem_total_mb") or 0)
+            tot["gpu_mem_used_mb"] += int(g.get("mem_used_mb") or 0)
+        tps = (n.get("stats") or {}).get("tokens_per_sec") or 0
+        try:
+            tot["tps"] += float(tps)
+        except (TypeError, ValueError):
+            pass
+        pv = pings.get(n.get("id"))
+        if isinstance(pv, (int, float)):
+            tot["ping_sum"] += float(pv)
+            tot["ping_n"] += 1
+    tot["avg_ping"] = (tot["ping_sum"] / tot["ping_n"]) if tot["ping_n"] else None
+    return tot
+
+
 def cmd_nodes(args) -> None:
     code, p = http("GET", "/api/control/nodes")
     if getattr(args, "json_output", False):
@@ -6323,14 +6712,17 @@ def cmd_nodes(args) -> None:
 
     print(f"\n\033[1m{APP} nodes\033[0m — {online} online, {total} total{' · hub on ' + latest if latest else ''}\n")
 
-    # Column headers
-    print(f"  {'NAME':<16} {'STATUS':<9} {'VERSION':<12} {'TPS':<8} {'PING':<8} {'MODELS':<7} {'LAST HB':<10} {'CPU':<22} {'CORES/USE':<13} {'Q':<5} {'RAM':<14} {'GPU'}")
-    print(f"  {'─'*16} {'─'*9} {'─'*12} {'─'*8} {'─'*8} {'─'*7} {'─'*10} {'─'*22} {'─'*13} {'─'*5} {'─'*14} {'─'*25}")
-
     behind = 0
     # A node that hasn't heartbeated in this long is a ghost registration — it
     # can't run `hivv update`, so counting it as "behind" warns forever.
     GHOST_AGE_S = 24 * 3600
+
+    # Build the rows first, then render. The table is measured against the
+    # REAL terminal width and the least important columns are dropped when
+    # it does not fit — a table that wraps is worse than a table that shows
+    # fewer columns.
+    table_rows = []
+    totals = _hive_totals(nodes, pings)
 
     for n in nodes:
         name = n.get("name", n.get("id", "?"))[:16]
@@ -6443,11 +6835,77 @@ def cmd_nodes(args) -> None:
         else:
             status_str = f"\033[31m{status}\033[0m"
 
-        print(f"  {name:<16} {status_str:<18} {ver_str:<21} {tps_str:<8} {ping_str:<17} {models:<7} {hb_str:<10} {cpu:<22} {cu:<13} {qs:<5} {ram:<14} {gpu_str}")
+        table_rows.append([name, status_str, ver_str, tps_str, ping_str,
+                            str(models), hb_str, cpu, cu, qs, ram, gpu_str])
+
+    # ── render: fit the terminal, then the totals row ─────────────────────
+    HEADERS = ["NAME", "STATUS", "VERSION", "TPS", "PING", "MODELS",
+               "LAST HB", "CPU", "CORES/USE", "Q", "RAM", "GPU"]
+    # ideal widths, most important first — the tail is dropped first
+    IDEAL = [16, 9, 12, 8, 8, 7, 10, 22, 13, 5, 14, 25]
+
+    heads, rows = _fit_table(HEADERS, table_rows, IDEAL)
+
+    def _row(cells: list[str]) -> str:
+        widths = [min(IDEAL[i], max(len(_ANSI_RE.sub("", heads[i])),
+                                    max((len(_ANSI_RE.sub("", r[i])) for r in rows),
+                                        default=0))) for i in range(len(heads))]
+        # the visible width of each cell, then pad to the column width
+        out = []
+        for i, c in enumerate(cells[:len(heads)]):
+            vis = len(_ANSI_RE.sub("", c))
+            pad = " " * max(0, widths[i] - vis)
+            out.append(c + pad)
+        return "  " + " ".join(out).rstrip()
+
+    print(_row(heads))
+    print("  " + " ".join("─" * min(IDEAL[i], max(len(heads[i]),
+                                                 max((len(_ANSI_RE.sub("", r[i])) for r in rows),
+                                                     default=0)))
+                          for i in range(len(heads))).rstrip())
+    for r in rows:
+        print(_row(r))
+
+    # ── TOTALS: the hive as one machine ───────────────────────────────────
+    # The per-bee rows answer "how is my bee". This answers "how big is the
+    # hive and how fast is it running" — which is the number people actually
+    # want and which no single row can give.
+    t = totals
+    if t["bees"]:
+        ram_tot = (f"{t['ram_used_mb']//1024}/{t['ram_total_mb']//1024}GB"
+                   if t["ram_total_mb"] else "—")
+        gpu_tot = (f"{t['gpu_mem_used_mb']//1024}/{t['gpu_mem_total_mb']//1024}GB"
+                   if t["gpu_mem_total_mb"] else ("—" if t["gpu_count"] == 0
+                   else f"{t['gpu_count']}×"))
+        cores = (f"{t['cores']}c/{t['threads']}t" if t["threads"] else "—")
+        avg_ping = (f"{t['avg_ping']:.0f}ms" if t["avg_ping"] is not None else "—")
+        tot_row = ["\033[1mTOTAL\033[0m",
+                   f"\033[1m{t['online']}/{t['bees']}\033[0m",
+                   f"{t['models']} models",
+                   f"\033[1m{t['tps']:.1f}\033[0m",
+                   avg_ping,
+                   str(t["models"]),
+                   "—",
+                   "—",
+                   cores,
+                   "—",
+                   ram_tot,
+                   gpu_tot]
+        print()
+        print(_row(tot_row))
+        # the footnote must wrap too — a 112-char note overflows an 80-col
+        # terminal even when the table itself fits
+        _note = (f"capacity totals count ONLINE bees only ({t['online']} of {t['bees']}) · "
+                 f"tps = hive tokens/sec · avg ping = mean of {t['ping_n']} measured bee(s)")
+        for _ln in _wrap_text(_note, _term_width() - 2):
+            print(f"  \033[2m{_ln}\033[0m")
 
     if behind:
-        print(f"\n  \033[33m⚠ {behind} bee(s) behind the hub CLI\033[0m — agents self-heal within ~5 min,"
-              f"\n    or on that machine: {APP} update   (your copy: {latest or '?'})")
+        _warn_msg = (f"⚠ {behind} bee(s) behind the hub CLI — agents self-heal "
+                     f"within ~5 min, or on that machine: {APP} update "
+                     f"(your copy: {latest or '?'})")
+        for _ln in _wrap_text(_warn_msg, _term_width() - 4):
+            print(f"  \033[33m{_ln}\033[0m")
 
     # Models by bee — ACTUAL model names per bee (the MODELS column above
     # only has counts; operators want to know who runs what).
@@ -9424,7 +9882,7 @@ def cmd_doctor(args) -> None:
     import platform as _plat
     import subprocess as _sp
     svc_ok = False
-    if _plat.system() == "Linux":
+    if platform.system() == "Linux":
         svc_path = Path.home() / ".config" / "systemd" / "user" / "hivv-agent.service"
         if svc_path.exists():
             r = _sp.run(["systemctl", "--user", "is-enabled", "hivv-agent"],
@@ -9443,7 +9901,7 @@ def cmd_doctor(args) -> None:
             print(f"  service: {_ok('systemd service running')}")
         elif pid:
             print(f"  service: {_warn('agent running but not via systemd — may not survive reboot')}")
-    elif _plat.system() == "Darwin":
+    elif platform.system() == "Darwin":
         r = _sp.run(["launchctl", "list", f"org.hivv.agent"],
                     capture_output=True, text=True, timeout=5)
         if r.returncode == 0:
@@ -9675,7 +10133,7 @@ def cmd_doctor(args) -> None:
 
         # Create/enable systemd user service so the agent auto-starts on boot
         import platform as _plat
-        if _plat.system() == "Linux":
+        if platform.system() == "Linux":
             svc_dir = Path.home() / ".config" / "systemd" / "user"
             svc_path = svc_dir / "hivv-agent.service"
             svc_content = f"""[Unit]
@@ -9708,7 +10166,7 @@ WantedBy=default.target
             print(f"  \033[32m✓\033[0m systemd service: hivv-agent.service (enabled, started)")
 
         # Create/enable a LaunchAgent so the agent auto-starts at login (macOS)
-        elif _plat.system() == "Darwin":
+        elif platform.system() == "Darwin":
             plist_dir = Path.home() / "Library" / "LaunchAgents"
             plist_path = plist_dir / "org.hivv.agent.plist"
             if not plist_path.exists():
@@ -9741,7 +10199,7 @@ WantedBy=default.target
 
         # Windows: hint at Task Scheduler (registering from CLI needs careful
         # quoting; give the exact command instead of silently doing nothing)
-        elif _plat.system() == "Windows":
+        elif platform.system() == "Windows":
             print(f"  \033[33m⚠\033[0m to auto-start at login on Windows, run in PowerShell:")
             print(f"    schtasks /Create /TN hivv /TR \"cmd /c {APP} start\" /SC ONLOGON /RL LIMITED /F")
             print(f"    (or simply keep a terminal with: {APP} start)")
@@ -14520,6 +14978,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help="all (default) = agent + managed LLM · or just one part")
 
     sp = sub.add_parser("status",   help="pid, uptime, last heartbeat, last error")
+    sp = sub.add_parser("boot",     help="auto-start the agent at login (yes|no|on|off)")
+    sp.add_argument("state", nargs="?", default=None,
+                    help="yes|no (on|off work too). Omit to just REPORT the setting.")
     sp = sub.add_parser("info",     help="hub URL, version, install paths, hub_health")
     sp = sub.add_parser("uninstall",help="stop + remove install (keep config + logs)")
 
@@ -14975,6 +15436,7 @@ COMMANDS = _resolve_cmds({
     "stop":            "cmd_stop",
     "restart":         "cmd_restart",
     "status":          "cmd_status",
+    "boot":            "cmd_boot",
     "logs":            "cmd_logs",
     "free":            "cmd_free",
     "pct":             "cmd_pct",
@@ -15215,7 +15677,52 @@ def main(argv: list[str]) -> None:
     # apply --hub override
     if getattr(args, "hub", None):
         HUB = args.hub
+    _normalize_bool_args(args)
     COMMANDS[cmd_name](args)
+
+
+def _normalize_bool_args(args) -> None:
+    """Accept on/off/true/false/1/0 wherever a yes/no word is expected.
+
+    The user asked for `on` and `off` to mean the same as `yes` and `no`
+    "for all hivv commands". Doing it ONCE, centrally, means every command
+    that takes a yes/no-like word gets it — including the ones added later,
+    which nobody has to remember to update.
+
+    Only a STRING attribute is touched: a real `bool` (a `--yes` flag) is
+    already a decision, and a list/dict is not a word. The attribute is
+    replaced with the canonical "yes"/"no" so existing `== "yes"` checks
+    keep working.
+    """
+    for name, value in list(vars(args).items()):
+        if not isinstance(value, str):
+            continue
+        b = _bool_arg(value)
+        if b is None:
+            continue
+        # Only rewrite a word that MEANT to be a yes/no. A free-text field
+        # (a chat message, a node name) must never be rewritten — "on" as a
+        # node name would become "yes".
+        if name in _BOOL_ARG_NAMES or _looks_like_bool_slot(name):
+            setattr(args, name, "yes" if b else "no")
+
+
+# Attribute names that hold a yes/no-like word. Anything named like a
+# boolean decision is included, so `hivv volunteer on`, `hivv boot off` and
+# a future `hivv foo yes` all behave the same.
+_BOOL_ARG_NAMES = {
+    "state", "action", "mode", "opt", "choice", "answer", "value",
+    "yes_no", "confirm", "toggle", "switch", "enable", "disable",
+    "on", "off", "flag",
+}
+
+
+def _looks_like_bool_slot(name: str) -> bool:
+    """True when an attribute NAME suggests it holds a yes/no word."""
+    n = name.lower()
+    return (n.startswith(("enable", "disable", "auto", "confirm"))
+            or n.endswith(("_yes", "_no", "_on", "_off", "_enable", "_disable"))
+            or n in ("yes", "no", "on", "off"))
 
 
 def _self_heal_from_parse_error(parse_err, cmd_name: str) -> None:
@@ -15415,7 +15922,8 @@ def _print_sub_help(cmd: str) -> None:
         "uninstall": "stop + remove install (keeps ~/.config/hivv/ + logs)",
         "health":    "GET /api/health",
         "metrics":   "GET /api/control/metrics/global\n  flag: --local   print this bee's local CPU/GPU/MEM/DISK snapshot",
-        "nodes":     "table view of all registered nodes\n  flag: --json   output raw JSON",
+        "nodes":     "table view of all registered nodes (fits your terminal) + hive TOTALS\n  flag: --json   output raw JSON",
+        "boot":      "auto-start the agent at login (survive reboot)\n  usage: hivv boot yes | hivv boot no   (on/off work too)\n  bare:   hivv boot          → report the current setting",
         "node":      "show details about a specific node\n  usage: hivv node <name> [--json]",
         "node-chat": "chat directly with a node's LLM\n  usage: hivv node-chat <node> <message>",
         "reach":     "test connectivity to another node\n  usage: hivv reach <name>",
