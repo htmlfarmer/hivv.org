@@ -123,9 +123,37 @@ if ($Uninstall) {
 }
 
 # ── preflight ──────────────────────────────────────────────────────────
+# Python is required for the CLI. Try to install it automatically rather than
+# dying with a bare "install this first" message.
+function Update-PathFromRegistry {
+    $parts = @()
+    foreach ($scope in @('Machine', 'User')) {
+        try {
+            $p = [Environment]::GetEnvironmentVariable('Path', $scope)
+            if ($p) { $parts += $p }
+        } catch { }
+    }
+    if ($parts.Count -gt 0) { $env:Path = ($parts -join ';') + ';' + $env:Path }
+}
+
 $py = $null
 foreach ($candidate in @("python", "python3", "py")) {
     if (Get-Command $candidate -ErrorAction SilentlyContinue) { $py = $candidate; break }
+}
+if (-not $py) {
+    Write-Host "  → python not found — installing it for you..." -ForegroundColor $ColorAccent
+    if (Get-Command winget -ErrorAction SilentlyContinue) {
+        & winget install --silent --accept-source-agreements --accept-package-agreements `
+            --id Python.Python.3.12 2>&1 | Out-Null
+        Update-PathFromRegistry
+    } elseif (Get-Command scoop -ErrorAction SilentlyContinue) {
+        & scoop install python 2>&1 | Out-Null
+    } elseif (Get-Command choco -ErrorAction SilentlyContinue) {
+        & choco install python -y 2>&1 | Out-Null
+    }
+    foreach ($candidate in @("python", "python3", "py")) {
+        if (Get-Command $candidate -ErrorAction SilentlyContinue) { $py = $candidate; break }
+    }
 }
 if (-not $py) {
     _Die "python not found on PATH. Install Python 3 and reopen PowerShell:"

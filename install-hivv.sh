@@ -43,6 +43,7 @@ DO_UNINSTALL=0
 DO_EXPERIMENT=0
 NO_PATH=0
 ASSUME_YES=0
+HIVV_MODE="auto"   # auto | system | user — explicit install scope (2026-11-18 rethink)
 QUIET=0
 WITH_LLM=0   # 0 = auto-prompt if interactive, 1 = yes, -1 = no
 WITH_SERVICE=1  # 1 = install service by default when sudo available, 0 = skip
@@ -295,6 +296,8 @@ while [[ $# -gt 0 ]]; do
         --yes|-y)   ASSUME_YES=1      ; shift ;;
         --with-llm) WITH_LLM=1        ; shift ;;
         --no-llm)   WITH_LLM=-1       ; shift ;;
+        --mode=*)  HIVV_MODE="${1#*=}"  ; shift ;;
+        --mode)    HIVV_MODE="$2"      ; shift 2 ;;
         --no-service)  WITH_SERVICE=0  ; shift ;;
         --quiet|-q) QUIET=1           ; shift ;;
         --experiment) DO_EXPERIMENT=1 ; shift ;;
@@ -305,6 +308,7 @@ while [[ $# -gt 0 ]]; do
               "" \
               "  --prefix=DIR   install location (default /usr/local; \$HOME/.local for user-only)" \
               "  --no-path      skip the add-to-PATH note" \
+              "  --mode=X       X = auto (default) | system (sudo, all users) | user (~/.local)" \
               "  --yes          no prompts; auto-add BIN_DIR to PATH (for scripts)" \
               "  --with-llm     also install llama.cpp + a recommended open model" \
               "  --no-llm       skip the LLM prompt" \
@@ -413,11 +417,72 @@ case "${OSTYPE:-$(uname -s 2>/dev/null)}" in
 esac
 
 # Runtime deps
+# ── Python is required for the CLI. Rather than dying with "install it
+#    first", we try to install it ourselves for the detected OS and, if that
+#    fails, print the exact command to type for THAT machine.
 PYTHON_BIN=""
 for p in python3 python; do
     if need "$p"; then PYTHON_BIN="$p"; break; fi
 done
-[[ -n "$PYTHON_BIN" ]] || _die "python3 not found. install it first (apt install python3 / brew install python3)"
+
+if [[ -z "$PYTHON_BIN" ]]; then
+    _log "python3 not found — installing it for you…"
+    _install_python_auto() {
+        local os pkg
+        os="$(uname -s 2>/dev/null || echo unknown)"
+        pkg="none"
+        case "$os" in
+            Linux)
+                if   need apt-get; then pkg="apt"
+                elif need dnf;     then pkg="dnf"
+                elif need yum;     then pkg="yum"
+                elif need pacman;  then pkg="pacman"
+                elif need apk;     then pkg="apk"
+                elif need zypper;  then pkg="zypper"
+                fi
+                ;;
+            Darwin) pkg="brew" ;;
+        esac
+        local SUDO=""
+        if [[ "$(id -u)" -ne 0 ]] && need sudo && sudo -n true 2>/dev/null; then SUDO="sudo"; fi
+        case "$pkg" in
+            apt)
+                $SUDO apt-get update >/dev/null 2>&1 || true
+                $SUDO apt-get install -y python3 >/dev/null 2>&1 ;;
+            dnf)    $SUDO dnf install -y python3 >/dev/null 2>&1 ;;
+            yum)    $SUDO yum install -y python3 >/dev/null 2>&1 ;;
+            pacman) $SUDO pacman -S --noconfirm python >/dev/null 2>&1 ;;
+            apk)    $SUDO apk add --no-cache python3 >/dev/null 2>&1 ;;
+            zypper) $SUDO zypper --non-interactive install python3 >/dev/null 2>&1 ;;
+            brew)   brew install python3 >/dev/null 2>&1 ;;
+        esac
+    }
+    _install_python_auto || true
+    for p in python3 python; do
+        if need "$p"; then PYTHON_BIN="$p"; break; fi
+    done
+fi
+
+if [[ -z "$PYTHON_BIN" ]]; then
+    printf '\n%sPython 3 is required for the hivv CLI and could not be installed automatically.%s\n\n' "$RED$BLD" "$RST" >&2
+    printf '  Install it with one of these, then re-run:\n\n' >&2
+    case "$(uname -s 2>/dev/null)" in
+        Linux)
+            if   need apt-get; then printf '    %ssudo apt-get update && sudo apt-get install -y python3%s\n' "$CYN" "$RST" >&2
+            elif need dnf;     then printf '    %ssudo dnf install -y python3%s\n' "$CYN" "$RST" >&2
+            elif need yum;     then printf '    %ssudo yum install -y python3%s\n' "$CYN" "$RST" >&2
+            elif need pacman;  then printf '    %ssudo pacman -S --noconfirm python%s\n' "$CYN" "$RST" >&2
+            elif need apk;     then printf '    %ssudo apk add python3%s\n' "$CYN" "$RST" >&2
+            else                    printf '    %s# install Python 3.8+ from https://www.python.org/downloads/%s\n' "$CYN" "$RST" >&2
+            fi ;;
+        Darwin)
+            printf '    %sbrew install python3%s\n' "$CYN" "$RST" >&2 ;;
+        *)
+            printf '    %s# install Python 3.8+ from https://www.python.org/downloads/%s\n' "$CYN" "$RST" >&2 ;;
+    esac
+    printf '\n'
+    exit 1
+fi
 PY_VER="$("$PYTHON_BIN" -c 'import sys;print(f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}")' 2>/dev/null || echo unknown)"
 
 if ! need curl && ! need wget; then
@@ -445,6 +510,29 @@ SUDO=""
 # --prefix like $HOME/opt isn't wrongly treated as "not writable")
 [[ -w "$PREFIX" || -w "$(dirname "$PREFIX")" ]] && mkdir -p "$BIN_DIR" "$LIB_DIR" 2>/dev/null || true
 
+# ── install mode (first-class) ───────────────────────────────────────
+case "$HIVV_MODE" in
+  system)
+    PREFIX="/usr/local"; BIN_DIR="$PREFIX/bin"; LIB_DIR="$PREFIX/lib/$APP"
+    CLIENT_FILE="$LIB_DIR/${APP}-cli.py"; WRAPPER="$BIN_DIR/$APP"
+    if [[ "$EUID" -eq 0 ]]; then SUDO=""
+    elif _can_sudo; then SUDO="sudo"
+    else _die "--mode=system needs sudo — rerun with: sudo curl -sSL $HUB/install-$APP.sh | bash -s -- --mode=system"
+    fi
+    WITH_SERVICE=1
+    ;;
+  user)
+    # user mode = ~/.local + ALWAYS a per-user autostart service (the rethink:
+    # user installs used to get NO service → second step via doctor --fix)
+    PREFIX="$HOME/.local"; BIN_DIR="$PREFIX/bin"; LIB_DIR="$PREFIX/lib/$APP"
+    CLIENT_FILE="$LIB_DIR/${APP}-cli.py"; WRAPPER="$BIN_DIR/$APP"
+    SUDO=""
+    WITH_SERVICE=1
+    ;;
+  auto) ;;
+  *) _die "--mode must be auto, system or user (got: $HIVV_MODE)" ;;
+esac
+
 if [[ ! -w "$BIN_DIR" ]] || [[ ! -w "$(dirname "$LIB_DIR")" ]]; then
     if _can_sudo; then
         printf '  %s⚡ sudo available — system-wide install (helps everyone on this machine)%s\n' "$BLD" "$RST"
@@ -471,10 +559,21 @@ if [[ -z "$SUDO" ]]; then
     if [[ ! -w "$BIN_DIR" ]] || [[ ! -w "$(dirname "$LIB_DIR")" ]]; then
         _die "can't write to $BIN_DIR — run with sudo or use --prefix=\$HOME/.local"
     fi
-    printf '  %s✓%s user-local install — just for you (no sudo needed)%s\n' "$GRN" "$RST" "$RST"
-    printf '    · no sudo password needed — try it risk-free\n'
-    printf '    · to help others on this machine later, run with sudo:\n'
-    printf '      %ssudo curl -sSL %s/install-%s.sh | bash%s\n\n' "$CYN" "$HUB" "$APP" "$RST"
+    # Label from where files actually LAND — not from "sudo was empty".
+    # /usr/local without sudo is still a SHARED prefix (every user sees it);
+    # only $HOME/.local* is truly "just for you" (Stuarts-iMac, 2026-11-18:
+    # the old label said user-local while installing into /usr/local).
+    if [[ "$PREFIX" == "$HOME/.local" || "$PREFIX" == "$HOME"/* ]]; then
+        printf '  %s✓%s user-local install — just for you (files in %s, no sudo needed)%s\n' "$GRN" "$RST" "$PREFIX" "$RST"
+        printf '    · no sudo password needed — try it risk-free\n'
+        printf '    · auto-start on login: %shivv doctor --fix%s (per-user service)\n' "$CYN" "$RST"
+        printf '    · to help others on this machine later, run with sudo:\n'
+        printf '      %ssudo curl -sSL %s/install-%s.sh | bash%s\n\n' "$CYN" "$HUB" "$APP" "$RST"
+    else
+        printf '  %s✓%s no-sudo install into %s — SHARED: every user on this machine can run %s%s\n' "$GRN" "$RST" "$PREFIX" "$APP" "$RST"
+        printf '    · state + service remain per-user (yours: %s/.local/share/%s)\n' "$HOME" "$APP"
+        printf '    · explicit system-wide (sudo) install: sudo curl -sSL %s/install-%s.sh | bash\n\n' "$HUB" "$APP"
+    fi
 fi
 
 # ── auto-experiment: pre-flight check before any install steps ─────────
@@ -634,7 +733,7 @@ fi
 # macOS: LaunchAgent per-user (no sudo needed).
 SERVICE_INSTALLED=0
 if [[ "$WITH_SERVICE" -eq 1 ]]; then
-    if [[ "$(uname -s)" == "Linux" ]] && [[ -n "$SUDO" ]] && need systemctl && [[ -d /run/systemd/system ]]; then
+    if [[ "$(uname -s)" == "Linux" ]] && { [[ -n "$SUDO" ]] || [[ "$EUID" -eq 0 ]]; } && need systemctl && [[ -d /run/systemd/system ]]; then
         _log "spinning up your node — you're joining the hivv network 🐝"
         RUN_USER="${SUDO_USER:-$(id -un)}"
         RUN_HOME="$(getent passwd "$RUN_USER" 2>/dev/null | cut -d: -f6)"
@@ -670,9 +769,51 @@ UNIT
         else
             _warn "couldn't determine user home — service skipped. Start manually: $APP start"
         fi
+    elif [[ "$(uname -s)" == "Linux" ]] && need systemctl && [[ "$EUID" -ne 0 ]]; then
+        # user mode: per-user systemd unit — no sudo, survives login/logout.
+        # (the old gap: user installs skipped the service entirely and needed
+        #  a second `hivv doctor --fix` step before the node was on the net)
+        mkdir -p "$HOME/.config/systemd/user"
+        PY_ABS="$(command -v "$PYTHON_BIN")"
+        cat > "$HOME/.config/systemd/user/${APP}-agent.service" <<UNIT
+[Unit]
+Description=hivv node agent — the people's distributed AI (user mode)
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=$PY_ABS $CLIENT_FILE _agent
+Restart=always
+RestartSec=10
+Nice=10
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+
+[Install]
+WantedBy=default.target
+UNIT
+        systemctl --user daemon-reload 2>/dev/null || true
+        if systemctl --user enable --now ${APP}-agent.service 2>/dev/null; then
+            SERVICE_INSTALLED=1
+            _say "you're live 🐝 — systemd --user starts your node on login"
+        else
+            _warn "couldn't start the user service — start manually: $APP start"
+        fi
+        if loginctl enable-linger "$USER" 2>/dev/null; then
+            _say "linger enabled — your node survives logout"
+        else
+            _warn "node stops when you log out — enable: loginctl enable-linger $USER"
+        fi
     elif [[ "$(uname -s)" == "Darwin" ]]; then
-        # per-user LaunchAgent — no sudo required
-        LA_DIR="$HOME/Library/LaunchAgents"
+        # per-user LaunchAgent — no sudo required. Under ROOT (sudo curl|bash),
+        # target the REAL user's home: a root gui/0 LaunchAgent would never
+        # load for them (2026-11-18 rethink).
+        RUN_USER="${SUDO_USER:-$(id -un)}"
+        RUN_HOME="$HOME"
+        if [[ "$EUID" -eq 0 && -n "$SUDO_USER" ]]; then
+            RUN_HOME="$(eval echo ~"$SUDO_USER" 2>/dev/null || echo "$HOME")"
+            _warn "tip: on macOS run WITHOUT sudo (user-mode is native) — installing the LaunchAgent for $RUN_USER"
+        fi
+        LA_DIR="$RUN_HOME/Library/LaunchAgents"
         LA_PLIST="$LA_DIR/org.hivv.agent.plist"
         PY_ABS="$(command -v "$PYTHON_BIN")"
         if [[ -n "$PY_ABS" ]]; then
@@ -691,14 +832,15 @@ UNIT
   </array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
-  <key>StandardOutPath</key><string>$HOME/.local/share/$APP/agent.log</string>
-  <key>StandardErrorPath</key><string>$HOME/.local/share/$APP/agent.log</string>
+  <key>StandardOutPath</key><string>$RUN_HOME/.local/share/$APP/agent.log</string>
+  <key>StandardErrorPath</key><string>$RUN_HOME/.local/share/$APP/agent.log</string>
   <key>Nice</key><integer>10</integer>
 </dict>
 </plist>
 PLIST
             launchctl bootout "gui/$(id -u)/org.hivv.agent" 2>/dev/null || true
-            launchctl bootstrap "gui/$(id -u)" "$LA_PLIST" 2>/dev/null \
+            [[ "$EUID" -eq 0 ]] && chown "$RUN_USER" "$LA_PLIST" 2>/dev/null || true
+            launchctl bootstrap "gui/$(id -u "$RUN_USER")" "$LA_PLIST" 2>/dev/null \
                 && _say "you're live 🐝 — LaunchAgent starts your node on login" \
                 && SERVICE_INSTALLED=1 \
                 || { launchctl load -w "$LA_PLIST" 2>/dev/null && SERVICE_INSTALLED=1 && _say "you're live 🐝 — LaunchAgent starts your node on login"; }
@@ -723,10 +865,39 @@ if [[ "$NEEDS_PATH" -eq 1 ]] && [[ "$NO_PATH" -eq 0 ]]; then
     esac
 fi
 
+# ── proof: the node actually JOINED the network (registered at the hub) ──
+# `--healthcheck` only carries node_id AFTER a successful register, so a match
+# here means: agent up + hub reachable + identity minted. One command → done.
+HIVV_JOINED=""
+if [[ "$SERVICE_INSTALLED" -eq 1 ]] && [[ -x "$WRAPPER" ]]; then
+    printf '  %s→ joining the hive' "$BLU"
+    for _i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+        HC_OUT=$("$WRAPPER" --healthcheck 2>/dev/null || true)
+        HIVV_JOINED=$(printf '%s' "$HC_OUT" | grep -o '"node_id":"[^"]*"' | head -1 | cut -d'"' -f4)
+        [[ -n "$HIVV_JOINED" ]] && break
+        printf '.'
+        sleep 1
+    done
+    if [[ -n "$HIVV_JOINED" ]]; then
+        printf ' %s✓ registered as %s — your node is ON the network%s\n' "$GRN" "$HIVV_JOINED" "$RST"
+    else
+        printf ' %s! agent is starting — verify in ~30s: %s up%s\n' "$YLW" "$APP" "$RST"
+    fi
+fi
+
 # ── success card ──────────────────────────────────────────────────────
+# Install-scope label: derived from PREFIX (where files live), not from
+# "was sudo empty" — /usr/local without sudo is still shared by everyone.
+if [[ "$PREFIX" == "$HOME/.local" || "$PREFIX" == "$HOME"/* ]]; then
+    HIVV_INSTALL_LABEL="user-local (just for you)"
+elif [[ -n "$SUDO" ]]; then
+    HIVV_INSTALL_LABEL="SYSTEM-WIDE (helps everyone)"
+else
+    HIVV_INSTALL_LABEL="shared prefix $PREFIX (all users)"
+fi
 SUCCESS_BAR="${GRN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RST}"
 printf '\n  %s\n' "$SUCCESS_BAR"
-printf '  %s%s✓ %s CLI installed — %s%s\n' "$BLD" "$GRN" "$APP" "$([ -n "$SUDO" ] && echo "SYSTEM-WIDE (helps everyone)" || echo "user-local (just for you)")" "$RST"
+printf '  %s%s✓ %s CLI installed — %s%s\n' "$BLD" "$GRN" "$APP" "$HIVV_INSTALL_LABEL" "$RST"
 printf '  %s\n\n' "$SUCCESS_BAR"
 
 printf '  %s🌌 how hivv works — 30-second tour%s\n' "$BLD" "$RST"
@@ -734,7 +905,8 @@ printf '    · the %s%s hub%s is just a phone book — it knows who is online, n
 printf '    · your computer is a %snode%s — the agent heartbeats to the hub, peers talk direct%s\n' "$BLD" "$RST"
 printf '    · AI requests route to the best available brain: your local model, a peer, or a donated cloud key%s\n' "$RST"
 printf '    · your chats/data stay between nodes — the hub never sees prompt content%s\n' "$RST"
-printf '    · opt-in sharing: %s%s volunteer on%s lets the hive queue jobs on your idle CPU/GPU%s\n' "$CYN" "$APP" "$RST" "$RST"
+printf '    · relay jobs (cross-NAT): ON by default — the hive may queue jobs on your idle CPU/GPU.\n'
+printf '      anytime: %sopt out%s = %shivv volunteer off%s   ·   status: hivv volunteer\n' "$CYN" "$RST" "$CYN" "$RST"
 printf '\n'
 printf '  %slocation%s\n' "$BLD" "$RST"
 printf '    wrapper   %s%s%s\n' "$CYN" "$WRAPPER" "$RST"
@@ -754,6 +926,7 @@ printf '    %s$%s %s%s hi%s                   say hello to the hive 🐝\n'     
 printf '    %s$%s %s%s chat "hello"%s         talk to the distributed AI\n'                "$DIM" "$RST" "$BLD" "$APP" "$RST"
 printf '    %s$%s %s%s nodes%s                see every bee online right now\n'            "$DIM" "$RST" "$BLD" "$APP" "$RST"
 printf '    %s$%s %s%s welcome%s              guided tour of everything hivv can do\n\n'    "$DIM" "$RST" "$BLD" "$APP" "$RST"
+printf '    %s$%s %s%s volunteer off%s        relay jobs across NAT — ON by default (opt out here)\n\n' "$DIM" "$RST" "$BLD" "$APP" "$RST" "$RST"
 
 printf '  %srunning your node 🐝%s\n' "$BLD" "$RST"
 if [[ "$SERVICE_INSTALLED" -eq 1 ]]; then
@@ -769,7 +942,7 @@ printf '      %s(macOS has no systemd: %s doctor --fix creates a LaunchAgent, or
 printf '      %s(want auto-start on this OS? %s doctor --fix does its best)%s\n' "$DIM" "$APP" "$RST" ;;
 esac
 fi
-printf '    %s$%s %s%s volunteer on%s         enable running AI jobs from the hive (opt-in)\n' "$DIM" "$RST" "$BLD" "$APP" "$RST"
+printf '    %s$%s %s%s volunteer%s          relay jobs: ON by default — status/off: hivv volunteer\n' "$DIM" "$RST" "$BLD" "$APP" "$RST" "$RST"
 printf '    %s$%s %s%s llm status%s           check your local AI setup (open weights)\n' "$DIM" "$RST" "$BLD" "$APP" "$RST"
 printf '    %s$%s %s%s firewall%s              see who can reach your node (localhost by default)\n\n' "$DIM" "$RST" "$BLD" "$APP" "$RST"
 
