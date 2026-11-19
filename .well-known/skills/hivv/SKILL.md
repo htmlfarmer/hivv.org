@@ -32,7 +32,7 @@ curl -fsSL https://hivv.org/install-hivv.sh | sh
 | `hivv route "msg"` | dry-run — who *would* answer & why, never executes |
 | `hivv nodes` | table of every registered bee |
 | `hivv reach <name>` | test connectivity to one bee |
-| `hivv node-chat <name> "msg"` | chat directly with a bee's own LLM |
+| `hivv ask <name> "msg"` | chat with ONE bee — pins it (direct → hub relay); aliases `talk`, `node-chat` |
 | `hivv health` | hub health check |
 | `hivv up` | quick 3-line status ("you good?") |
 | `hivv test` | full end-to-end smoke test (doctor + speed + network) |

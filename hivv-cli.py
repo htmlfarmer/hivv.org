@@ -20,7 +20,8 @@ Subcommands (one-shot / talk to hivv.org):
   health             GET /api/health
   metrics            GET /api/control/metrics/global
   nodes              GET /api/control/nodes
-  chat MSG           POST /api/chat   (smart default — see below)
+  chat MSG           POST /api/chat   (the HIVE answers — smart default, see below)
+  ask <bee> MSG      chat with ONE bee (direct → hub relay). alias: talk
   completions MSG    POST /v1/chat/completions (OpenAI-compatible)
   whoami             GET /api/control/health (cheap "am I talking to hivv?" check)
 
@@ -203,6 +204,15 @@ STATE_FILE    = STATE_DIR   / "state.json"
 LOG_FILE      = STATE_DIR   / "agent.log"
 PID_FILE      = STATE_DIR   / "agent.pid"
 AUTH_FILE     = CONFIG_DIR  / "auth.json"   # 0600 — per-install bearer token
+
+# The KNOWN-GOOD PIN. Records which copy last passed a healthcheck — so
+# "go back to what worked" is a fact, not a hope. The .bak file beside the
+# CLI is the bytes; this file says WHICH bytes and how old they are.
+#
+# It lives in STATE_DIR, NOT next to the CLI: a file written beside the
+# CLI inside a git checkout makes `git status` dirty, which is exactly the
+# bug `hivv update` was fixed for on 2026-11-18.
+KNOWN_GOOD_FILE = STATE_DIR / "known-good.json"
 VISITOR_FILE  = STATE_DIR   / "visitor_id"  # persistent per-install device ID
 APPROVALS_FILE = STATE_DIR  / "approvals.json"  # MAYBE grants pushed to our inbox
 
@@ -271,7 +281,7 @@ _UPDATE_FORCE = False
 # die()/warn() match the message against these rules and print up to 2 tips.
 # Disable with HIVV_TIPS=off. Tips are data — `hivv update` can ship new ones.
 _HIVV_TIPS = [
-    (r"timed? out|timeout", "slow or dead endpoint — a smaller model helps: hivv llm suggest · or a specific bee: hivv node-chat <name> \"...\""),
+    (r"timed? out|timeout", "slow or dead endpoint — a smaller model helps: hivv llm suggest · or a specific bee: hivv ask <name> \"...\""),
     (r"connection refused|econnrefused", "peer refused the link — its LLM is localhost-only: hivv firewall --apply --mode lan · cross-network: hivv firewall --apply --mode tailscale"),
     (r"network error|unreachable|no route|name resolution|name or service not known", "no route to the hub — check wifi/VPN, then: hivv whoami · the agent reconnects on its own once online"),
     (r"\b401\b|\b403\b|unauthorized|forbidden", "auth hiccup — check identity: hivv whoami · if you need admin, set HIVV_CONTROL_TOKEN on the hub"),
@@ -335,7 +345,10 @@ def die(msg: str, code: int = 1) -> None:
     print(f"\033[0;31m[{APP}]\033[0m {msg}", file=sys.stderr)
     _print_tips(msg, to_stderr=True)
     if os.environ.get("HIVV_TIPS", "on").lower() not in ("off", "0", "no"):
-        print(f"  \033[2mneed a human? {APP} support \"{msg[:60]}\" attaches diagnostics\033[0m", file=sys.stderr)
+        # FIRST line only — a multi-line usage message used to be sliced at 60
+        # chars mid-sentence, spilling its own newlines into the footer.
+        _first = " ".join(msg.split())[:60]
+        print(f"  \033[2mneed a human? {APP} support \"{_first}\" attaches diagnostics\033[0m", file=sys.stderr)
     sys.exit(code)
 
 def _get_visitor_id() -> str:
@@ -1020,9 +1033,186 @@ def _apply_update(data: bytes, expected_sha256=None, source: str = "") -> tuple:
         os.replace(new, target)
         # Report the version of the bytes we just wrote, not VERSION — that
         # constant was hashed from the pre-update file at process start.
-        return (True, f"applied (source={source}, version={_get_version(data)})", target)
+        new_version = _get_version(data)
+        _record_known_good(target, new_version, source)
+        return (True, f"applied (source={source}, version={new_version})", target)
     except Exception as e:
         return (False, f"unexpected: {e}", target)
+
+
+# ── known-good pin: "go back to what worked" is a FACT ────────────────────
+# The update path already keeps a .bak and healthchecks the new copy BEFORE
+# swapping it in. That protects the moment of the update. It does not help
+# when a copy that passed its healthcheck misbehaves later — a healthcheck
+# proves the file PARSES and starts, not that it works.
+#
+# This pin records the last copy that was actually applied and verified, so
+# `hivv rollback` can name what you are going back to and how old it is.
+# The .bak is the BYTES; this file says WHICH bytes.
+
+def _record_known_good(target: Path, version: str, source: str) -> bool:
+    """Remember that `target` is the last copy to pass a healthcheck.
+
+    Never raises: the pin is an aid, and failing to write it must not fail
+    an update that otherwise succeeded.
+    """
+    try:
+        data = target.read_bytes()
+        pin = {
+            "sha256": hashlib.sha256(data).hexdigest(),
+            "version": str(version or "?"),
+            "source": str(source or "?"),
+            "path": str(target),
+            "ts": int(time.time()),
+        }
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = KNOWN_GOOD_FILE.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(pin, indent=2))
+        os.replace(tmp, KNOWN_GOOD_FILE)
+        return True
+    except Exception:
+        return False
+
+
+def _read_known_good() -> dict:
+    """The pin, or {} when there is none (first install, or wiped state)."""
+    try:
+        if KNOWN_GOOD_FILE.exists():
+            return json.loads(KNOWN_GOOD_FILE.read_text())
+    except (OSError, json.JSONDecodeError):
+        pass
+    return {}
+
+
+def _file_sha(path: Path) -> str:
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return ""
+
+
+def _healthcheck_file(path: Path) -> tuple[bool, str]:
+    """Does this CLI file at least parse and start? Never raises.
+
+    This is the same check the update path runs on the .new copy before
+    swapping it in — running it again here means a rollback can never
+    restore a copy that is itself broken.
+    """
+    if not path.exists():
+        return False, "no such file"
+    try:
+        proc = subprocess.run([sys.executable, str(path), "--healthcheck"],
+                              capture_output=True, timeout=10)
+        if proc.returncode == 0:
+            return True, "healthcheck passed"
+        return False, f"healthcheck failed (rc={proc.returncode})"
+    except subprocess.TimeoutExpired:
+        return False, "healthcheck timed out"
+    except Exception as e:
+        return False, f"healthcheck error: {e}"
+
+
+def cmd_rollback(args) -> None:
+    """Roll back to the last KNOWN-GOOD copy of the CLI.
+
+    `hivv rollback`      → restore the .bak (with a healthcheck first)
+    `hivv rollback --list` → show what you have and what you'd return to
+
+    WHY THIS IS NEEDED
+    The update path already refuses a broken new copy: it healthchecks the
+    .new file before swapping, and restores .bak if that fails. That
+    protects the MOMENT of the update. But a copy can pass its healthcheck
+    and still misbehave later — the healthcheck proves the file parses and
+    starts, not that it works. Then the only fix was to know which bytes
+    were good, which nothing recorded.
+
+    So: every applied update pins its version, and this rolls back to the
+    pinned copy. Nothing is deleted — the copy being replaced becomes the
+    NEW .bad, kept for inspection.
+    """
+    target, in_source_tree = _update_target()
+    bak = target.with_suffix(target.suffix + ".bak")
+    bad = target.with_suffix(target.suffix + ".bad")
+    pin = _read_known_good()
+
+    # _get_version() with no argument hashes __file__ — the RUNNING copy.
+    # Here we want the version of the file we are about to replace.
+    cur_ver = _get_version(target.read_bytes()) if target.exists() else "?"
+    cur_sha = _file_sha(target)
+
+    if getattr(args, "list", False):
+        print(f"\n\033[1m{APP} rollback\033[0m — {target}\n")
+        print(f"  current   {cur_ver}  sha {cur_sha[:12] or '?'}…")
+        if pin:
+            print(f"  pinned    {pin.get('version', '?')}  sha {str(pin.get('sha256', ''))[:12]}…")
+            print(f"            recorded {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(pin.get('ts', 0)))} "
+                  f"from {pin.get('source', '?')}")
+        else:
+            print("  pinned    \033[2m(none — no update has been applied yet)\033[0m")
+        if bak.exists():
+            print(f"  .bak      sha {_file_sha(bak)[:12]}…  ({bak.stat().st_size} bytes)")
+        else:
+            print("  .bak      \033[2m(absent — nothing to roll back to)\033[0m")
+        if bad.exists():
+            print(f"  .bad      sha {_file_sha(bad)[:12]}…  (last rejected copy, kept for inspection)")
+        print(f"\n  restore:  {APP} rollback\n")
+        return
+
+    if in_source_tree and not _UPDATE_FORCE:
+        die("refusing to roll back inside a git checkout — that would overwrite "
+            "your source tree.\n"
+            f"  running from: {target}\n"
+            "  a checkout has no .bak to roll back to anyway: the pin lives in "
+            f"~/.local/share/{APP}/ and the .bak is only written by an update.\n"
+            "  (override with --force if you really mean it)")
+
+    if not bak.exists():
+        die(f"nothing to roll back to — no {bak.name} beside the CLI.\n"
+            "  the .bak is written the first time an update is applied.\n"
+            "  (use --list to see everything you have)")
+
+    ok_health, why = _healthcheck_file(bak)
+    if not ok_health:
+        die(f"the .bak copy is NOT healthy — refusing to restore it: {why}\n"
+            f"  keeping your current copy ({cur_ver}) untouched")
+
+    bak_sha = _file_sha(bak)
+    if bak_sha == cur_sha:
+        print(f"  \033[33m○\033[0m already on the .bak copy ({cur_ver}) — nothing to do")
+        return
+
+    # Preserve what we are about to replace: it becomes .bad, never deleted.
+    try:
+        if target.exists():
+            shutil.copy2(target, bad)
+    except OSError as e:
+        warn(f"could not keep the current copy as {bad.name}: {e}")
+
+    try:
+        shutil.copy2(bak, target)
+    except OSError as e:
+        die(f"restore failed: {e}\n  your current copy was NOT touched")
+
+    # Verify the restore before claiming success — a rollback that leaves a
+    # broken file is worse than no rollback.
+    ok_after, why_after = _healthcheck_file(target)
+    if not ok_after:
+        # put the original back
+        try:
+            if bad.exists():
+                shutil.copy2(bad, target)
+        except OSError:
+            pass
+        die(f"the restored copy failed its healthcheck ({why_after}) — "
+            f"your previous copy ({cur_ver}) has been put back")
+
+    new_ver = _get_version(target.read_bytes())
+    _record_known_good(target, new_ver, "rollback")
+    print(f"\033[32m✓\033[0m rolled back: {cur_ver} → \033[1m{new_ver}\033[0m")
+    print(f"  the previous copy is kept as {bad.name} (sha {cur_sha[:12]}…)")
+    print(f"  forward again: {APP} update")
+    print()
+
 
 def _http_get_bytes(url: str, timeout: float = 30.0) -> bytes:
     """GET a URL and return raw bytes. Stdlib only; sets user-agent.
@@ -2750,7 +2940,105 @@ WantedBy=default.target
             except Exception:
                 pass
 
+    # 2d. GitHub drift — is this checkout still what GitHub says it is?
+    #
+    # WHY HERE: `hivv sync` answers the question on demand, but the whole
+    # point of a drift check is that it happens WITHOUT anyone asking. The
+    # 2026-11-18 merge was painful precisely because nobody noticed the two
+    # copies had diverged until work was about to be lost.
+    #
+    # SAFETY RULES (why this is safe to run on every box, forever):
+    #   • only runs inside a git checkout — an installed CLI has no tree,
+    #     which is the normal case for bees, so 99% of the fleet skips it
+    #   • the local comparison (HEAD vs origin/main) needs NO network
+    #   • the network fetch happens at most every 6h per box — one GitHub
+    #     API hit per 6h is nothing against the 60/hour unauthenticated
+    #     budget, and it is git's own transport, not the API
+    #   • READ-ONLY: it never merges, pulls, pushes or resets. It logs.
+    #   • never raises — a broken git must not break self-repair
+    try:
+        _sync_drift_check(log_path, fixes)
+    except Exception as e:
+        log_path.write(f"[{time.strftime('%H:%M:%S')}] SELF-REPAIR: sync check error: {e}\n")
+
     return fixes
+
+
+def _sync_drift_check(log_path, fixes: list) -> None:
+    """Periodic local⇄GitHub drift check (read-only, see caller).
+
+    Records `sync_drift` into state so `hivv status`/`hivv sync` can show
+    it, and logs every time it finds drift — the log is how a silent
+    divergence becomes a visible one.
+
+    `log_path` may be an open handle (the agent loop's) or a Path — both
+    are used in this codebase and neither should crash the check.
+    """
+    def _log(msg: str) -> None:
+        # Catches Exception, not OSError: Path(<weird>) raises TypeError and
+        # a closed handle raises ValueError. The log is an aid — no logging
+        # failure may ever take down the check it belongs to.
+        try:
+            if hasattr(log_path, "write"):
+                log_path.write(msg)
+                if hasattr(log_path, "flush"):
+                    log_path.flush()
+            else:
+                Path(log_path).open("a").write(msg)
+        except Exception:
+            pass
+
+    st = read_state() or {}
+    # A checkout, or nothing to do.
+    rc, _ = _git("rev-parse", "--is-inside-work-tree")
+    if rc != 0:
+        return
+
+    now = int(time.time())
+    last_fetch = int(st.get("sync_last_fetch") or 0)
+    FETCH_EVERY_S = 6 * 3600
+
+    # Refresh origin at most every 6h. `--quiet` + a hard timeout: a hung
+    # git fetch must not stall the agent loop.
+    if now - last_fetch >= FETCH_EVERY_S:
+        frc, _out = _git("fetch", "--quiet", "--no-tags", "origin",
+                         timeout=20)
+        if frc == 0:
+            st["sync_last_fetch"] = now
+            write_state(st)
+
+    ab_rc, ab = _git("rev-list", "--left-right", "--count", "origin/main...HEAD")
+    if ab_rc != 0:
+        return
+    parts = ab.split()
+    if len(parts) != 2:
+        return
+    try:
+        behind, ahead = int(parts[0]), int(parts[1])
+    except ValueError:
+        return
+
+    dirty_rc, dirty = _git("status", "--porcelain")
+    dirty_n = len([l for l in dirty.splitlines() if l.strip()]) if dirty_rc == 0 else 0
+
+    drift = {"ahead": ahead, "behind": behind, "dirty": dirty_n,
+             "checked_at": now}
+    st["sync_drift"] = drift
+    write_state(st)
+
+    if behind:
+        # BEHIND is the dangerous direction: GitHub has work this box does
+        # not — on the hub host that means the hub is serving stale bytes.
+        msg = (f"this checkout is {behind} commit(s) BEHIND github — "
+               f"run: git pull --rebase origin main")
+        fixes.append((False, msg))
+        _log(f"[{time.strftime('%H:%M:%S')}] SELF-REPAIR: SYNC DRIFT — {msg}\n")
+    elif ahead:
+        # Ahead is not broken — it is unpushed work. Log it, do not fix it:
+        # only a human decides what leaves this machine.
+        _log(f"[{time.strftime('%H:%M:%S')}] sync: {ahead} local commit(s) not on github yet\n")
+    if dirty_n and not behind and not ahead:
+        _log(f"[{time.strftime('%H:%M:%S')}] sync: {dirty_n} uncommitted change(s) here\n")
 
 
 # ── agent: long-running daemon ─────────────────────────────────────────
@@ -3354,13 +3642,40 @@ def _dispatch_inbox_message(msg: dict, st: dict, log_path) -> None:
     # unknown kinds: already logged above; future-extension hook.
 
 
-# ports to try, in order, when the hub relays an inference job to us
+# Fallback ports when THIS box's LLM can't be detected — the relay executor
+# must not depend on them alone: ashy serves on :8090, which this list never
+# contained, so every relay job died with "no local model answered" (2026-11-19).
 _RELAY_LOCAL_ENDPOINTS = [
     "http://localhost:8080/v1/chat/completions",   # llama.cpp
     "http://localhost:11434/v1/chat/completions",  # ollama (OpenAI-compat)
     "http://localhost:1234/v1/chat/completions",   # lm studio
     "http://localhost:8081/v1/chat/completions",   # second llama slot
+    "http://localhost:8090/v1/chat/completions",   # llama.cpp (second box slot)
 ]
+
+
+def _relay_endpoints() -> list[str]:
+    """Endpoints to try for a hub-relayed job: DETECTED/alive ports first (the
+    real ones —8090, custom ports, a second slot), legacy list as backstop.
+
+    `_llm_alive_port` filters by an OpenAI-shaped /v1/models answer, so a web
+    app squatting :8080 (ashy) is skipped instead of wasting a 40s timeout."""
+    eps: list[str] = []
+    try:
+        for p in _local_llm_ports():
+            try:
+                if _llm_alive_port(int(p)):
+                    u = f"http://127.0.0.1:{int(p)}/v1/chat/completions"
+                    if u not in eps:
+                        eps.append(u)
+            except (TypeError, ValueError):
+                continue
+    except Exception:
+        pass
+    for u in _RELAY_LOCAL_ENDPOINTS:
+        if u not in eps:
+            eps.append(u)
+    return eps
 
 def _run_relay_job(payload: dict, log_path) -> None:
     """HIVV_PLAN #5: hub-relayed inference job. Only runs when volunteering is
@@ -7307,8 +7622,19 @@ def cmd_nodes(args) -> None:
     print()
 
 def cmd_node(args) -> None:
-    """Show detailed info about a specific node."""
-    name = " ".join(args.name) if args.name else ""
+    """Show detailed info about a specific node.
+
+    ALSO the place `hivv node chat <bee> <msg>` lands: `name` is nargs='+', so
+    without this the whole tail became the node name and every attempt died
+    with "node 'chat yalla whas up' not found" (2026-11-18)."""
+    toks = [str(t) for t in (args.name or [])]
+    if toks and toks[0].lower() in _BEE_CHAT_VERBS:
+        if len(toks) < 2:
+            die(f"usage: hivv node {toks[0].lower()} <bee> <message>  "
+                f"(e.g. hivv node chat yalla \"hi\")")
+        args.name, args.message = toks[1], toks[2:]
+        return cmd_node_chat(args)
+    name = " ".join(toks)
     if not name:
         die("usage: hivv node <name>  (e.g. hivv node yalla)")
     code, p = http("GET", "/api/control/nodes")
@@ -7440,47 +7766,131 @@ def _node_llm_ports(match: dict) -> list[int]:
     return ports
 
 
-def cmd_node_chat(args) -> None:
-    """Chat directly with a specific node's LLM."""
-    name = getattr(args, "name", "") or ""
-    msg = " ".join(args.message) if args.message else ""
-    if not name or not msg:
-        die("usage: hivv node-chat <node> <message>")
+# Every word that means "chat with ONE bee" — `hivv <verb> <bee> <msg>`.
+# `chat` is in here too so `hivv node chat yalla hi` routes to the bee instead
+# of being swallowed into the node name ("node 'chat yalla hi' not found").
+_BEE_CHAT_VERBS = ("ask", "talk", "chat")
 
-    # Find the node
+
+def _find_node(name: str, nodes: list) -> dict | None:
+    """Resolve a bee by exact id/name first, then substring — so `ask`, `talk`,
+    `node`, `bee` and `reach` all agree on what a bee is called."""
+    for n in nodes:
+        if str(n.get("id", "")).lower() == name.lower() or str(n.get("name", "")).lower() == name.lower():
+            return n
+    for n in nodes:
+        if name.lower() in str(n.get("id", "")).lower() or name.lower() in str(n.get("name", "")).lower():
+            return n
+    return None
+
+
+def _relay_chat_to_bee(node_id: str, msg: str, timeout: float = 45.0) -> tuple[str, str]:
+    """Ask the hub to push a prompt to ONE bee's inbox and wait for its answer.
+
+    This is the path that reaches a bee whose model binds to localhost only
+    (ashy: llama on 127.0.0.1:8090 refuses every LAN connection, so the direct
+    path can never work — but the bee's own agent still answers 127.0.0.1).
+
+    Returns (status, text): "ok" with the reply, "refused" when policy or the
+    volunteer flag says no, "failed" with the reason. Never silently answers
+    from a different bee — that was the old `/api/chat {provider: name}` lie:
+    `provider` matches endpoint names like `ashy:8090`, never `ashy`, so the
+    router fell through to whoever was free."""
+    code, p = http("POST", "/api/relay/jobs",
+                   body={"node_id": node_id,
+                         "request": {"messages": [{"role": "user", "content": msg}],
+                                     "max_tokens": 500}},
+                   timeout=15)
+    if code in (202, 403):
+        return "refused", str((p or {}).get("error") or p or "relay denied")
+    if code != 200 or not isinstance(p, dict):
+        return "failed", str(p)
+    job = p.get("job")
+    jid = (job or {}).get("id") if isinstance(job, dict) else None
+    if not jid:
+        return "failed", str(p)
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        time.sleep(0.8)
+        gc, gp = http("GET", f"/api/relay/jobs/{jid}", timeout=10)
+        if gc != 200 or not isinstance(gp, dict):
+            continue
+        j = gp.get("job") or {}
+        st = j.get("status")
+        if st == "done":
+            return "ok", str((j.get("result") or {}).get("content") or "")
+        if st in ("error", "expired"):
+            return "failed", str(j.get("error") or st)
+    return "failed", f"no answer within {int(timeout)}s"
+
+
+def cmd_node_chat(args) -> None:
+    """hivv ask|talk <bee> <msg> — chat with ONE bee's own LLM.
+
+    Direct to the bee first (fastest, no hub). When no port answers, fall back
+    to the hub RELAY — which reaches localhost-bound models — and if that fails
+    too, say so plainly instead of borrowing some other bee's answer."""
+    name = str(getattr(args, "name", "") or "").strip()
+    raw = getattr(args, "message", None) or []
+    msg = " ".join(str(x) for x in raw).strip()
+    if not name or not msg:
+        # `hivv ask "whats up"` (quoted, no bee) is a hive question wearing the
+        # wrong verb — point at the right one instead of just refusing.
+        if name and not msg and " " in name:
+            die(f"that looks like a question for the HIVE, not one bee:\n"
+                f"    {APP} chat \"{name}\"\n"
+                f"    (to pin a bee: {APP} ask <bee> \"<msg>\")")
+        die("usage: hivv ask <bee> <message>\n"
+            f"    e.g.  {APP} ask ashy \"whas up\"\n"
+            f"    alias: {APP} talk <bee> <msg>  ·  {APP} node-chat <bee> <msg>\n"
+            f"    no bee in mind? {APP} chat <msg> asks the whole hive")
+
+    # Find the bee
     code, p = http("GET", "/api/control/nodes")
     if code != 200 or not isinstance(p, dict):
         die(f"failed to fetch nodes: {p}")
     nodes = p.get("nodes", [])
-    match = None
-    for n in nodes:
-        if n.get("id", "").lower() == name.lower() or n.get("name", "").lower() == name.lower():
-            match = n
-            break
+    match = _find_node(name, nodes)
     if not match:
+        print(f"bee '{name}' not found — available:")
         for n in nodes:
-            if name.lower() in n.get("id", "").lower() or name.lower() in n.get("name", "").lower():
-                match = n
-                break
-    if not match:
-        die(f"node '{name}' not found")
+            print(f"  {n.get('id', '?')} ({n.get('name', '?')}) — {n.get('status', '?')}")
+        # Offer the hive route with the FULL phrase — `ask whats up` should
+        # suggest `hivv chat "whats up"`, not `hivv chat "up"`.
+        whole = " ".join(x for x in (name, msg) if x).strip()
+        print(f"\n  to ask the HIVE instead (any bee answers): {APP} chat \"{whole}\"")
+        sys.exit(1)
 
-    ip = match.get("lan_ip") or match.get("ip", "")
+    label = str(match.get("name") or match.get("id") or name)
+    ip = str(match.get("lan_ip") or match.get("ip") or "")
     if not ip:
-        die(f"node '{name}' has no IP address")
+        die(f"bee '{label}' has no IP address")
+
+    # This box IS that bee → localhost (a model bound to 127.0.0.1 refuses its
+    # own LAN IP; same rule `hivv chat`'s direct loop already uses).
+    try:
+        me = socket.gethostname().split(".")[0].lower()
+    except Exception:
+        me = ""
+    if label.split(".")[0].lower() == me or ip == (_local_ip() or ""):
+        ip = "127.0.0.1"
 
     models = match.get("local_models", [])
     # Reported models first; a FRESH node (model installed seconds ago,
     # heartbeat not caught up) reports none — probe the common ports so
-    # node-chat works the moment the server is up.
+    # this works the moment the server is actually up.
     ports_to_try = _node_llm_ports(match)
     if not ports_to_try:
-        die(f"node '{name}' has no reachable LLM — run on that box: {APP} llm status"
+        die(f"bee '{label}' has no LLM — run on that box: {APP} llm status"
             + ("" if models else "  (no models reported yet — the heartbeat may just be catching up)"))
 
-    # Send chat request directly to the node
+    # TCP preflight: never print "chatting with X (:8090)" for a port that is
+    # already refusing connections — that banner-then-failure is what made this
+    # look broken. Refused ports are summarised in ONE line instead.
+    open_ports = [pt for pt in ports_to_try if _tcp_ok(ip, pt, timeout=0.6)]
+
     sent = False
-    for port in ports_to_try:
+    for port in open_ports:
         url = f"http://{ip}:{port}/v1/chat/completions"
         payload = json.dumps({
             "model": "local",
@@ -7489,14 +7899,12 @@ def cmd_node_chat(args) -> None:
             "max_tokens": 500
         })
 
-        print(f"\n\033[1mchatting with {match.get('name', name)}\033[0m ({ip}:{port})")
+        print(f"\n\033[1mchatting with {label}\033[0m ({ip}:{port})")
         print(f"  {msg}")
         print()
 
         try:
-            import urllib.request
-            import time as _time
-            start_time = _time.time()
+            start_time = time.time()
             tokens = 0
             req = urllib.request.Request(url, data=payload.encode(),
                                          headers={"Content-Type": "application/json"})
@@ -7514,7 +7922,7 @@ def cmd_node_chat(args) -> None:
                             tokens += 1
                     except (json.JSONDecodeError, IndexError, KeyError):
                         pass
-            elapsed = _time.time() - start_time
+            elapsed = time.time() - start_time
             tps = tokens / elapsed if elapsed > 0 else 0
             print(f"\n  \033[2m{tokens} tokens · {tps:.1f} tok/s · {elapsed:.1f}s\033[0m\n")
             sent = True
@@ -7523,15 +7931,36 @@ def cmd_node_chat(args) -> None:
             print(f"  \033[33m!\033[0m port {port} failed: {e}")
             continue
 
-    if not sent:
-        print(f"\n  \033[31m✗\033[0m all ports failed — node may be offline")
-        # Fallback: try through the hub
-        print(f"  trying through hub instead...")
-        code, payload = http("POST", "/api/chat", body={"messages": [{"role": "user", "content": msg}], "provider": name})
-        if code == 200 and isinstance(payload, dict):
-            content = payload.get("choices", [{}])[0].get("message", {}).get("content", "")
-            if content:
-                print(f"\n  {content}\n")
+    if sent:
+        return
+
+    if not open_ports:
+        print(f"\n  \033[33m!\033[0m no open LLM port on {label} ({ip}) — "
+              f"tried {', '.join(str(x) for x in ports_to_try)}")
+        print(f"    a model bound to localhost only refuses LAN connections — "
+              f"on that box: {APP} llm status")
+    else:
+        print(f"\n  \033[31m✗\033[0m every open port on {label} failed")
+
+    # Fallback: the HUB RELAY, pinned to this bee — the only path that reaches
+    # a localhost-bound model. Never a plain /api/chat (that answers from
+    # whoever is free and calls it this bee).
+    print(f"  \033[2mtrying the hub relay → {label} …\033[0m")
+    status, text = _relay_chat_to_bee(str(match.get("id") or label), msg)
+    if status == "ok" and text:
+        print(f"\033[2m(via hub relay → {label})\033[0m")
+        print(f"\n  {text}\n")
+        return
+
+    print(f"\n  \033[31m✗\033[0m {label} didn't answer")
+    if status == "refused":
+        print(f"    relay refused: {text}")
+        print(f"    → turn on sharing on that box: {APP} volunteer on")
+    else:
+        print(f"    relay: {text}")
+    print(f"    → check the bee: {APP} reach {label} · on that box: {APP} llm status")
+    print(f"    → or ask the hive: {APP} chat \"{msg}\"")
+    sys.exit(1)
 
 def cmd_reach(args) -> None:
     """hivv reach <bee> — is that node reachable and answering?
@@ -10269,7 +10698,10 @@ def cmd_doctor(args) -> None:
     else:
         print(f"  trust:   {_warn('no trusted fingerprint')}   set HIVV_TRUSTED_FINGERPRINT=<sha256> to secure auto-update")
 
-    import platform as _plat
+    # `platform` is MODULE-level (line ~48) — never re-import it here: any
+    # function-level `import platform` makes the name local for the WHOLE
+    # function, so the first use above it dies with UnboundLocalError
+    # (yalla 2026-11-18: `hivv doctor` crashed in the resilience section).
     import subprocess as _sp
     svc_ok = False
     if platform.system() == "Linux":
@@ -10301,6 +10733,22 @@ def cmd_doctor(args) -> None:
             print(f"  boot:    {_warn('no launchd service — run: {APP} doctor --fix')}")
     else:
         print(f"  boot:    {_warn('auto-restart not configured on this platform')}")
+
+    # The LLM is the OTHER half of "it should just work after a reboot" —
+    # the agent unit above only restarts the AGENT, so a box with a model but
+    # no llama unit silently goes dark at reboot (asked for: yalla 2026-11-18).
+    _bstate, _bunit = _llm_boot_probe()
+    if _bstate == "enabled":
+        print(f"  llm boot: {_ok(f'{_bunit} enabled — LLM auto-starts at boot')}")
+    elif _bstate == "disabled":
+        print(f"  llm boot: {_warn(f'{_bunit} installed but NOT enabled')}   run: {APP} llm boot on")
+    elif _bstate == "foreign":
+        print(f"  llm boot: {_ok(f'{_bunit} (system scope) manages boot')}")
+    elif _bstate == "none":
+        _has_llm = bool(_llm_config().get("model") or (read_state() or {}).get("llm"))
+        if _has_llm:
+            print(f"  llm boot: {_warn('no boot unit — the LLM dies on reboot')}   run: {APP} llm boot on")
+    # unsupported (macOS / Windows / no systemd) → stay quiet; nothing to fix here
 
     # Crash loop detection — check recent agent log
     if LOG_FILE.exists():
@@ -10389,8 +10837,8 @@ def cmd_doctor(args) -> None:
     else:
         print(f"  vpn:    {_warn('tailscale not running')}   install: curl -fsSL https://tailscale.com/install.sh | sh")
 
-    # Firewall
-    import platform
+    # Firewall — `platform` is module-level; do NOT shadow it here (see the
+    # resilience section above: a later local import breaks earlier uses).
     fw_ok = False
     if platform.system() == "Linux":
         r = _r("ufw status 2>/dev/null")
@@ -10522,7 +10970,6 @@ def cmd_doctor(args) -> None:
                 print(f"  \033[32m✓\033[0m reset node_id to {hostname}")
 
         # Create/enable systemd user service so the agent auto-starts on boot
-        import platform as _plat
         if platform.system() == "Linux":
             svc_dir = Path.home() / ".config" / "systemd" / "user"
             svc_path = svc_dir / "hivv-agent.service"
@@ -10554,6 +11001,18 @@ WantedBy=default.target
             _r("systemctl --user daemon-reload")
             _r("systemctl --user enable --now hivv-agent")
             print(f"  \033[32m✓\033[0m systemd service: hivv-agent.service (enabled, started)")
+
+            # …and the LLM's boot unit — `--fix` is blanket consent to repair,
+            # so an installed model without a llama unit gets one (previously
+            # `doctor --fix` only fixed the AGENT's boot story).
+            _bstate, _bunit = _llm_boot_probe()
+            if _bstate in ("none", "disabled"):
+                _m, _p, _h, _c = _llm_effective()
+                if _m:
+                    _okb, _bmsg = _llm_boot_enable(_m, _p, _h, _c)
+                    mark = "✓" if _okb else "!"
+                    print(f"  \033[32m{mark}\033[0m llm boot: {_bmsg}" if _okb
+                          else f"  \033[33m{mark}\033[0m llm boot: {_bmsg}")
 
         # Create/enable a LaunchAgent so the agent auto-starts at login (macOS)
         elif platform.system() == "Darwin":
@@ -11145,6 +11604,137 @@ def cmd_speed(args) -> None:
         cmd_llm_bench(args)  # reuse the existing llm bench routine
     except Exception as e:
         print(f"        \033[31mFAIL\033[0m ({e})")
+
+
+def cmd_verify(args) -> None:
+    """Verify YOUR changes still work — run the shipped test suite.
+
+    `hivv verify`            → run tests/ against this tree
+    `hivv verify --diff`     → also show what you changed vs GitHub
+    `hivv verify --review`   → ask the hive whether your diff looks safe
+
+    WHY THIS EXISTS
+    The test suite ships with the repo (tests/, 500+ checks, also run by
+    CI on every push). It answers the question a fork must answer before
+    it ships: "I modified the code — did I break anything?" Without it,
+    every customisation is a leap of faith; with it, a change either
+    passes the same gate the original passes, or it does not, and the
+    failing test says exactly what broke.
+
+    Run it from a CLONE of the repo (it needs tests/ beside the code). An
+    installed CLI has no tree — that is the normal case for a bee, and
+    this says so instead of failing mysteriously.
+    """
+    want_diff = bool(getattr(args, "diff", False))
+    want_review = bool(getattr(args, "review", False))
+
+    repo = _find_repo_root()
+    if repo is None:
+        die(f"no repo found near {Path(__file__).resolve()}\n"
+            "  `hivv verify` runs the shipped test suite, which lives in a\n"
+            "  CLONE of the repo — an installed CLI does not carry it.\n"
+            f"    git clone https://github.com/{GITHUB_REPO}.git\n"
+            "    cd hivv && hivv verify")
+
+    tests_dir = repo / "tests"
+    if not tests_dir.is_dir():
+        die(f"{repo} has no tests/ directory — nothing to verify")
+
+    print(f"\n\033[1m{APP} verify\033[0m — running the shipped test suite\n")
+    print(f"  repo:    {repo}")
+
+    # What changed here vs GitHub? (read-only, best-effort)
+    if want_diff:
+        loc = _local_git_state()
+        if loc["is_repo"]:
+            print(f"  local:   {loc['branch']} @ {loc['short']}"
+                  + (f" · {loc['dirty']} uncommitted" if loc["dirty"] else "")
+                  + (f" · {loc['ahead']} ahead" if loc["ahead"] else "")
+                  + (f" · {loc['behind']} behind" if loc["behind"] else ""))
+            diff = _collect_diff()
+            if diff.strip():
+                print(f"  diff:    {diff.count(chr(10))} lines of local changes")
+                print()
+                for line in diff.splitlines()[:60]:
+                    print(f"  \033[2m{line}\033[0m")
+                if diff.count(chr(10)) > 60:
+                    print(f"  \033[2m… {diff.count(chr(10)) - 60} more lines\033[0m")
+            else:
+                print("  diff:    \033[32mnone — this tree matches GitHub\033[0m")
+        print()
+
+    # Run the suite. pytest first (it is what CI runs); fall back to unittest
+    # discovery if pytest is not installed — a user must never need to
+    # install a test runner just to check their own work.
+    suite_ran = False
+    try:
+        import pytest  # noqa: F401
+        has_pytest = True
+    except ImportError:
+        has_pytest = False
+
+    # Mark the child run: a test that drives `hivv verify` would otherwise
+    # spawn verify → pytest → that test → verify → … forever. The guard lets
+    # the test skip itself when it is the CHILD, while still running when a
+    # human or CI invokes it directly.
+    child_env = dict(os.environ, HIVV_VERIFY_RUNNING="1")
+
+    if has_pytest:
+        print("  running: python3 -m pytest tests/ -q")
+        print()
+        r = subprocess.run([sys.executable, "-m", "pytest", "tests/", "-q"],
+                           cwd=str(repo), capture_output=True, text=True,
+                           timeout=900, env=child_env)
+        print(r.stdout or "")
+        if r.stderr.strip():
+            print(r.stderr)
+        passed = r.returncode == 0
+        suite_ran = True
+    else:
+        print("  pytest not installed — falling back to unittest discovery")
+        print()
+        r = subprocess.run([sys.executable, "-m", "unittest", "discover",
+                            "-s", "tests", "-p", "test_*.py", "-q"],
+                           cwd=str(repo), capture_output=True, text=True,
+                           timeout=900, env=child_env)
+        print(r.stdout or "")
+        if r.stderr.strip():
+            print(r.stderr)
+        passed = r.returncode == 0
+        suite_ran = True
+
+    print()
+    if passed:
+        print(f"  \033[32m✓\033[0m \033[1mVERIFIED\033[0m — your changes pass the suite "
+              f"the original passes")
+    else:
+        print(f"  \033[31m✗\033[0m \033[1mFAILED\033[0m — the suite above says what broke")
+        print("     a failing test is a gift: it names the exact thing your")
+        print("     change broke, before a user finds it")
+
+    # Ask the hive for a second opinion on the diff itself.
+    if want_review and suite_ran:
+        print()
+        cmd_review_diff(argparse.Namespace(staged=False, file=None, votes=1))
+
+    print()
+    sys.exit(0 if passed else 1)
+
+
+def _find_repo_root() -> Path | None:
+    """The repo this CLI was cloned from — or None.
+
+    Walks up from THIS file looking for both `tests/` and a `.git` entry.
+    A bare `tests/` without git is not enough: an installed prefix could
+    coincidentally have a tests directory, and running the wrong suite
+    would report a false verdict.
+    """
+    start = Path(__file__).resolve().parent
+    for cand in [start, *start.parents]:
+        if (cand / ".git").exists() and (cand / "tests").is_dir():
+            return cand
+    return None
+
 
 def cmd_speeds(args) -> None:
     """The request speed ledger — every reply ever served, with full-reply
@@ -12064,7 +12654,7 @@ def cmd_welcome(args) -> None:
 
 \033[1m  WHAT YOU CAN DO\033[0m
     • {APP} chat "hello"           — talk to distributed AI
-    • {APP} node-chat yalla "hi"   — chat directly with a specific node
+    • {APP} ask yalla "hi"         — chat directly with one specific bee
     • {APP} nodes                  — see all nodes on the network
     • {APP} node <name>            — detailed info about a node
     • {APP} reach <name>           — test if a node is reachable
@@ -13064,12 +13654,15 @@ your box. works with ollama or hand-built llama.cpp.
 
 \033[1mllama.cpp commands (native GGUF inference):\033[0m
   llm setup [--model K] [--port N] [--yes]     ONE-SHOT: build → download → serve
-                                  (also reached via `hivv install llm`)
+                                  (asks: start it on boot? — --yes says yes;
+                                   also reached via `hivv install llm`)
+  llm boot [on|off|status]       auto-start the LLM at login (systemd user unit)
   llm install-llama [--auto]  build llama.cpp from source (git clone + cmake + make)
   llm pull-gguf <model>       download a GGUF model from HuggingFace
                                available: {', '.join(_GGUF_MODELS.keys())}
   llm serve-llama <model> [--port 8080] [--ctx 4096]
                              launch llama-server with a GGUF model
+                             (safe to re-run — detects one already serving)
 
 \033[1mllama.cpp quickstart (gemma-4:e2b example):\033[0m
   {APP} llm setup                       # all three steps in one command
@@ -13811,6 +14404,121 @@ def cmd_llm_pull_gguf(args):
     _llm_next_after_pull(model_key)
 
 
+# ── boot persistence: install AND run AND come back after a reboot ─────
+def _llm_effective() -> tuple[str, int, str, int]:
+    """(model, port, host, ctx) — llm config beats recorded state beats
+    defaults: the same precedence every launcher uses."""
+    cfg = _llm_config()
+    llm = dict((read_state() or {}).get("llm") or {})
+    model = str(cfg.get("model") or llm.get("model") or "")
+    port = int(cfg.get("port") or llm.get("port") or 8080)
+    host = str(cfg.get("host") or llm.get("host") or "127.0.0.1")
+    ctx = int(cfg.get("ctx") or llm.get("ctx") or 4096)
+    return model, port, host, ctx
+
+
+def _llm_boot_probe() -> tuple[str, str]:
+    """(state, unit) of this box's llama boot unit:
+
+    enabled · disabled · foreign (a SYSTEM-scope unit we don't own) ·
+    none · unsupported (no systemd / not Linux)."""
+    if sys.platform != "linux" or not shutil.which("systemctl"):
+        return "unsupported", ""
+    for unit in ("llama.service", "llama-server.service"):
+        for scope in ("--user", "system"):
+            cmd = ["systemctl"] + (["--user"] if scope == "--user" else []) + \
+                  ["show", unit, "-p", "LoadState,UnitFileState", "--no-pager"]
+            try:
+                r = subprocess.run(cmd, capture_output=True, text=True, timeout=8)
+            except Exception:
+                continue
+            out = r.stdout or ""
+            if "LoadState=" not in out or "LoadState=not-found" in out:
+                continue                     # this scope has no such unit
+            if scope == "system":
+                return "foreign", unit       # someone else's — never touch
+            if "UnitFileState=enabled" in out:
+                return "enabled", unit
+            return "disabled", unit
+    return "none", ""
+
+
+def _llm_boot_enable(model: str, port: int, host: str, ctx: int) -> tuple[bool, str]:
+    """Install + ENABLE a systemd USER unit for llama-server (start at login).
+
+    Deliberately `enable` WITHOUT `--now`: `llm setup` already has a server on
+    the port, and a second spawn would fight it for the bind. The unit name is
+    `llama.service` on purpose — start/stop/restart already know these names
+    (one owner, both directions). Refuses to touch a system-scope unit."""
+    import shlex
+    state, existing = _llm_boot_probe()
+    if state == "unsupported":
+        return False, "boot auto-start needs systemd (linux) — not available here"
+    if state == "foreign":
+        return False, (f"{existing} exists in SYSTEM scope and owns boot on this "
+                       f"box — managed outside hivv (sudo systemctl enable {existing})")
+    info = _GGUF_MODELS.get(model)
+    model_path = os.path.join(_LLAMA_CPP_MODELS, info["file"]) if info else ""
+    srv_bin = os.path.join(_LLAMA_CPP_BIN, "llama-server")
+    if not info or not os.path.exists(model_path):
+        return False, f"model file for {model} is missing — {APP} llm pull-gguf {model}"
+    if not os.access(srv_bin, os.X_OK):
+        return False, f"llama-server missing — {APP} llm install-llama --auto"
+    # systemd expands % specifiers even inside quotes → double them first
+    parts = [srv_bin, "-m", model_path, "-c", str(ctx),
+             "--host", host, "--port", str(port)] + _llm_extra_args()
+    cmdline = " ".join(shlex.quote(p.replace("%", "%%")) for p in parts)
+    unit = "llama.service"
+    svc_dir = Path.home() / ".config" / "systemd" / "user"
+    svc_path = svc_dir / unit
+    content = f"""[Unit]
+Description=hivv local LLM — llama-server ({model})
+After=network.target
+# crash-loop bound: 3 starts / 5 min then failed, not an endless restart storm
+StartLimitIntervalSec=300
+StartLimitBurst=3
+
+[Service]
+Type=simple
+ExecStart={cmdline}
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target
+"""
+    try:
+        svc_dir.mkdir(parents=True, exist_ok=True)
+        svc_path.write_text(content)
+    except OSError as e:
+        return False, f"could not write {svc_path}: {e}"
+    if _systemctl("--user", "daemon-reload") != 0:
+        return False, ("no systemd USER session on this box — log in once "
+                       "(headless: sudo loginctl enable-linger $USER) then retry")
+    if _systemctl("--user", "enable", unit) != 0:
+        return False, f"systemctl --user enable {unit} failed — see: systemctl --user status {unit}"
+    if not _llm_alive_port(port):
+        # nothing serving yet — start it THROUGH systemd (the unit owns it)
+        _systemctl("--user", "start", unit)
+    return True, f"{unit} enabled — the LLM now starts automatically on boot (unit: {svc_path})"
+
+
+def _llm_boot_disable() -> tuple[bool, str]:
+    """Turn boot auto-start OFF. The RUNNING server is left alone (it stops at
+    reboot); `boot on` re-enables the same unit file."""
+    state, unit = _llm_boot_probe()
+    if state == "unsupported":
+        return False, "no systemd here — nothing to disable"
+    if state == "none":
+        return False, "no LLM boot unit installed"
+    if state == "foreign":
+        return False, f"{unit} is system-scope — disable it where it was made (sudo systemctl disable {unit})"
+    if _systemctl("--user", "disable", unit) != 0:
+        return False, f"systemctl --user disable {unit} failed"
+    return True, (f"{unit} disabled — boot start OFF; the RUNNING server keeps "
+                  f"serving until reboot (stop it: {APP} stop llm)")
+
+
 def cmd_llm_serve_llama(args):
     """Launch llama-server with a specific GGUF model."""
     model_key = getattr(args, "model", None)
@@ -13834,6 +14542,35 @@ def cmd_llm_serve_llama(args):
         die(f"model not found: {model_path}\n  run \033[1m{APP} llm pull-gguf {model_key}\033[0m first")
     if not os.access(srv_bin, os.X_OK):
         die(f"llama-server not found: {srv_bin}\n  run \033[1m{APP} llm install-llama --auto\033[0m first")
+
+    # Port pre-flight — `hivv llm setup` already launched a background server,
+    # and the old "next: serve it" hint sent people straight into llama-server's
+    # raw `couldn't bind HTTP server socket ... port: 8080` (yalla 2026-11-18).
+    # Re-running serve must be a friendly no-op, never a crash.
+    if _llm_alive_port(port):
+        cur = str(((read_state() or {}).get("llm") or {}).get("model") or "unknown model")
+        print(f"  \033[32m✓ already serving on :{port}\033[0m ({cur}) — nothing to start")
+        if cur != model_key:
+            print(f"    switch models: {APP} stop llm && {APP} llm serve-llama {model_key}")
+        else:
+            print(f"    stop: {APP} stop llm   ·   foreground: {APP} stop llm && {APP} llm serve-llama {model_key}")
+        print(f"    status: {APP} llm status · chat: {APP} chat \"hi\"")
+        sys.exit(0)
+    busy = _llm_listener_pid(port)
+    if busy:
+        die(f"llama-server already on :{port} (pid {busy}) — probably still loading the model\n"
+            f"    check: {APP} llm status · stop it first: {APP} stop llm")
+    # a NON-llama squatter would also make bind fail — name it instead of
+    # letting llama-server print its own cryptic "couldn't bind"
+    try:
+        _t = socket.socket(socket.AF_INET6 if ":" in host else socket.AF_INET,
+                           socket.SOCK_STREAM)
+        try:
+            _t.bind((host, port))
+        finally:
+            _t.close()
+    except OSError as e:
+        die(f"port {port} is already in use ({e.strerror or e}) — stop that program or pass --port N")
 
     cmd = [srv_bin, "-m", model_path, "-c", str(ctx_size), "--host", host,
            "--port", str(port)] + _llm_extra_args()
@@ -13880,12 +14617,61 @@ class _ArgNamespace:
         self.__dict__.update(kw)
 
 
+def cmd_llm_boot(args) -> None:
+    """Boot persistence for the LOCAL LLM — the third leg of the flow
+    (install → run → boot), kept as its own tool so each step works alone:
+
+      hivv llm boot          report   (default)
+      hivv llm boot on       install + enable the systemd user unit
+      hivv llm boot off      disable it (the RUNNING server keeps serving)
+
+    Mirrors `hivv boot` (the agent's) on purpose: same words, same meaning."""
+    action = str(getattr(args, "action", None) or "status").lower()
+    model, port, host, ctx = _llm_effective()
+    state, unit = _llm_boot_probe()
+
+    if action in ("on", "yes", "enable", "enabled"):
+        if not model:
+            die(f"no LLM configured — set one up first: {APP} llm setup")
+        okb, msg = _llm_boot_enable(model, port, host, ctx)
+        print(("  \033[32m✓\033[0m " if okb else "  \033[31m✗\033[0m ") + msg)
+        if okb:
+            print(f"  hint: headless box? start without any login: sudo loginctl enable-linger $USER")
+        sys.exit(0 if okb else 1)
+
+    if action in ("off", "no", "disable", "disabled"):
+        okb, msg = _llm_boot_disable()
+        print(("  \033[32m✓\033[0m " if okb else "  \033[31m✗\033[0m ") + msg)
+        sys.exit(0 if okb else 1)
+
+    if action not in ("status", "show", "info"):
+        die(f"unrecognised option {action!r} — use on / off / status")
+
+    # status (default)
+    print(f"\033[1m{APP} llm boot\033[0m — start the local LLM automatically at boot")
+    if state == "enabled":
+        print(f"  boot:  \033[32m✓ {unit} enabled\033[0m — starts automatically at login")
+    elif state == "disabled":
+        print(f"  boot:  \033[33m! {unit} installed but NOT enabled\033[0m   turn on: {APP} llm boot on")
+    elif state == "foreign":
+        print(f"  boot:  \033[33m! {unit} (system scope)\033[0m — owned outside hivv")
+    elif state == "none":
+        print(f"  boot:  \033[33mno boot unit\033[0m — the LLM dies on reboot   fix: {APP} llm boot on")
+    else:
+        print(f"  boot:  (no systemd on this OS — start it by hand: {APP} llm serve-llama)")
+    now = f"serving on :{port}" if _llm_alive_port(port) else "not running"
+    print(f"  now:   {now}   model: {model or '(none configured)'}")
+    if not model:
+        print(f"  set the whole flow up at once: {APP} llm setup")
+
+
 def cmd_llm_setup(args) -> None:
     """ONE-SHOT local LLM bring-up — also where `hivv install llm` lands.
 
     build llama.cpp (if missing) → download the GGUF (if missing) → serve it
-    in the background → print exactly what to run next. Each step is skipped
-    when it's already done, so re-running is cheap and safe."""
+    in the background → ASK about boot auto-start → print exactly what to run
+    next. Each step is skipped when it's already done, so re-running is cheap
+    and safe."""
     _cfg = _llm_config()
     model = str(getattr(args, "model", None) or _cfg.get("model") or "gemma-4:e2b")
     port = int(getattr(args, "port", None) or _cfg.get("port") or 8080)
@@ -14001,6 +14787,36 @@ def cmd_llm_setup(args) -> None:
     if host in ("127.0.0.1", "localhost", "::1"):
         print(f"  \033[2mloopback bind — only THIS machine can talk to it. For the hive:")
         print(f"  re-run with --host 0.0.0.0 + {APP} firewall --apply --mode lan\033[0m")
+
+    # --- boot: an installed LLM should survive a reboot. ASK (AGENTS rule),
+    # default yes — but never hang: --yes answers it, no TTY skips with the
+    # exact command (yalla 2026-11-18).
+    bstate, bunit = _llm_boot_probe()
+    if bstate == "enabled":
+        print(f"  boot:    \033[32m✓ {bunit} enabled — auto-starts at boot\033[0m")
+    elif bstate == "foreign":
+        print(f"  boot:    \033[33m! {bunit} (system scope) owns boot on this box\033[0m")
+    elif bstate == "unsupported":
+        print(f"  boot:    (no systemd here — start it by hand: {APP} llm serve-llama {model})")
+    else:   # none or previously disabled → ask again (cheap to change mind)
+        want = False
+        if yes:
+            want = True
+        elif sys.stdin.isatty():
+            try:
+                ans = input(f"  start {model} on boot? [Y/n] ").strip().lower()
+                want = ans not in ("n", "no")
+            except EOFError:
+                want = False
+        else:
+            print(f"  boot:    skipped (not a TTY) — enable later: {APP} llm boot on")
+        if want:
+            okb, bmsg = _llm_boot_enable(model, port, host, ctx)
+            mark = "\033[32m✓\033[0m " if okb else "\033[31m✗\033[0m "
+            print(f"  boot:    {mark}{bmsg}")
+            if okb:
+                print(f"           headless box? make it start without login: sudo loginctl enable-linger $USER")
+
     print()
     print(f"  \033[1m→ next commands:\033[0m")
     print(f"    {APP} chat \"hi\"          # ask it — receipt shows answered-by")
@@ -14012,7 +14828,8 @@ def cmd_llm_setup(args) -> None:
         print(f"  note: :{port} isn't a scanned port — the gateway router needs")
         print(f"        HIVV_LOCAL_ENDPOINTS=http://127.0.0.1:{port}/v1/models (+ pm2 restart)")
         print()
-    print(f"  start on boot: {APP} doctor --fix   · foreground: {APP} llm serve-llama {model}")
+    print(f"  manage:  {APP} stop llm · {APP} restart llm · {APP} llm boot on|off|status")
+    print(f"  foreground: {APP} stop llm && {APP} llm serve-llama {model}   (stop the background one first)")
 
 
 # ── arg parser ─────────────────────────────────────────────────────────
@@ -15371,6 +16188,12 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("boot",     help="auto-start the agent at login (yes|no|on|off)")
     sp.add_argument("state", nargs="?", default=None,
                     help="yes|no (on|off work too). Omit to just REPORT the setting.")
+    sp = sub.add_parser("verify",    help="run the shipped test suite against YOUR changes")
+    sp.add_argument("--diff", action="store_true", help="also show what changed vs GitHub")
+    sp.add_argument("--review", action="store_true", help="ask the hive whether the diff looks safe")
+    sp = sub.add_parser("rollback",  help="restore the last known-good CLI (healthcheck first)")
+    sp.add_argument("--list", action="store_true", help="show what you have and what you'd return to")
+    sp.add_argument("--force", action="store_true", help="override the git-source-tree guard")
     sp = sub.add_parser("contributors", help="who is helping — the people behind the code")
     sp.add_argument("--github", action="store_true", help="read straight from the GitHub API")
     sp = sub.add_parser("sync",     help="two-way check against GitHub (never merges)")
@@ -15494,9 +16317,17 @@ def build_parser() -> argparse.ArgumentParser:
     sp_n = sub.add_parser("node",       help="show details or chat with a specific node")
     sp_n.add_argument("name", nargs="+", help="node name or id")
     sp_n.add_argument("--json", dest="json_output", action="store_true", help="output raw JSON")
-    sp_nc = sub.add_parser("node-chat", help="chat directly with a node's LLM")
-    sp_nc.add_argument("name", help="node name or id to chat with")
-    sp_nc.add_argument("message", nargs="+", help="message to send")
+    # `ask` / `talk` are the one-word ways to address a SINGLE bee;
+    # `node-chat` stays as a hidden-ish alias so old muscle memory and docs
+    # keep working. All three run cmd_node_chat.
+    for _verb, _help in (("ask",  "ask ONE bee a question (pins that bee)"),
+                         ("talk", "chat with ONE bee (alias of ask)"),
+                         ("node-chat", "chat directly with a node's LLM")):
+        _sp = sub.add_parser(_verb, help=_help)
+        # Both optional so a bare `hivv ask` gets OUR friendly usage (with the
+        # hive-routing hint) instead of argparse's terse "required: name".
+        _sp.add_argument("name", nargs="?", default="", help="bee name or id to chat with")
+        _sp.add_argument("message", nargs="*", help="message to send")
     sp_r = sub.add_parser("reach",      help="test connectivity to another node on the network")
     sp_r.add_argument("name", nargs="+", help="node name or id to reach")
     sp_bees = sub.add_parser("bees",      help="all bees in the hive — alias for nodes 🐝")
@@ -15649,7 +16480,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("thanks",     help="say thanks to the AI (one-line chat reply)")
     sp_s = sub.add_parser("support", help="ask the AI for help — auto-attaches doctor + log context")
     sp_s.add_argument("question", nargs=argparse.REMAINDER, help="optional question (else the AI greets + asks)")
-    sp = sub.add_parser("chat",        help="POST /api/chat MSG")
+    sp = sub.add_parser("chat",        help="ask the HIVE — any bee answers (POST /api/chat)")
     sp.add_argument("--mode", default=None,
                     choices=["balanced", "quality", "fast", "cost", "private", "trusted", "smart", "cheap"],
                     help="routing strategy: smart=best model · cheap=free compute · fast=lowest latency · private=no cloud")
@@ -15772,7 +16603,7 @@ def build_parser() -> argparse.ArgumentParser:
                        help="context size (default: llm config, else 4096)")
 
     sp_su = sp_llm.add_parser("setup",
-                              help="ONE-SHOT: build llama.cpp + download GGUF + serve (hivv install llm)")
+                              help="ONE-SHOT: build llama.cpp + download GGUF + serve + ask about boot (hivv install llm)")
     sp_su.add_argument("--model", default=None, metavar="KEY",
                        help="GGUF model key (default: gemma-4:e2b — latest, proven in-hive)")
     sp_su.add_argument("--port", type=int, default=None,
@@ -15781,9 +16612,15 @@ def build_parser() -> argparse.ArgumentParser:
                        help="bind address — use 0.0.0.0 to be reachable by the hive "
                             "(pair with: hivv firewall --apply --mode lan)")
     sp_su.add_argument("--ctx", type=int, default=None, help="context size (default: llm config, else 4096)")
-    sp_su.add_argument("--yes", "-y", action="store_true", help="no prompts — run every step")
+    sp_su.add_argument("--yes", "-y", action="store_true", help="no prompts — run every step (incl. boot auto-start)")
     sp_su.add_argument("--fg", action="store_true",
                        help="serve in the foreground (default: background + print log path)")
+
+    sp_bt = sp_llm.add_parser("boot",
+                              help="auto-start the local LLM on boot (systemd user unit)")
+    sp_bt.add_argument("action", nargs="?", default="status",
+                       choices=["on", "off", "yes", "no", "status"],
+                       help="on/yes=install+enable · off/no=disable · status=show (default)")
 
     sp_ld = sp_llm.add_parser("doctor",
                               help="diagnose the local LLM — what's wrong, and --fix what's safe to fix")
@@ -15848,6 +16685,8 @@ COMMANDS = _resolve_cmds({
     "call":            "cmd_call",
     "info":            "cmd_info",
     "update":          "cmd_update",
+    "rollback":        "cmd_rollback",
+    "verify":          "cmd_verify",
     "repair":          "cmd_repair",
     "upgrades":        "cmd_upgrades",
     "dev":             "cmd_dev",
@@ -15869,6 +16708,8 @@ COMMANDS = _resolve_cmds({
     "nodes":           "cmd_nodes",
     "node":            "cmd_node",
     "node-chat":       "cmd_node_chat",
+    "ask":             "cmd_node_chat",
+    "talk":            "cmd_node_chat",
     "bees":            "cmd_nodes",
     "bee":             "cmd_node",
     "swarm":           "cmd_hive_mind",
@@ -15940,6 +16781,7 @@ COMMANDS = _resolve_cmds({
     "llm pull-gguf":      "cmd_llm_pull_gguf",
     "llm serve-llama":   "cmd_llm_serve_llama",
     "llm setup":         "cmd_llm_setup",
+    "llm boot":          "cmd_llm_boot",
     "llm doctor":        "cmd_llm_doctor",
     "llm config":        "cmd_llm_config",
 })
@@ -16240,7 +17082,8 @@ hub = {HUB}   version = {VERSION}
 \033[1mNetwork / cluster:\033[0m
   nodes / bees       table view of all registered bees in the hive
   node / bee <name>  inspect a specific bee (hardware, models, location)
-  node-chat <n> MSG  chat directly with a bee's LLM
+  ask / talk <n> MSG  chat with ONE bee (pins it); node-chat = alias
+  chat MSG            ask the HIVE — any bee answers
   reach / waggle <n> test connectivity to another bee on the network
   stats              show per-node stats and cluster totals
   debug              full debug info: hub, agent, local AI, network
@@ -16294,14 +17137,14 @@ hub = {HUB}   version = {VERSION}
 \033[1mExamples:\033[0m
   hivv bees                      see all bees in the hive
   hivv bee yalla                  inspect a specific bee
-  hivv node-chat yalla "hello"    chat with a specific bee
+  hivv ask yalla "hello"         chat with ONE bee (pins it)
+  hivv chat 'what is the weather?'  ask the whole hive
   hivv waggle masjid              test if a bee is reachable
   hivv swarm "what is kubernetes?" swarm the question to multiple models
   hivv drone                      am I contributing compute?
   hivv stats                      see cluster performance
   hivv doctor --fix            auto-fix LLM bindings
   hivv doctor                    full health check
-  hivv chat 'what is the weather?'
   hivv start
   hivv update
 
@@ -16327,11 +17170,15 @@ def _print_sub_help(cmd: str) -> None:
         "metrics":   "GET /api/control/metrics/global\n  flag: --local   print this bee's local CPU/GPU/MEM/DISK snapshot",
         "nodes":     "table view of all registered nodes (fits your terminal) + hive TOTALS\n  flag: --json   output raw JSON",
         "boot":      "auto-start the agent at login (survive reboot)\n  usage: hivv boot yes | hivv boot no   (on/off work too)\n  bare:   hivv boot          → report the current setting",
+        "verify":    "run the shipped test suite against YOUR changes\n  flag: --diff    also show what changed vs GitHub\n  flag: --review  ask the hive whether the diff looks safe",
+        "rollback":  "restore the last known-good CLI\n  flag: --list   show current/pinned/.bak/.bad\n  (healthchecked before restore; the replaced copy is kept as .bad)",
         "contributors": "who is helping — contributors by commit count\n  flag: --github  read straight from the GitHub API",
         "sync":      "two-way check against GitHub (read-only — never merges)\n  flag: --fetch  fetch origin first\n  flag: --check  exit non-zero when out of sync (for CI)",
         "review-diff": "ask the hive whether a change looks safe\n  usage: hivv review-diff [--staged] [--file F] [--votes N]",
-        "node":      "show details about a specific node\n  usage: hivv node <name> [--json]",
-        "node-chat": "chat directly with a node's LLM\n  usage: hivv node-chat <node> <message>",
+        "node":      "show details about a specific node\n  usage: hivv node <name> [--json]\n  also: hivv node chat <bee> <msg>  → chats with that bee instead",
+        "ask":       "chat with ONE bee — pins that bee (direct, else hub relay)\n  usage: hivv ask <bee> <message>\n  e.g.  hivv ask yalla \"whas up\"\n  alias: talk · node-chat\n  note: `hivv chat <msg>` asks the HIVE (any bee answers)",
+        "talk":      "chat with ONE bee — alias of ask\n  usage: hivv talk <bee> <message>",
+        "node-chat": "chat with ONE bee — alias of ask\n  usage: hivv node-chat <bee> <message>",
         "reach":     "test connectivity to another node\n  usage: hivv reach <name>",
         "bees":      "table view of all bees in the hive 🐝\n  alias: nodes\n  flag: --json   output raw JSON",
         "bee":       "inspect a specific bee (hardware, models, location)\n  usage: hivv bee <name> [--json]\n  alias: node",
@@ -16341,7 +17188,7 @@ def _print_sub_help(cmd: str) -> None:
         "stats":     "show per-node stats and cluster totals\n  flag: --json   output raw JSON",
         "debug":     "full debug info: hub, agent, local AI, network nodes",
         "firewall":  "check firewall + binding + tailscale status\n  flag: --apply      apply firewall rules\n  flag: --mode X     lan (default), tailscale, or open\n  note: use 'hivv doctor --fix' to auto-fix all issues",
-        "chat":      "POST /api/chat MSG\n  usage: hivv chat 'hello world'\n  flag: --local    ONLY this machine's LLM — no peers, no hub, works offline\n  alias: hivv chat local MSG",
+        "chat":      "ask the HIVE — POST /api/chat, any bee answers\n  usage: hivv chat 'hello world'\n  flag: --local    ONLY this machine's LLM — no peers, no hub, works offline\n  alias: hivv chat local MSG\n  note: to pin ONE bee use `hivv ask <bee> <msg>`",
         "completions":"POST /v1/chat/completions (OpenAI-compatible)\n  usage: hivv completions 'hello world'",
         "whoami":    "GET /api/control/health (cheap liveness check)",
         "doctor":    "one-glance health report (install + hub + agent + bee + version)\n  output is pasteable for support",
