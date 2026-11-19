@@ -6191,6 +6191,60 @@ def _verdict_from_reply(reply: str) -> str:
     return "UNKNOWN"
 
 
+def cmd_contributors(args) -> None:
+    """Who is helping — the people behind the code, published.
+
+    `hivv contributors`      → the contributor list (from the hub)
+    `hivv contributors --github` → read straight from the GitHub API
+
+    The honey leaderboard counts COMPUTE (a bee that serves tokens). This
+    counts CODE — a distributed project lives on people feeling their work
+    counted, and a code contributor had no number until now.
+    """
+    raw = bool(getattr(args, "github", False))
+    data = None
+    if raw:
+        code, gh = _gh_get("/contributors?per_page=100")
+        if code != 200 or not isinstance(gh, list):
+            print(f"  GitHub unreachable ({code}) — try again, or use "
+                  f"`{APP} contributors` (the hub caches it)")
+            return
+        items = [{"login": c.get("login", "?"),
+                  "contributions": c.get("contributions", 0),
+                  "html_url": c.get("html_url", ""),
+                  "avatar_url": c.get("avatar_url")}
+                 for c in gh if isinstance(c, dict)]
+        total = sum(i["contributions"] for i in items)
+        source = f"github.com/{GITHUB_REPO}"
+    else:
+        code, p = http("GET", "/api/hive/contributors", timeout=20, sign=False)
+        if code != 200 or not isinstance(p, dict):
+            print(f"  could not fetch contributor stats ({code})")
+            print(f"  try: {APP} contributors --github")
+            return
+        items = p.get("contributors") or []
+        total = p.get("total_commits") or sum(i.get("contributions", 0) for i in items)
+        source = p.get("repo") or GITHUB_REPO
+
+    print(f"\n\033[1m{APP} contributors\033[0m — {source}\n")
+    if not items:
+        print("  no contributor data yet")
+        print()
+        return
+
+    items = sorted(items, key=lambda c: -int(c.get("contributions") or 0))
+    top = max((int(c.get("contributions") or 0) for c in items), default=1) or 1
+    for c in items[:25]:
+        n = int(c.get("contributions") or 0)
+        bar = "█" * max(1, round(28 * n / top))
+        login = str(c.get("login") or "?")[:20]
+        print(f"  {login:<20} \033[36m{bar}\033[0m {n:>5}")
+    if len(items) > 25:
+        print(f"  \033[2m… and {len(items) - 25} more\033[0m")
+    print(f"\n  \033[1m{len(items)}\033[0m contributor(s) · \033[1m{total}\033[0m commit(s)")
+    print(f"  \033[2mhttps://github.com/{GITHUB_REPO}\033[0m\n")
+
+
 def cmd_sync(args) -> None:
     """Two-way check against GitHub: what is here, what is there, what differs.
 
@@ -15317,6 +15371,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("boot",     help="auto-start the agent at login (yes|no|on|off)")
     sp.add_argument("state", nargs="?", default=None,
                     help="yes|no (on|off work too). Omit to just REPORT the setting.")
+    sp = sub.add_parser("contributors", help="who is helping — the people behind the code")
+    sp.add_argument("--github", action="store_true", help="read straight from the GitHub API")
     sp = sub.add_parser("sync",     help="two-way check against GitHub (never merges)")
     sp.add_argument("--fetch", action="store_true", help="fetch origin first")
     sp.add_argument("--check", action="store_true", help="exit non-zero when out of sync (CI)")
@@ -15782,6 +15838,7 @@ COMMANDS = _resolve_cmds({
     "status":          "cmd_status",
     "boot":            "cmd_boot",
     "sync":            "cmd_sync",
+    "contributors":    "cmd_contributors",
     "review-diff":     "cmd_review_diff",
     "logs":            "cmd_logs",
     "free":            "cmd_free",
@@ -16270,6 +16327,7 @@ def _print_sub_help(cmd: str) -> None:
         "metrics":   "GET /api/control/metrics/global\n  flag: --local   print this bee's local CPU/GPU/MEM/DISK snapshot",
         "nodes":     "table view of all registered nodes (fits your terminal) + hive TOTALS\n  flag: --json   output raw JSON",
         "boot":      "auto-start the agent at login (survive reboot)\n  usage: hivv boot yes | hivv boot no   (on/off work too)\n  bare:   hivv boot          → report the current setting",
+        "contributors": "who is helping — contributors by commit count\n  flag: --github  read straight from the GitHub API",
         "sync":      "two-way check against GitHub (read-only — never merges)\n  flag: --fetch  fetch origin first\n  flag: --check  exit non-zero when out of sync (for CI)",
         "review-diff": "ask the hive whether a change looks safe\n  usage: hivv review-diff [--staged] [--file F] [--votes N]",
         "node":      "show details about a specific node\n  usage: hivv node <name> [--json]",

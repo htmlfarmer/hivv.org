@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Contributors — HIVV.org</title>
+  <meta name="description" content="Who builds HIVV. Every commit, every line, every bee — the people behind the network, counted and credited.">
+  <link rel="stylesheet" href="/styles.css?v=1794950764">
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <link rel="icon" type="image/x-icon" href="/favicon.ico">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to main content</a>
+<div class="container">
+
+<nav class="site-nav">
+  <a href="/" class="brand"> 🐝 HIVV.org</a>
+  <div class="nav-links">
+    <a href="/">Home</a>
+    <a href="/chat/">Chat</a>
+    <a href="/purpose.html">Purpose</a>
+    <a href="/about.html">About</a>
+    <a href="/contributors.html" class="active">Contributors</a>
+    <a href="/nodes.html">Nodes</a>
+    <a href="/privacy.html">Privacy</a>
+    <a href="/api.html">API</a>
+  </div>
+</nav>
+
+<main id="main">
+
+<h1>Who builds this.</h1>
+<p class="subtitle">Every commit is counted. So is every bee.</p>
+
+<div class="card card-accent-green">
+  <h2>Two kinds of contribution</h2>
+  <p style="color:#ccc; line-height:1.9; font-size:1.05em;">
+    The <a href="/command-center.html">honey leaderboard</a> counts <strong>compute</strong> —
+    machines sharing their time with the network. This page counts <strong>code</strong> —
+    the hands that wrote it.
+  </p>
+  <p style="color:#ccc; line-height:1.9; font-size:1.05em;">
+    Both matter. A distributed project lives on people feeling their work counted,
+    so both numbers are public.
+  </p>
+</div>
+
+<h2>Contributors</h2>
+<div id="wall" class="card">
+  <p style="color:#8b949e;">Loading contributors…</p>
+</div>
+
+<div class="card">
+  <h3>Join them</h3>
+  <p style="color:#ccc; line-height:1.9;">
+    The repo is public and the test suite runs in CI:
+  </p>
+  <pre style="background:#0d1117; padding:14px; border-radius:8px; overflow-x:auto; color:#c9d1d9;"><code>git clone https://github.com/htmlfarmer/hivv.git
+cd hivv
+python3 -m pytest tests/ -q</code></pre>
+  <p style="color:#ccc; line-height:1.9;">
+    If the tests pass, your change is good. If they do not, the tests are telling
+    you exactly what broke — and that is a gift, honestly.
+  </p>
+  <p><a href="https://github.com/htmlfarmer/hivv" style="color:#58a6ff;">github.com/htmlfarmer/hivv →</a></p>
+</div>
+
+<h2>The whole picture</h2>
+<div id="stats" class="card">
+  <p style="color:#8b949e;">Loading…</p>
+</div>
+
+</main>
+
+<footer class="site-footer">
+  <p>🐝 HIVV — a distributed AI network, at home and around the world.</p>
+  <p><a href="/about.html">About</a> · <a href="/api.html">API</a> · <a href="/privacy.html">Privacy</a></p>
+</footer>
+
+</div>
+
+<script>
+(function () {
+  var wall = document.getElementById('wall');
+  var stats = document.getElementById('stats');
+
+  function esc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+
+  fetch('/api/hive/contributors')
+    .then(function (r) { return r.json(); })
+    .then(function (d) {
+      var list = d.contributors || [];
+      if (!list.length) {
+        wall.innerHTML = '<p style="color:#8b949e;">No contributor data yet — ' +
+          'the first commit always takes a moment to show up.</p>';
+        stats.innerHTML = '<p style="color:#8b949e;">No data.</p>';
+        return;
+      }
+      list.sort(function (a, b) { return (b.contributions || 0) - (a.contributions || 0); });
+      var top = (list[0] && list[0].contributions) || 1;
+
+      var html = '<div class="contrib-grid">';
+      list.forEach(function (c) {
+        var n = c.contributions || 0;
+        var pct = Math.max(2, Math.round(100 * n / top));
+        html += '<a class="contrib" href="' + esc(c.html_url) + '" target="_blank" rel="noopener">' +
+          (c.avatar_url
+            ? '<img class="contrib-avatar" src="' + esc(c.avatar_url) + '" alt="" loading="lazy" width="48" height="48">'
+            : '<div class="contrib-avatar contrib-avatar-none" aria-hidden="true">🐝</div>') +
+          '<div class="contrib-name">' + esc(c.login) + '</div>' +
+          '<div class="contrib-bar"><div class="contrib-fill" style="width:' + pct + '%"></div></div>' +
+          '<div class="contrib-count">' + n + ' commit' + (n === 1 ? '' : 's') + '</div>' +
+          '</a>';
+      });
+      html += '</div>';
+      wall.innerHTML = html;
+
+      stats.innerHTML =
+        '<table class="stats-table"><tbody>' +
+        '<tr><td>contributors</td><td><strong>' + (d.contributor_count || 0) + '</strong></td></tr>' +
+        '<tr><td>commits</td><td><strong>' + (d.total_commits || 0) + '</strong></td></tr>' +
+        '<tr><td>stars</td><td><strong>' + (d.stars || 0) + '</strong></td></tr>' +
+        '<tr><td>forks</td><td><strong>' + (d.forks || 0) + '</strong></td></tr>' +
+        '<tr><td>open issues</td><td><strong>' + (d.open_issues || 0) + '</strong></td></tr>' +
+        '</tbody></table>' +
+        '<p style="margin-top:14px;"><a href="' + esc(d.repo_url || 'https://github.com/htmlfarmer/hivv') +
+        '" style="color:#58a6ff;">' + esc(d.repo || 'htmlfarmer/hivv') + ' →</a></p>' +
+        '<p style="color:#8b949e; font-size:.9em;">Data from the public GitHub API, cached every 30 minutes. ' +
+        'Also available as JSON at <code>/api/hive/contributors</code> and as an image at ' +
+        '<code>/api/hive/contributors.svg</code>.</p>';
+    })
+    .catch(function () {
+      wall.innerHTML = '<p style="color:#8b949e;">Could not load contributors right now. ' +
+        'The API is <a href="/api.html" style="color:#58a6ff;">/api/hive/contributors</a>.</p>';
+      stats.innerHTML = '<p style="color:#8b949e;">Could not load.</p>';
+    });
+})();
+</script>
+
+<style>
+.contrib-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  gap: 14px;
+  margin-top: 8px;
+}
+.contrib {
+  display: block;
+  padding: 16px;
+  border: 1px solid #30363d;
+  border-radius: 10px;
+  background: #0d1117;
+  text-decoration: none;
+  color: inherit;
+  transition: border-color .15s ease, transform .15s ease;
+}
+.contrib:hover { border-color: #58a6ff; transform: translateY(-2px); }
+.contrib-avatar {
+  width: 48px; height: 48px; border-radius: 50%;
+  border: 1px solid #30363d; margin-bottom: 10px;
+}
+.contrib-avatar-none {
+  display: flex; align-items: center; justify-content: center;
+  font-size: 26px; background: #161b22;
+}
+.contrib-name { font-weight: 600; color: #e6edf3; margin-bottom: 8px; word-break: break-word; }
+.contrib-bar {
+  height: 6px; border-radius: 3px; background: #21262d;
+  overflow: hidden; margin-bottom: 6px;
+}
+.contrib-fill { height: 100%; background: #58a6ff; border-radius: 3px; }
+.contrib-count { color: #8b949e; font-size: .85em; }
+.stats-table { width: 100%; border-collapse: collapse; }
+.stats-table td { padding: 8px 0; border-bottom: 1px solid #21262d; color: #8b949e; }
+.stats-table td:last-child { text-align: right; color: #e6edf3; }
+</style>
+
+</body>
+</html>
