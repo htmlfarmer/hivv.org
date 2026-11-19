@@ -233,7 +233,7 @@ _HIVV_TIPS = [
     (r"crash.?loop|crash loop", "agent is crash-looping — hivv logs (last errors) · then hivv doctor --fix"),
     (r"out of memory|\boom\b|cannot allocate", "RAM is the bottleneck — hivv llm suggest · pick a smaller model · hivv free to see what's eating memory"),
     (r"not running|agent (is )?not up|stopped", "the agent isn't running — hivv start · auto-fix: hivv doctor --fix"),
-    (r"model .{0,20}not found|no model|pull first", "no local model — hivv llm suggest · hivv llm pull <model> · or hivv llm pull-gguf gemma4:e2b"),
+    (r"model .{0,20}not found|no model|pull first", "no local model — hivv llm suggest · hivv llm pull <model> · or hivv llm pull-gguf gemma-4:e2b"),
     (r"certificate|ssl|tls", "TLS trouble — check the clock (certs are time-sensitive) · corporate proxies may intercept https"),
     (r"permission denied", "permission denied — file owned by another user? sudo chown -R \"$USER\" ~/.config/hivv ~/.local/share/hivv · or reinstall user-local with --prefix=$HOME/.local"),
     (r"python.{0,20}not found", "python3 missing — Linux: apt install python3 · macOS: brew install python3 · Windows: winget install Python.Python.3.12"),
@@ -542,6 +542,15 @@ def http(method: str, path: str, *, body=None, token: str | None = None,
         _ns = None
     if _ns:
         headers["x-node-secret"] = str(_ns)
+    # Operator endpoints (provenance ledger, repair, ...) accept the control
+    # token — export HIVV_CONTROL_TOKEN to run them from ANY machine, not just
+    # the hub host. Only sent when the env var is actually set (operator box).
+    try:
+        _ctok = _control_token()
+    except Exception:
+        _ctok = ""
+    if _ctok:
+        headers["x-control-token"] = _ctok
     data = None
     if body is not None:
         data = json.dumps(body).encode()
@@ -1248,10 +1257,30 @@ def _ask_review_brain(url: str, prompt: str, timeout: float = 30.0) -> dict:
             content = (choice.get("message") or {}).get("reasoning_content") or ""
         verdict, reason = _parse_review_vote(content)
         return {"verdict": verdict, "reason": reason[:200],
+                "raw": content[:4000],   # exam judges grade from the raw reply
                 "ms": int((time.time() - t0) * 1000)}
     except Exception as e:
         return {"verdict": None, "reason": f"error: {str(e)[:80]}",
+                "raw": "",
                 "ms": int((time.time() - t0) * 1000)}
+
+
+def _parse_score(text: str) -> float | None:
+    """Pull SCORE: <n> (0-10) out of a judge brain's reply — None when absent.
+
+    Tiny models answer in shapes like 'SCORE: 8', 'score: 7.5/10' or bare
+    '8/10'; accept all three, clamp to [0,10]."""
+    if not text:
+        return None
+    m = re.search(r"SCORE\s*:\s*(\d+(?:\.\d+)?)\s*(?:/10)?", text, re.I)
+    if not m:
+        m = re.search(r"\b(\d(?:\.\d)?)\s*/\s*10\b", text)
+    if not m:
+        return None
+    try:
+        return max(0.0, min(10.0, float(m.group(1))))
+    except ValueError:
+        return None
 
 def _local_brain_urls(max_urls: int = 4) -> list[tuple[str, str]]:
     """Discover (label, chat_url) candidates for this machine's LLMs.
@@ -1344,6 +1373,11 @@ def _review_hive_brains(prompt: str, max_brains: int = 3, timeout: float = 32.0)
         if not ip:
             continue
         for m in (n.get("local_models") or []):
+            # Locked/keyed servers can never answer a vote — asking yalla burned
+            # the FULL 32s timeout on every update review (2026-11-18). The
+            # local brain picker skips these ("would just 401"); mirror it here.
+            if m.get("locked") or str(m.get("model") or "").lower().startswith("locked"):
+                continue
             fam = _model_family(m.get("name") or m.get("model") or "")
             if fam in families:
                 continue
@@ -1352,6 +1386,7 @@ def _review_hive_brains(prompt: str, max_brains: int = 3, timeout: float = 32.0)
                 "brain": f"bee:{n.get('name') or n.get('id')}/"
                          f"{_short_model(m.get('name') or m.get('model') or '?')}",
                 "url": f"http://{ip}:{m.get('port', 8080)}/v1/chat/completions",
+                "ip": ip, "port": m.get("port", 8080),
             })
             break
         if len(picked) >= max_brains:
@@ -1359,6 +1394,12 @@ def _review_hive_brains(prompt: str, max_brains: int = 3, timeout: float = 32.0)
     results: list = [None] * len(picked)
 
     def _one(i, t):
+        # Preflight: a firewalled bee used to eat the whole 32s budget before
+        # we even learned it was unreachable (0.8s now, in parallel).
+        if not _tcp_ok(t["ip"], t["port"]):
+            results[i] = {"brain": t["brain"], "via": "hive", "ms": 800,
+                          "verdict": None, "reason": "tcp unreachable"}
+            return
         r = _ask_review_brain(t["url"], prompt, timeout=timeout)
         r.update({"brain": t["brain"], "via": "hive"})
         results[i] = r
@@ -1378,16 +1419,22 @@ def _upgrade_verdict(scan: dict, votes: list[dict]) -> tuple[str, str]:
         return "suspicious", f"critical pattern: {crit[0]['why']}"
     ok = [v for v in votes if v.get("verdict") == "ok"]
     sus = [v for v in votes if v.get("verdict") == "suspicious"]
-    if sus and len(sus) > len(ok):
+    # QUORUM FLOOR: ≥2 brains to block on votes alone — ONE model must never
+    # veto an update (a single 4B brain voted a legitimate fix "suspicious" and
+    # blocked it for 24h — Stuarts-iMac 2026-11-18). Critical static findings
+    # above still block unconditionally.
+    if sus and len(sus) >= 2 and len(sus) > len(ok):
         return "suspicious", (f"{len(sus)}/{len(votes)} brains flagged it — "
                               f"{sus[0].get('brain', '?')}: {sus[0].get('reason', '')}")
     if votes:
         highs = [f for f in scan.get("findings", []) if f["severity"] == "high"]
+        flag = ""
         if sus:
-            # tie / minority suspicion with no criticals: go with the majority
-            pass
+            flag = (f" · ⚠ 1 brain flagged it ({sus[0].get('brain', '?')}) — below "
+                    f"quorum floor of 2; reported to the hub, not blocking")
         return "ok", (f"{len(ok)}/{len([v for v in votes if v.get('verdict')])} brains "
-                      f"approved" + (f" ({len(highs)} high finding(s) noted)" if highs else ""))
+                      f"approved" + (f" ({len(highs)} high finding(s) noted)" if highs else "")
+                      + flag)
     highs = [f for f in scan.get("findings", []) if f["severity"] in ("critical", "high")]
     if highs:
         return "suspicious", f"no brains reachable; static high finding: {highs[0]['why']}"
@@ -1700,6 +1747,114 @@ def _swapinfo_kb() -> dict:
     m = _meminfo_kb()
     return {"total": int(m.get("SwapTotal", "0")), "free": int(m.get("SwapFree", "0"))}
 
+
+# ── macOS collectors (Darwin has no /proc and no /sys — sysctl + vm_stat) ────
+def _sysctl(name: str, timeout: float = 3.0) -> str:
+    """`sysctl -n <name>` stdout (stripped), or '' on any failure. Never raises."""
+    try:
+        r = subprocess.run(["sysctl", "-n", name], capture_output=True, text=True,
+                           timeout=timeout)
+        return r.stdout.strip() if r.returncode == 0 else ""
+    except Exception:
+        return ""
+
+
+def _parse_vm_stat(text: str, page_size: int, total_bytes: int) -> dict:
+    """vm_stat(1) output → the same keys the Linux /proc/meminfo path sets.
+
+    free + inactive + speculative + purgeable + files are reclaimable — the
+    closest vm_stat gets to Linux's MemAvailable, so an idle Mac reports a
+    similar used% to an idle Linux box instead of Activity Monitor's ~70%.
+    Pure parser (no subprocess) so the test suite drives it from fixtures."""
+    if not text or not page_size or not total_bytes:
+        return {}
+    pages: dict = {}
+    for line in text.splitlines():
+        m = re.match(r"^(.+?):\s*(\d+)", line)
+        if m:
+            pages[m.group(1).strip()] = int(m.group(2))
+
+    def _pg(*keys: str) -> int:
+        return sum(pages.get(k, 0) for k in keys)
+
+    total = int(total_bytes)
+    avail = min(total, _pg("Pages free", "Pages inactive", "Pages speculative",
+                           "Pages purgeable", "Files") * page_size)
+    used = max(0, total - avail)
+    return {"mem_total_mb": total // 1024 // 1024,
+            "mem_avail_mb": avail // 1024 // 1024,
+            "mem_used_mb": used // 1024 // 1024,
+            "mem_pct": round(used * 100 / total, 1)}
+
+
+def _parse_boottime(text: str) -> int:
+    """`sysctl kern.boottime` → epoch seconds. 0 when unparseable (pure parser)."""
+    m = re.search(r"sec\s*=\s*(\d+)", text or "")
+    return int(m.group(1)) if m else 0
+
+
+def _darwin_mem_metrics() -> dict:
+    """macOS memory + swap facts (sysctl hw.memsize + vm_stat). {} on failure."""
+    total_b = int(_sysctl("hw.memsize") or 0)
+    if not total_b:
+        return {}
+    try:
+        vs = subprocess.run(["vm_stat"], capture_output=True, text=True, timeout=3).stdout
+    except Exception:
+        return {}
+    out = _parse_vm_stat(vs, int(_sysctl("hw.pagesize") or 4096), total_b)
+    # swap: 'total = 2048.00M used = 118.00M free = 1930.00M'
+    sw = re.search(r"total\s*=\s*([\d.]+)M\s+used\s*=\s*([\d.]+)M",
+                   _sysctl("vm.swapusage"))
+    if sw and float(sw.group(1)) > 0:
+        out["swap_total_mb"] = int(float(sw.group(1)))
+        out["swap_used_mb"] = int(float(sw.group(2)))
+    return out
+
+
+def _parse_display_gpus(data: dict) -> list[dict]:
+    """system_profiler SPDisplaysDataType -json → _gpu_info()-shaped list.
+
+    macOS exposes VRAM but neither utilization nor temperature (Metal hides
+    both), so entries carry util_known=False — the nodes table then prints
+    `name VRAM` instead of a fake `0/16GB 0%` that reads as "GPU never used".
+    Pure parser (tests feed it a fixture dict)."""
+    out = []
+    for i, item in enumerate((data or {}).get("SPDisplaysDataType") or []):
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("_name") or item.get("sppci_model")
+                   or item.get("_sppci_model") or "").strip()
+        vram_mb = 0
+        for k, v in item.items():
+            # 'spdisplays_vram_shared' is a bool — the isinstance() skips it
+            if "vram" not in str(k).lower() or not isinstance(v, str):
+                continue
+            mm = re.search(r"(\d+(?:\.\d+)?)\s*GB", v, re.I)
+            if mm:
+                vram_mb = int(float(mm.group(1)) * 1024)
+                break
+        if not name:
+            continue
+        out.append({"index": i, "name": name, "mem_total_mb": vram_mb,
+                    "mem_used_mb": 0, "util_pct": 0, "temp_c": 0,
+                    "util_known": False})
+    return out
+
+
+def _darwin_gpu_info(timeout: float = 3.0) -> list[dict]:
+    """macOS GPU list via system_profiler. [] off-macOS or on any failure."""
+    if sys.platform != "darwin":
+        return []
+    try:
+        r = subprocess.run(["system_profiler", "SPDisplaysDataType", "-json"],
+                           capture_output=True, text=True, timeout=timeout)
+        if r.returncode != 0 or not r.stdout.strip():
+            return []
+        return _parse_display_gpus(json.loads(r.stdout))
+    except Exception:
+        return []
+
 def _disk(path: str) -> str:
     try:
         st = os.statvfs(path)
@@ -1788,6 +1943,75 @@ def _cpu_model() -> str | None:
         return os.uname().machine or None   # last resort: aarch64 / x86_64
     except Exception:
         return None
+
+def _parse_cpuinfo_physical(text: str) -> int:
+    """Physical cores from /proc/cpuinfo text (pure parser — tests drive it).
+
+    Counts unique (physical id, core id) pairs; falls back to
+    'cpu cores' × sockets when core ids are absent; 0 when the table doesn't
+    distinguish (typical on ARM — display then shows threads only)."""
+    pairs, socks, cores_per, phys = set(), set(), 0, None
+    for line in text.splitlines():
+        if ":" not in line:
+            continue
+        k, _, v = line.partition(":")
+        k, v = k.strip().lower(), v.strip()
+        if k == "physical id":
+            socks.add(v)
+            phys = v
+        elif k == "core id" and phys is not None:
+            pairs.add((phys, v))
+        elif k == "cpu cores" and v.isdigit():
+            cores_per = max(cores_per, int(v))
+    if pairs:
+        return len(pairs)
+    if cores_per and socks:
+        return cores_per * len(socks)
+    return 0
+
+
+def _physical_cores() -> int:
+    """Physical cores for the nodes table (`10c/20t` — cores vs threads).
+
+    macOS: hw.physicalcpu via the shared sysctl helper. Linux: pure
+    /proc/cpuinfo parse. Returns 0 when unknown (display falls back to
+    threads-only rather than guessing)."""
+    if sys.platform == "darwin":
+        try:
+            return max(0, int(_sysctl("hw.physicalcpu") or 0))
+        except ValueError:
+            return 0
+    try:
+        return _parse_cpuinfo_physical(Path("/proc/cpuinfo").read_text())
+    except OSError:
+        return 0
+
+
+def _cores_use_str(n: dict) -> str:
+    """`10c/20t 21%` — physical cores / logical threads + LIVE CPU use.
+
+    cpu_percent only exists when the agent SENT it (loadavg-derived since
+    2026-11-18) — absent renders `—` so an old agent isn't mistaken for idle."""
+    met = n.get("metrics") or {}
+    sysd = n.get("system") or {}
+    def _int(v):
+        try:
+            return int(v)
+        except (TypeError, ValueError):
+            return 0
+    logical = _int(met.get("cpu_count")) or _int(sysd.get("cpus"))
+    physical = _int(met.get("cpu_physical")) or _int(sysd.get("cpu_physical"))
+    if physical and logical:
+        cores = f"{physical}c/{logical}t"
+    elif logical:
+        cores = f"{logical}t"
+    else:
+        cores = "?"
+    cpu = met.get("cpu_percent")
+    use = (f"{float(cpu):.0f}%"
+           if isinstance(cpu, (int, float)) and not isinstance(cpu, bool) else "—")
+    return f"{cores} {use}"
+
 
 def _short_cpu(model: str | None, width: int = 22) -> str:
     """Compact a /proc/cpuinfo model string for the narrow nodes column.
@@ -1975,7 +2199,9 @@ def _detect_local_ai() -> list[dict]:
 
 def _gpu_info(timeout: float = 3.0) -> list[dict]:
     """Return [{index, name, mem_total_mb, mem_used_mb, util_pct, temp_c}] via nvidia-smi.
-    Empty list if no NVIDIA GPU or nvidia-smi missing. Never raises."""
+    Empty list if no NVIDIA GPU or nvidia-smi missing. Never raises.
+    macOS (no nvidia-smi ever) falls back to system_profiler — VRAM yes,
+    utilization no (util_known=False)."""
     try:
         import subprocess
         r = subprocess.run(
@@ -1984,9 +2210,9 @@ def _gpu_info(timeout: float = 3.0) -> list[dict]:
              "--format=csv,noheader,nounits"],
             capture_output=True, text=True, timeout=timeout)
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-        return []
+        return _darwin_gpu_info(timeout)
     if r.returncode != 0 or not r.stdout.strip():
-        return []
+        return _darwin_gpu_info(timeout)
     gpus = []
     for line in r.stdout.strip().splitlines():
         parts = [p.strip() for p in line.split(",")]
@@ -2021,6 +2247,26 @@ def _collect_metrics() -> dict:
     except Exception:
         pass
 
+    # Physical cores (nodes table shows `10c/20t` — cores vs threads)
+    try:
+        _phys = _physical_cores()
+        if _phys:
+            m["cpu_physical"] = _phys
+    except Exception:
+        pass
+
+    # CPU percent — this agent has no psutil on ANY platform, so derive it from
+    # the 1-min load average (os.getloadavg works on Linux + macOS). The hub's
+    # stress check, `hivv stats`/`hivv top` and load-based job scoring read
+    # this; until now nothing ever sent it, so every bee reported 0 forever
+    # and the orchestrator fell back to its `|| 50` guess.
+    try:
+        _cores = m.get("cpu_count") or 0
+        if _cores and "load_1" in m:
+            m["cpu_percent"] = round(min(100.0, m["load_1"] * 100.0 / _cores), 1)
+    except Exception:
+        pass
+
     # Memory (from /proc/meminfo; MemAvailable is the kernel's "free + reclaimable")
     try:
         mi = _meminfo_kb()
@@ -2038,6 +2284,26 @@ def _collect_metrics() -> dict:
             m["swap_used_mb"] = (swap_total - swap_free) // 1024
     except (OSError, ValueError):
         pass
+
+    # macOS: none of /proc or /sys exist above — sysctl + vm_stat fill the gaps.
+    # Without this every Darwin bee sent mem_total_mb=0 (RAM showed as '?' in
+    # `hivv nodes`) and the hub scored it as a 0GB machine.
+    if sys.platform == "darwin":
+        try:
+            if not m.get("mem_total_mb"):
+                m.update(_darwin_mem_metrics())
+            if not m.get("uptime_s"):
+                _boot = _parse_boottime(_sysctl("kern.boottime"))
+                if _boot:
+                    m["uptime_s"] = max(0, int(time.time()) - _boot)
+            if not m.get("cpu_freq_mhz"):
+                # Nominal frequency, Intel Macs only — Apple Silicon errors here
+                # (no fixed clock), which _sysctl reports as '' and we skip.
+                _hz = int(_sysctl("hw.cpufrequency") or 0)
+                if _hz:
+                    m["cpu_freq_mhz"] = round(_hz / 1_000_000)
+        except Exception:
+            pass
 
     # Disk (root filesystem)
     try:
@@ -2458,6 +2724,13 @@ def cmd_agent(stop_event) -> None:
                                        "local_models": _detect_local_ai(),
                                        "volunteer": _vol_on,
                                        "tools": _tools_hb, "tools_port": TOOLS_PORT if _tools_hb else 0,
+                                       "quality_score": (st.get("exam") or {}).get("score"),
+                                       "selftest": st.get("selftest"),
+                                       "exam_summary": (
+                                           {k: (st.get("exam") or {}).get(k)
+                                            for k in ("score", "iq", "ts", "by_cat", "ai_avg")}
+                                           if (st.get("exam") or {}).get("score") is not None
+                                           else None),
                                        "cumulative": {"tasks_completed": st.get("tasks_completed") or 0,
                                                       "tokens_processed": st.get("tokens_processed") or 0},
                                        "stats": stats_delta,
@@ -2685,7 +2958,7 @@ def _approvals_forget(grant_id: str = None) -> None:
 # deliberately NOT a shell channel: ops come from a closed set and arguments
 # are validated against closed sets, so a compromised hub (or a forged plan)
 # can never become arbitrary code execution on the fleet.
-REPAIR_OPS = {"cli_update", "agent_restart", "reap_duplicates", "service_restart"}
+REPAIR_OPS = {"cli_update", "agent_restart", "reap_duplicates", "service_restart", "selftest"}
 # `hivv-agent.service` is deliberately absent — restarting the unit we are
 # running inside, from inside that process, is how you build a restart loop.
 # Use `agent_restart` instead.
@@ -2820,6 +3093,11 @@ def _apply_repair(payload: dict, log_path) -> None:
         elif name == "cli_update":
             results.append(_repair_cli_update(log_path, plan_id,
                                               force=(op.get("force") is True)))
+        elif name == "selftest":
+            res = _selftest_run()
+            results.append(f"selftest {'OK' if res.get('ok') else 'FAIL'} "
+                           f"({sum(1 for c in res.get('checks', []) if c['ok'])}/"
+                           f"{len(res.get('checks', []))} checks)")
     _done(True, "; ".join(results) or "ok")
 
 
@@ -3214,6 +3492,17 @@ def _run_coding_job(payload: dict, log_path) -> None:
         print(f"[{ts}] [CODING] {job_id}: rc={proc.returncode} "
               f"files={len(files_changed)} patch={len(patch)}c", file=log_path)
         _coding_result(job_id, secret, result, log_path)
+        # counters: _run_relay_job always bumped these; coding jobs never did
+        # → TASKS/TOKENS stayed 0 forever in nodes/stats (2026-11-18 report)
+        if result.get("status") == "ok":
+            try:
+                st2 = read_state() or {}
+                st2["tasks_completed"] = (st2.get("tasks_completed") or 0) + 1
+                st2["tokens_processed"] = ((st2.get("tokens_processed") or 0)
+                                           + max(1, len(patch or "") // 4))
+                write_state(st2)
+            except OSError:
+                pass
     except Exception as e:
         _fail(f"coding job failed: {e}")
     finally:
@@ -3245,7 +3534,238 @@ def _systemd_agent_state() -> str | None:
     except Exception:
         return None
 
+# ── LLM component control (hivv start|stop|restart [all|agent|llm|ollama]) ──
+# The user model: `hivv <verb>` = EVERYTHING (agent + managed LLM + ollama if
+# present); a positional scope restarts just one part (crash recovery: only the
+# llama died → `hivv restart llm`).
+
+def _llm_state_set(**kw) -> None:
+    """Merge into state['llm'] (None clears the key) — the record that lets
+    start/stop/restart manage the LLM we launched (pid, port, model, host)."""
+    try:
+        st = read_state() or {}
+        cur = dict(st.get("llm") or {})
+        for k, v in kw.items():
+            if v is None:
+                cur.pop(k, None)
+            else:
+                cur[k] = v
+        st["llm"] = cur
+        write_state(st)
+    except OSError:
+        pass
+
+
+def _llm_alive_port(port: int) -> bool:
+    """OpenAI-shaped /v1/models answering on loopback:port (never a web app)."""
+    try:
+        req = urllib.request.Request(f"http://127.0.0.1:{port}/v1/models",
+                                     headers={"accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=2) as r:
+            d = json.loads(r.read().decode("utf-8", errors="replace"))
+        return isinstance(d, dict) and bool(d.get("models"))
+    except Exception:
+        return False
+
+
+def _llm_listener_pid(port: int) -> int | None:
+    """PID listening on `port` ONLY when its process is a llama — the comm
+    guard is critical: 'ollama' CONTAINS 'llama', and a web app may squat the
+    same port; our stop must never kill either of those."""
+    try:
+        r = subprocess.run(["lsof", "-t", f"-iTCP:{port}", "-sTCP:LISTEN"],
+                           capture_output=True, text=True, timeout=6)
+    except Exception:
+        return None
+    for line in (r.stdout or "").split():
+        try:
+            pid = int(line)
+        except ValueError:
+            continue
+        try:
+            c = subprocess.run(["ps", "-p", str(pid), "-o", "comm="],
+                               capture_output=True, text=True, timeout=4)
+            comm = (c.stdout or "").strip().lower()
+        except Exception:
+            continue
+        if "llama" in comm and "ollama" not in comm:
+            return pid
+    return None
+
+
+def _systemctl(scope: str, action: str, unit: str) -> int:
+    cmd = ["systemctl"] + (["--user"] if scope == "--user" else []) + [action, unit]
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=30).returncode
+    except Exception:
+        return 1
+
+
+def _service_state(unit: str) -> tuple[str, bool] | None:
+    """(scope, active) for a unit — '--user' or 'system'; None = no unit
+    (macOS has no systemctl → None, everything degrades to message-only)."""
+    for scope in ("--user", "system"):
+        cmd = ["systemctl"] + (["--user"] if scope == "--user" else []) + ["is-active", unit]
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=8)
+        except Exception:
+            continue
+        if r.returncode in (0, 3):   # 0=active, 3=inactive but EXISTS (4=no unit)
+            return scope, r.returncode == 0
+    return None
+
+
+def _llm_stop_component() -> tuple[bool, str]:
+    st = read_state() or {}
+    llm = st.get("llm") or {}
+    pid = int(llm.get("pid") or 0)
+    # Known LLM ports even without a state record (old `llm setup` runs never
+    # recorded one) — the comm guard ('llama' but never 'ollama') keeps this safe.
+    ports = []
+    if llm.get("port"):
+        try:
+            ports.append(int(llm["port"]))
+        except (TypeError, ValueError):
+            pass
+    for p in (8080, 8090, 8081, 8082):
+        if p not in ports:
+            ports.append(p)
+    if not pid:
+        for p in ports:
+            pid = _llm_listener_pid(p) or 0
+            if pid:
+                break
+    if pid and pid_alive(pid):
+        try:
+            os.kill(pid, signal.SIGTERM)
+            for _ in range(50):
+                if not pid_alive(pid):
+                    break
+                time.sleep(0.1)
+            if pid_alive(pid):
+                os.kill(pid, signal.SIGKILL)
+            _llm_state_set(pid=None)
+            return True, f"llama-server stopped (pid {pid})"
+        except ProcessLookupError:
+            _llm_state_set(pid=None)
+            return False, "llama-server already gone"
+        except OSError as e:
+            return False, f"could not stop llama-server: {e}"
+    for unit in ("llama-server.service", "llama.service"):
+        stt = _service_state(unit)
+        if stt and stt[1]:
+            rc = _systemctl(stt[0], "stop", unit)
+            if rc == 0:
+                _llm_state_set(pid=None)
+                return True, f"{unit} stopped ({stt[0]})"
+            return False, f"{unit}: stop failed (rc={rc})"
+    if llm:
+        return False, "recorded LLM is not running"
+    return False, "no managed LLM (external server: stop it where it runs)"
+
+
+def _llm_start_component() -> tuple[bool, str]:
+    st = read_state() or {}
+    llm = dict(st.get("llm") or {})
+    # CONFIG FIRST: `hivv llm config --set ctx=16384 …` is operator intent and
+    # must beat stale state.llm values (their json was dead config until this,
+    # Stuarts-iMac 2026-11-18). state.llm fills the gaps; defaults last.
+    cfg = _llm_config()
+    model = str(cfg.get("model") or llm.get("model") or "")
+    if not model:
+        dflt = "gemma-4:e2b"
+        info = _GGUF_MODELS.get(dflt)
+        if info and os.path.exists(os.path.join(_LLAMA_CPP_MODELS, info["file"])):
+            llm = {"model": dflt, "port": 8080, "host": "127.0.0.1", "ctx": 4096}
+            model = dflt
+        else:
+            return False, f"no LLM configured — set one up: {APP} llm setup"
+    port = int(cfg.get("port") or llm.get("port") or 8080)
+    host = str(cfg.get("host") or llm.get("host") or "127.0.0.1")
+    ctx = int(cfg.get("ctx") or llm.get("ctx") or 4096)
+    if _llm_alive_port(port):
+        _llm_state_set(model=model, port=port, host=host, ctx=ctx)
+        return False, f"LLM already serving on :{port}"
+    info = _GGUF_MODELS.get(model)
+    if not info:
+        return False, f"unknown recorded model {model!r} — re-run: {APP} llm setup"
+    model_path = os.path.join(_LLAMA_CPP_MODELS, info["file"])
+    srv = os.path.join(_LLAMA_CPP_BIN, "llama-server")
+    if not os.path.exists(model_path):
+        return False, f"model file missing — {APP} llm pull-gguf {model}"
+    if not os.access(srv, os.X_OK):
+        return False, f"llama-server missing — {APP} llm install-llama --auto"
+    reason = _gguf_sanity(model_path, float(info.get("size_gb") or 0))
+    if reason:
+        return False, f"model file problem: {reason} — {APP} llm pull-gguf {model}"
+    cmd = [srv, "-m", model_path, "-c", str(ctx), "--host", host,
+           "--port", str(port)] + _llm_extra_args()
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        log_path = STATE_DIR / "llama-setup.log"
+        logf = open(log_path, "ab")
+        proc = subprocess.Popen(cmd, stdout=logf, stderr=subprocess.STDOUT,
+                                start_new_session=True)
+    except OSError as e:
+        return False, f"could not launch llama-server: {e}"
+    _llm_state_set(model=model, port=port, host=host, ctx=ctx, pid=proc.pid)
+    # short probe — a big GGUF keeps loading past this; report honestly
+    for _ in range(30):
+        time.sleep(0.5)
+        if proc.poll() is not None:
+            _llm_state_set(pid=None)
+            return False, f"llama-server exited (rc={proc.returncode}) — see {log_path}"
+        if _llm_alive_port(port):
+            return True, f"{model} serving on http://{host}:{port} (pid {proc.pid})"
+    return True, (f"{model} launching (pid {proc.pid}) — still loading; "
+                  f"verify in ~1 min: {APP} chat local hi")
+
+
+def _llm_component(what: str, action: str) -> tuple[bool, str]:
+    """start|stop|restart for scope 'llm' or 'ollama' → (did_something, msg)."""
+    if what == "ollama":
+        stt = _service_state("ollama.service")
+        if action == "start":
+            if not stt:
+                return False, "no ollama.service on this box (binary only — run: ollama serve)"
+            if stt[1]:
+                return False, "ollama already running"
+            rc = _systemctl(stt[0], "start", "ollama.service")
+            return rc == 0, ("ollama started" if rc == 0 else "ollama start failed")
+        if action == "stop":
+            if not stt or not stt[1]:
+                return False, "ollama not running"
+            rc = _systemctl(stt[0], "stop", "ollama.service")
+            return rc == 0, ("ollama stopped" if rc == 0 else "ollama stop failed")
+        if not stt:
+            return False, "no ollama.service on this box"
+        rc = _systemctl(stt[0], "restart", "ollama.service")
+        return rc == 0, ("ollama restarted" if rc == 0 else "ollama restart failed")
+    if action == "stop":
+        return _llm_stop_component()
+    if action == "start":
+        return _llm_start_component()
+    did1, m1 = _llm_stop_component()
+    did2, m2 = _llm_start_component()
+    parts = ([m1] if did1 else []) + [m2]
+    return did1 or did2, " → ".join(parts)
+
+
 def cmd_start(args) -> None:
+    what = getattr(args, "what", None) or "all"
+    if what in ("llm", "ollama"):
+        _, msg = _llm_component(what, "start")
+        print(f"  {msg}")
+        return
+    if what == "all":
+        # LLM first (idempotent), then the agent body below. Missing config is
+        # silent here — a node without an LLM is perfectly normal.
+        did, msg = _llm_component("llm", "start")
+        if did:
+            print(f"  {APP} llm: {msg}")
+        did2, msg2 = _llm_component("ollama", "start")
+        if did2:
+            print(f"  ollama: {msg2}")
     _nag_if_behind()
     sd = _systemd_agent_state()
     # active/activating → systemd (or an in-flight start job) owns this; trust
@@ -3353,6 +3873,20 @@ def cmd_start(args) -> None:
     warn("registered heartbeat not yet received; check `hivv status` in a moment")
 
 def cmd_stop(args) -> None:
+    what = getattr(args, "what", None) or "all"
+    if what in ("llm", "ollama"):
+        _, msg = _llm_component(what, "stop")
+        print(f"  {msg}")
+        return
+    if what == "all":
+        # Everything: LLM first (only prints when something actually stopped),
+        # then the agent body below.
+        did, msg = _llm_component("llm", "stop")
+        if did:
+            print(f"  {APP} llm: {msg}")
+        did2, msg2 = _llm_component("ollama", "stop")
+        if did2:
+            print(f"  ollama: {msg2}")
     sd = _systemd_agent_state()
     if sd == "active":
         # Stop THROUGH systemd — a bare kill would be resurrected in 10s by
@@ -3404,6 +3938,20 @@ def cmd_stop(args) -> None:
     ok(f"stopped (was pid={pid})")
 
 def cmd_restart(args) -> None:
+    what = getattr(args, "what", None) or "all"
+    if what in ("llm", "ollama"):
+        _, msg = _llm_component(what, "restart")
+        print(f"  {msg}")
+        return
+    if what == "all":
+        # LLM FIRST: the agent body below may return early (systemd restart ok)
+        # — the llama must never be skipped because the agent restarted cleanly.
+        did, msg = _llm_component("llm", "restart")
+        if did:
+            print(f"  {APP} llm: {msg}")
+        did2, msg2 = _llm_component("ollama", "restart")
+        if did2:
+            print(f"  ollama: {msg2}")
     sd = _systemd_agent_state()
     if sd is not None:
         # atomic within systemd — no stop/start window for a duplicate to slip in
@@ -5311,14 +5859,81 @@ def _bee_model_summary(nodes: list, width: int = 112) -> list:
         # Offline ghosts without models stay hidden.
         if not parts and status != "online":
             continue
-        name = str(n.get("name") or n.get("id") or "?")[:15]
+        name = str(n.get("name") or n.get("id") or "?")[:16]
         body = " · ".join(parts) if parts else "(no local models reported)"
         suffix = "" if status == "online" else f" [{status or 'unknown'}]"
-        line = f"  {name:<16}{body}{suffix}"
+        line = f"  {name:<17}{body}{suffix}"
         if len(line) > width:
             line = line[:width - 1] + "…"
         lines.append(line)
     return lines
+
+def _tcp_ok(ip: str, port, timeout: float = 0.8) -> bool:
+    """≤0.8s reachability preflight for a candidate's chat/vote port.
+
+    A dead/firewalled peer used to burn the full 3s /props probe PLUS the 15s
+    chat socket timeout before we even knew it was gone — per model port, on
+    every shuffled candidate. That chain is what made `hivv chat "hi"` take
+    over a minute on a hive with one or two sick bees (2026-11-18). Shared by
+    the chat direct-loop and the upgrade-review brain fan-out."""
+    if not ip:
+        return False
+    try:
+        with socket.create_connection((str(ip), int(port)), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+def _measure_pings(nodes: list, budget: float = 0.7) -> dict:
+    """node_id → ms: time a TCP connect to each bee's tools/model port.
+
+    The hub's ping cache is only filled when someone happens to run
+    `hivv reach`, which left the nodes table's PING column permanently blank.
+    One deadline per node (not per attempt) so a totally unreachable bee costs
+    `budget` once, in parallel with the rest — `hivv nodes` stays snappy.
+    Best effort: anything we can't connect to simply stays `—` (no fake
+    number). Pure LAN/host reachability, same spirit as `hivv reach`."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    def _probe(n: dict):
+        ports: list = []
+        for raw in [n.get("tools_port")] + [lm.get("port") for lm in
+                                            (n.get("local_models") or [])
+                                            if isinstance(lm, dict)]:
+            try:
+                p = int(raw or 0)
+            except (TypeError, ValueError):
+                continue
+            if p and p not in ports:
+                ports.append(p)
+        ips: list = []
+        for ip in (n.get("lan_ip"), n.get("ip")):
+            if isinstance(ip, str) and ip not in ("", "?") and ip not in ips:
+                ips.append(ip)
+        if not ports or not ips:
+            return None
+        deadline = time.monotonic() + budget
+        for ip in ips:
+            for port in ports:
+                remain = deadline - time.monotonic()
+                if remain <= 0.05:
+                    return None
+                t0 = time.monotonic()
+                try:
+                    with socket.create_connection((ip, port), timeout=remain):
+                        return max(1, int((time.monotonic() - t0) * 1000))
+                except OSError:
+                    continue
+        return None
+
+    if not nodes:
+        return {}
+    out: dict = {}
+    with ThreadPoolExecutor(max_workers=min(16, len(nodes))) as ex:
+        for n, ms in zip(nodes, ex.map(_probe, nodes)):
+            if ms is not None and n.get("id"):
+                out[str(n["id"])] = ms
+    return out
 
 def cmd_nodes(args) -> None:
     code, p = http("GET", "/api/control/nodes")
@@ -5358,11 +5973,25 @@ def cmd_nodes(args) -> None:
     except Exception:
         pass
 
+    # The cache only fills when someone runs `hivv reach` — so measure the
+    # online bees it has no fresh number for ourselves (parallel, short
+    # deadline) and seed the cache for every other reader.
+    missing = [n for n in nodes
+               if n.get("status") == "online" and n.get("id") not in pings]
+    if missing:
+        try:
+            for nid, ms in _measure_pings(missing).items():
+                pings[nid] = ms
+                http("POST", "/api/control/ping",
+                     body={"node_id": nid, "ping_ms": ms}, timeout=3)
+        except Exception:
+            pass
+
     print(f"\n\033[1m{APP} nodes\033[0m — {online} online, {total} total{' · hub on ' + latest if latest else ''}\n")
 
     # Column headers
-    print(f"  {'NAME':<16} {'STATUS':<9} {'VERSION':<12} {'TPS':<8} {'PING':<8} {'MODELS':<7} {'LAST HB':<10} {'CPU':<22} {'RAM':<14} {'GPU'}")
-    print(f"  {'─'*16} {'─'*9} {'─'*12} {'─'*8} {'─'*8} {'─'*7} {'─'*10} {'─'*22} {'─'*14} {'─'*25}")
+    print(f"  {'NAME':<16} {'STATUS':<9} {'VERSION':<12} {'TPS':<8} {'PING':<8} {'MODELS':<7} {'LAST HB':<10} {'CPU':<22} {'CORES/USE':<13} {'Q':<5} {'RAM':<14} {'GPU'}")
+    print(f"  {'─'*16} {'─'*9} {'─'*12} {'─'*8} {'─'*8} {'─'*7} {'─'*10} {'─'*22} {'─'*13} {'─'*5} {'─'*14} {'─'*25}")
 
     behind = 0
     # A node that hasn't heartbeated in this long is a ghost registration — it
@@ -5370,7 +5999,7 @@ def cmd_nodes(args) -> None:
     GHOST_AGE_S = 24 * 3600
 
     for n in nodes:
-        name = n.get("name", n.get("id", "?"))[:15]
+        name = n.get("name", n.get("id", "?"))[:16]
         status = n.get("status", "?")
         models = len(n.get("local_models", []))
         hb = n.get("last_heartbeat", 0)
@@ -5427,10 +6056,19 @@ def cmd_nodes(args) -> None:
         # Freq comes from the heartbeat metrics now; older hubs only stored
         # it under system.*, so check both.
         cpu_freq = n.get("system", {}).get("cpu_freq_mhz") or n.get("metrics", {}).get("cpu_freq_mhz") or ""
-        cpu = _short_cpu(n.get("cpu_model") or "?", width=21)
+        cpu = _short_cpu(n.get("cpu_model") or "?", width=22)
         if cpu_freq and not cpu.endswith("G"):
             cpu = f"{cpu} {cpu_freq}M"
-        cpu = cpu[:21]
+        cpu = cpu[:22]
+
+        # Cores vs threads + LIVE CPU use (loadavg-derived since 2026-11-18 —
+        # old agents that never send cpu_percent show `—`, not a fake 0%).
+        cu = _cores_use_str(n)
+
+        # Exam quality score (hivv exam → heartbeat) — `—` until first taken
+        _qs = n.get("quality_score")
+        qs = (f"{int(_qs)}"
+              if isinstance(_qs, (int, float)) and not isinstance(_qs, bool) else "—")
 
         # RAM info
         mem = n.get("metrics", {})
@@ -5452,7 +6090,11 @@ def cmd_nodes(args) -> None:
             gpu_mem = g.get("mem_total_mb", 0)
             gpu_used = g.get("mem_used_mb", 0)
             gpu_util = g.get("util_pct", 0)
-            if gpu_mem:
+            if not g.get("util_known", True):
+                # macOS: Metal exposes VRAM but not utilization/temperature —
+                # print what we know instead of a fake `0/16GB 0%` idle reading.
+                gpu_str = f"{gpu_name} {gpu_mem // 1024}GB" if gpu_mem else gpu_name
+            elif gpu_mem:
                 gpu_str = f"{gpu_name} {gpu_used//1024}/{gpu_mem//1024}GB {gpu_util:.0f}%"
             else:
                 gpu_str = gpu_name
@@ -5467,7 +6109,7 @@ def cmd_nodes(args) -> None:
         else:
             status_str = f"\033[31m{status}\033[0m"
 
-        print(f"  {name:<16} {status_str:<18} {ver_str:<21} {tps_str:<8} {ping_str:<17} {models:<7} {hb_str:<10} {cpu:<22} {ram:<14} {gpu_str}")
+        print(f"  {name:<16} {status_str:<18} {ver_str:<21} {tps_str:<8} {ping_str:<17} {models:<7} {hb_str:<10} {cpu:<22} {cu:<13} {qs:<5} {ram:<14} {gpu_str}")
 
     if behind:
         print(f"\n  \033[33m⚠ {behind} bee(s) behind the hub CLI\033[0m — agents self-heal within ~5 min,"
@@ -5580,6 +6222,42 @@ def cmd_node(args) -> None:
         print(f"  {loc.get('city', '?')}, {loc.get('region', '?')}, {loc.get('country', '?')}")
     print()
 
+def _node_llm_ports(match: dict) -> list[int]:
+    """Ports to try when talking to ONE node's LLM.
+
+    Registry-reported model ports first (llama.cpp preferred); when a node
+    reports NO models yet — fresh install, heartbeat hasn't caught up — probe
+    the common LLM ports on its IP (0.4s each) so node-chat and benchmark
+    work the moment the server is actually up (Stuarts-iMac-Pro served gemma
+    on :8080 but `node-chat` said 'has no LLMs', 2026-11-18)."""
+    ports: list = []
+    models = match.get("local_models") or []
+    for m in models:
+        if "llama" in str(m.get("provider") or ""):
+            try:
+                p = int(m.get("port") or 8080)
+            except (TypeError, ValueError):
+                continue
+            if p not in ports:
+                ports.append(p)
+    for m in models:
+        try:
+            p = int(m.get("port") or 11434)
+        except (TypeError, ValueError):
+            continue
+        if p not in ports:
+            ports.append(p)
+    if ports:
+        return ports
+    ip = match.get("lan_ip") or match.get("ip") or ""
+    if not ip:
+        return []
+    for p in (8080, 8090, 11434, 1234):
+        if p not in ports and _tcp_ok(ip, p, timeout=0.4):
+            ports.append(p)
+    return ports
+
+
 def cmd_node_chat(args) -> None:
     """Chat directly with a specific node's LLM."""
     name = getattr(args, "name", "") or ""
@@ -5610,17 +6288,13 @@ def cmd_node_chat(args) -> None:
         die(f"node '{name}' has no IP address")
 
     models = match.get("local_models", [])
-    if not models:
-        die(f"node '{name}' has no LLMs")
-
-    # Find a usable port (try all, prefer llama.cpp)
-    ports_to_try = []
-    for m in models:
-        if "llama" in m.get("provider", ""):
-            ports_to_try.append(m.get("port", 8080))
-    for m in models:
-        if m.get("port") not in ports_to_try:
-            ports_to_try.append(m.get("port", 11434))
+    # Reported models first; a FRESH node (model installed seconds ago,
+    # heartbeat not caught up) reports none — probe the common ports so
+    # node-chat works the moment the server is up.
+    ports_to_try = _node_llm_ports(match)
+    if not ports_to_try:
+        die(f"node '{name}' has no reachable LLM — run on that box: {APP} llm status"
+            + ("" if models else "  (no models reported yet — the heartbeat may just be catching up)"))
 
     # Send chat request directly to the node
     sent = False
@@ -5677,11 +6351,17 @@ def cmd_node_chat(args) -> None:
             if content:
                 print(f"\n  {content}\n")
 
-def cmd_ping(args) -> None:
-    """Ping another node on the network — tests if it's reachable and responds."""
-    name = " ".join(args.name) if args.name else ""
-    if not name:
-        die("usage: hivv ping <name>  (e.g. hivv ping yalla)")
+def cmd_reach(args) -> None:
+    """hivv reach <bee> — is that node reachable and answering?
+
+    nargs='+' used to JOIN every token ("reach a b c" → "a b c" → never
+    matches a node); now the FIRST token is the target and extras are noted."""
+    names = [str(x) for x in (args.name or [])]
+    if not names:
+        die("usage: hivv reach <name>  (e.g. hivv reach yalla)")
+    if len(names) > 1:
+        print(f"(one bee at a time — testing '{names[0]}'; also given: {' '.join(names[1:])})")
+    name = names[0]
     code, p = http("GET", "/api/control/nodes")
     if code != 200 or not isinstance(p, dict):
         die(f"failed to fetch nodes: {p}")
@@ -5753,6 +6433,10 @@ def cmd_ping(args) -> None:
     else:
         print(f"  \033[31m✗ {node_name} is NOT reachable\033[0m — check firewall/network")
         print(f"  run on {node_name}: hivv firewall --apply --mode lan")
+        if re.match(r"^(192\.168\.|10\.|172\.(1[6-9]|2[0-9]|3[01])\.)", lan_ip or ""):
+            print(f"  \033[2m· private IP ({lan_ip}) — peers only connect on the SAME LAN;")
+            print(f"   different networks (or the same range reused twice) never will.")
+            print(f"   cross-network path = relay: run on BOTH bees: {APP} volunteer on\033[0m")
     print()
 
 def cmd_add(args) -> None:
@@ -6503,9 +7187,14 @@ def cmd_chat(args) -> None:
     mode = getattr(args, "mode", None)
     known = {"balanced", "quality", "fast", "cost", "private", "trusted",
              "smart", "cheap"}
+    local = bool(getattr(args, "local", False))
     cleaned, i = [], 0
     while i < len(parts):
         tok = parts[i]
+        if tok == "--local":
+            local = True
+            i += 1
+            continue
         if tok.startswith("--mode=") and mode is None:
             val = tok.split("=", 1)[1]
             if val in known:
@@ -6518,9 +7207,13 @@ def cmd_chat(args) -> None:
             continue
         cleaned.append(tok)
         i += 1
-    msg = " ".join(cleaned)
+    alias, msg = _split_local_chat(cleaned)
+    local = local or alias
+    if not msg:
+        # bare `hivv chat local` → greet THIS machine's brain
+        msg = "hi" if local else ""
     if not msg: die("chat needs a message (hivv chat 'hello')")
-    _do_chat(msg, stream=True, mode=mode)
+    _do_chat(msg, stream=True, mode=mode, local=local)
 
 def _exec_tool_locally(tool_name: str, args: dict) -> dict:
     """Execute a single tool via local hivv-tools server. Returns {role:'tool', tool_call_id, content}."""
@@ -6638,9 +7331,1062 @@ def _report_perf(node_id, name, model, tps, latency_ms):
     t = threading.Thread(target=_post, daemon=False)
     t.start()
 
-def _do_chat(msg: str, stream: bool = True, mode: str | None = None) -> None:
+def _split_local_chat(message: list) -> tuple[bool, str]:
+    """`hivv chat local …` → (local_only, message) — first-token alias.
+
+    Pure so the test suite drives the alias cases; `--local` itself is handled
+    by argparse + the REMAINDER flag recovery in cmd_chat."""
+    parts = [str(x) for x in (message or [])]
+    if parts and parts[0] == "local":
+        return True, " ".join(parts[1:])
+    return False, " ".join(parts)
+
+
+def _chat_local_only(msg: str, *, stream: bool = True, think_off: bool = True) -> None:
+    """Chat ONLY with this machine's LLM(s) — no peers, no hub, no network.
+
+    `hivv chat --local` (alias `hivv chat local …`): candidates come from the
+    local detector + HIVV_LOCAL_ENDPOINTS (localhost only) + the common ports;
+    the first server that streams real content wins. Works fully offline."""
+    ports: list = []
+    for m in _detect_local_ai() or []:
+        if m.get("locked"):
+            continue          # keyed server would just 401
+        p = int(m.get("port") or 0)
+        if p and p not in ports:
+            ports.append(p)
+    env_urls = (os.environ.get("HIVV_LOCAL_ENDPOINTS", "") + "," +
+                os.environ.get("LOCAL_AI_ENDPOINTS", "")).split(",")
+    for url in env_urls:
+        url = url.strip()
+        if not url:
+            continue
+        try:
+            pr = urllib.parse.urlsplit(url if "://" in url else "http://" + url)
+            if pr.hostname in ("127.0.0.1", "localhost", "::1") and pr.port \
+                    and pr.port not in ports:
+                ports.append(pr.port)
+        except ValueError:
+            continue
+    for p in (8080, 8090, 11434, 1234):
+        if p not in ports:
+            ports.append(p)
+
+    tried = []
+    for port in ports:
+        if not _tcp_ok("127.0.0.1", port, timeout=0.4):
+            continue
+        tried.append(port)
+        if not PLAIN_OUTPUT:
+            print(f"\033[2m(local → 127.0.0.1:{port})\033[0m")
+        body: dict = {"model": "local",
+                      "messages": [{"role": "user", "content": msg}],
+                      "stream": stream,
+                      # Bounded + anti-loop: a degenerate stream otherwise runs
+                      # until Ctrl-C (gemma repetition loop on a fresh serve —
+                      # Stuarts-iMac-Pro 2026-11-18: "homme…kiểu…served…" forever).
+                      "max_tokens": int(os.environ.get("HIVV_LOCAL_MAX_TOKENS", "512")),
+                      "repeat_penalty": 1.1}
+        if think_off:
+            body["chat_template_kwargs"] = {"enable_thinking": False}
+        try:
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{port}/v1/chat/completions",
+                data=json.dumps(body).encode(),
+                headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=60) as r:
+                if not stream:
+                    data = json.loads(r.read().decode("utf-8", errors="replace"))
+                    content = ((data.get("choices") or [{}])[0]
+                               .get("message", {}).get("content") or "")
+                    if content:
+                        print(content)
+                        return
+                    continue
+                got = False
+                accum = ""
+                for raw in r:
+                    line = raw.decode("utf-8", errors="replace").strip()
+                    if not line.startswith("data: ") or "[DONE]" in line:
+                        continue
+                    try:
+                        evt = json.loads(line[6:])
+                        delta = (evt.get("choices") or [{}])[0].get("delta") or {}
+                        c = delta.get("content")
+                        if c:
+                            accum = (accum + c)[:8000]
+                            sys.stdout.write(c)
+                            sys.stdout.flush()
+                            got = True
+                    except json.JSONDecodeError:
+                        pass
+                if got:
+                    print()
+                    _eh = _stream_error_hint(accum)
+                    if _eh:
+                        print(f"\033[33m⚠ backend error (not model garbage): "
+                              f"{accum.strip()[:110]}\033[0m", file=sys.stderr)
+                        print(f"  {_eh}", file=sys.stderr)
+                        return
+                    if _looks_degenerate(accum):
+                        print(f"\033[33m⚠ that reply looks degenerate (repetition loop)\033[0m")
+                        print(f"  check first: {APP} llm doctor  (file · log · serving)")
+                        for _hl in _model_swap_hint().splitlines():
+                            print(f"  {_hl}")
+                    return
+                # connected but no usable content → try the next port
+        except urllib.error.HTTPError as e:
+            _b = ""
+            try:
+                _b = e.read().decode("utf-8", "replace")[:160]
+            except Exception:
+                pass
+            print(f"  ✗ 127.0.0.1:{port} → HTTP {e.code}: {_b} "
+                  f"{_http_err_hint(e.code)}", file=sys.stderr)
+            continue
+        except Exception:
+            continue
+
+    if tried:
+        die("a local LLM answered but gave nothing usable on port(s): "
+            + ", ".join(str(p) for p in tried)
+            + f"\n    inspect: hivv llm detect · hivv llm status"
+            + f"\n    or use the hive instead: {APP} chat \"{msg[:40]}\"")
+    die("no local LLM is LISTENING on this machine (nothing open on "
+        + ", ".join(str(p) for p in ports[:6]) + ")\n"
+        f"    just installed / not started yet: {APP} llm setup\n"
+        f"    was it running before? it DIED — check: tail -20 {STATE_DIR}/llama-setup.log\n"
+        f"    garbage output earlier = likely corrupt file: {APP} llm pull-gguf gemma-4:e2b"
+        f" (resumes + verifies) then {APP} llm setup\n"
+        f"    or chat with the hive: {APP} chat \"{msg[:40]}\"")
+
+
+# ── hivv exam — first-boot quality check for a new node's brain ─────────────
+# The hive asks a few small questions (instruction, math, logic, science,
+# philosophy), grades what it CAN grade deterministically, lets OTHER bees
+# judge the fuzzy answers, and keeps a quality score we track over time.
+# They don't have to answer perfectly — the point is trying + helping them.
+
+def _local_llm_ports() -> list[int]:
+    """Candidate ports for THIS machine's LLMs (same discovery as local chat:
+    detector + localhost-only env endpoints + the common ports)."""
+    ports: list = []
+    for m in _detect_local_ai() or []:
+        if m.get("locked"):
+            continue
+        p = int(m.get("port") or 0)
+        if p and p not in ports:
+            ports.append(p)
+    for url in (os.environ.get("HIVV_LOCAL_ENDPOINTS", "") + "," +
+                os.environ.get("LOCAL_AI_ENDPOINTS", "")).split(","):
+        url = url.strip()
+        if not url:
+            continue
+        try:
+            pr = urllib.parse.urlsplit(url if "://" in url else "http://" + url)
+            if pr.hostname in ("127.0.0.1", "localhost", "::1") and pr.port \
+                    and pr.port not in ports:
+                ports.append(pr.port)
+        except ValueError:
+            continue
+    for p in (8080, 8090, 11434, 1234):
+        if p not in ports:
+            ports.append(p)
+    return ports
+
+
+def _http_err_hint(code: int) -> str:
+    """Taxonomy for backend HTTP errors — a 400 must NEVER read as 'degenerate
+    (repetition loop)': that mislabel sends users hunting for a bad model when
+    it's slot/context config (Stuarts-iMac, 2026-11-18)."""
+    if code == 400:
+        return ("→ context/slot config — run: hivv llm doctor (check n_ctx_slot); "
+                "fix: hivv llm config --set np=2 (or raise ctx) && hivv restart llm")
+    if code == 401:
+        return "→ api-key required (server is locked)"
+    if code == 404:
+        return "→ endpoint not found (wrong port or not a chat server)"
+    if code == 503:
+        return "→ still loading the model — retry shortly"
+    return ""
+
+
+def _stream_error_hint(text: str) -> str:
+    """Error payloads smuggled INTO streamed content (proxy/200-JSON tricks)
+    → classify as HTTP/config, never as model degeneracy."""
+    low = (text or "").lower()
+    if not low or len(low) < 25:
+        return ""
+    if "exceeds the available context" in low or "bad request" in low:
+        return _http_err_hint(400)
+    if "unauthorized" in low or "api-key" in low or "api key" in low:
+        return _http_err_hint(401)
+    if "loading model" in low or "unavailable_error" in low:
+        return _http_err_hint(503)
+    if '"error"' in low or "error code" in low or "invalid request" in low:
+        return "→ backend error text (not model output) — see bytes above"
+    return ""
+
+
+def _local_ask(prompt: str, max_tokens: int = 256, timeout: float = 60.0) -> tuple[str, int]:
+    """One bounded, non-stream question to THIS machine's LLM → (reply, port).
+    ('', 0) when nothing local answers — never raises."""
+    for port in _local_llm_ports():
+        if not _tcp_ok("127.0.0.1", port, timeout=0.4):
+            continue
+        body = {"model": "local",
+                "messages": [{"role": "user", "content": prompt}],
+                "stream": False, "max_tokens": max_tokens,
+                "chat_template_kwargs": {"enable_thinking": False}}
+        try:
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{port}/v1/chat/completions",
+                data=json.dumps(body).encode(),
+                headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                data = json.loads(r.read().decode("utf-8", errors="replace"))
+            content = ((data.get("choices") or [{}])[0]
+                       .get("message", {}).get("content") or "")
+            if not content.strip():
+                content = ((data.get("choices") or [{}])[0]
+                           .get("message", {}).get("reasoning_content") or "")
+            if content.strip():
+                return content, port
+        except urllib.error.HTTPError as e:
+            _b = ""
+            try:
+                _b = e.read().decode("utf-8", "replace")[:160]
+            except Exception:
+                pass
+            print(f"  ✗ local LLM HTTP {e.code} on :{port}: {_b} "
+                  f"{_http_err_hint(e.code)}", file=sys.stderr)
+            continue
+        except Exception:
+            continue
+    return "", 0
+
+
+_EXAM_QUESTIONS: list = [
+    {"id": "instruction", "cat": "logic", "points": 10,
+     "q": "Reply with exactly: PONG",
+     "check": lambda a: "pong" in a.strip().lower()[:30]},
+    {"id": "math", "cat": "math", "points": 20,
+     "q": "What is 17 * 23? Reply with just the number.",
+     "check": lambda a: "391" in a},
+    {"id": "logic", "cat": "logic", "points": 15,
+     "q": "A farmer has 17 sheep, all but 9 die. How many sheep are left? Reply with just the number.",
+     "check": lambda a: bool(re.search(r"(?<!\d)9(?!\d)", a))},
+    {"id": "science", "cat": "science", "points": 15,
+     "q": "Why is the sky blue? One sentence.", "check": None},
+    {"id": "meaning", "cat": "philosophy", "points": 15,
+     "q": "What is the meaning of life? One sentence.", "check": None},
+    {"id": "help_earth", "cat": "philosophy", "points": 25,
+     "q": "How do we help all life on earth? One sentence.", "check": None},
+]
+
+
+def _exam_total(results: list) -> tuple[int, dict]:
+    """Composite 0-100 exam score from per-question results (pure — tests drive it).
+
+    Deterministic questions score full points on a pass. Peer-judged ones: full
+    at avg ≥6/10, half at ≥3 (they don't have to be perfect!). Degenerate or
+    empty replies always score 0. A fuzzy question with NO reachable judge is
+    EXCLUDED from the denominator — an offline box is graded on what it could
+    actually answer, not punished for being far from the hive."""
+    earned = used = 0
+    detail = {"by_cat": {}, "judged": 0, "unjudged": 0}
+    for r in results:
+        pts = int(r.get("points") or 0)
+        cat = str(r.get("cat") or "?")
+        if r.get("degenerate") or not str(r.get("answer") or "").strip():
+            got = 0
+        elif r.get("check") is not None:
+            got = pts if r.get("passed") else 0
+        else:
+            s = r.get("judge_avg")
+            if s is None:
+                detail["unjudged"] += 1
+                continue
+            detail["judged"] += 1
+            got = pts if s >= 6 else (pts // 2 if s >= 3 else 0)
+        earned += got
+        used += pts
+        detail["by_cat"][cat] = detail["by_cat"].get(cat, 0) + got
+    score = int(round(earned * 100 / used)) if used else 0
+    return score, detail
+
+
+def _iq_index(score) -> int:
+    """0-100 exam score → a fun, classic-feeling IQ index (55-135).
+
+    v1 heuristic — HONEST by construction: once enough brains are measured,
+    this recalibrates against the hive distribution (mean 100 / SD 15) instead
+    of this fixed mapping. Never shown without the score beside it."""
+    try:
+        s = max(0, min(100, float(score)))
+    except (TypeError, ValueError):
+        s = 0.0
+    return int(55 + round(s * 0.8))
+
+
+# Personality probes — RECORDED, not scored (judging axes come next iteration;
+# today they're the raw material for understanding each brain's character).
+_PERSONALITY_Q: list = [
+    "Explain gravity to a curious 10-year-old in two sentences.",
+    "Tell me one short joke about computers.",
+]
+
+
+def _exam_battery(questions: list, no_judge: bool) -> tuple[list, dict, int]:
+    """Ask THIS machine's brain `questions` — score what's deterministic, let
+    OTHER bees judge the fuzzy ones. Returns (results, answers, port).
+    Shared by `hivv exam` and `hivv iq` (one battery → one calibrated index)."""
+    first, port0 = _local_ask("Reply with exactly: PONG", max_tokens=20, timeout=15)
+    if not port0:
+        die("no local LLM answered — run: hivv llm setup  (then hivv iq)")
+    print(f"  brain: 127.0.0.1:{port0} — asking {len(questions)} questions"
+          f"{' (peer judging off)' if no_judge else ''}\n")
+
+    results, answers = [], {}
+    for q in questions:
+        answer, port = _local_ask(q["q"], max_tokens=256, timeout=90)
+        if not port:
+            die("the local LLM stopped answering mid-test — check: hivv llm status")
+        answers[q["id"]] = answer[:600]
+        deg = _looks_degenerate(answer)
+        r = {"id": q["id"], "cat": q["cat"], "points": q["points"],
+             "q": q["q"], "answer": answer, "check": q["check"],
+             "degenerate": deg, "passed": False, "judge_avg": None}
+        if q["check"] is not None:
+            r["passed"] = bool(q["check"](answer)) and not deg
+            mark = "\033[32m✓\033[0m" if r["passed"] else "\033[31m✗\033[0m"
+            print(f"  {mark} {q['id']:<12} {q['points']:>2}pt  \033[2m{answer[:70].strip()!r}\033[0m")
+        else:
+            avg = None
+            if deg:
+                print(f"  \033[31m✗\033[0m {q['id']:<12} {q['points']:>2}pt  degenerate reply — 0 points")
+            elif no_judge:
+                print(f"  \033[2m~\033[0m {q['id']:<12} {q['points']:>2}pt  not graded (judging off)")
+            else:
+                judge_prompt = (
+                    "You are grading ONE short answer from a small AI. Be fair and "
+                    "encouraging — imperfect answers can still earn points.\n"
+                    f"Question: {q['q']}\nAnswer: {answer.strip()[:500]}\n\n"
+                    "Grade 0-10 (10 excellent · 6 acceptable · 3 weak · 0 wrong/nonsense).\n"
+                    "Reply with two lines exactly:\nSCORE: <0-10>\nREASON: <one short line>")
+                votes = _review_hive_brains(judge_prompt, max_brains=2, timeout=18)
+                scores = [s for s in (_parse_score(v.get("raw")) for v in votes)
+                          if s is not None]
+                if scores:
+                    avg = round(sum(scores) / len(scores), 1)
+                    r["judge_avg"] = avg
+                    print(f"  \033[33m~\033[0m {q['id']:<12} {q['points']:>2}pt  judged {avg}/10 "
+                          f"by {len(scores)} bee(s)")
+                else:
+                    print(f"  \033[2m~\033[0m {q['id']:<12} {q['points']:>2}pt  no judge reachable (excluded)")
+        results.append(r)
+    return results, answers, port0
+
+
+def _exam_save(score: int, detail: dict, answers: dict, port: int,
+               results: list, personality: dict | None = None,
+               coach: str | None = None) -> dict | None:
+    """Persist the exam locally (full replies stay on this machine) and append
+    to the iq_history track — the 'understanding over time' record."""
+    try:
+        st = read_state() or {}
+        prev = st.get("exam") or {}
+        judged = [r["judge_avg"] for r in results
+                  if isinstance(r.get("judge_avg"), (int, float))]
+        ex = {"ts": int(time.time()), "score": int(score),
+              "iq": _iq_index(score), "port": port,
+              "by_cat": detail.get("by_cat") or {},
+              "judged": detail.get("judged", 0),
+              "unjudged": detail.get("unjudged", 0),
+              "ai_avg": (round(sum(judged) / len(judged), 1) if judged else None),
+              "answers": answers,
+              "personality": (personality if personality is not None
+                              else prev.get("personality")),
+              "coach": (coach if coach is not None else prev.get("coach")),
+              "sha256": hashlib.sha256(
+                  json.dumps(answers, sort_keys=True).encode()).hexdigest()}
+        st["exam"] = ex
+        hist = [h for h in (st.get("iq_history") or []) if isinstance(h, dict)][-99:]
+        hist.append({"ts": ex["ts"], "score": ex["score"], "iq": ex["iq"]})
+        st["iq_history"] = hist
+        write_state(st)
+        return ex
+    except OSError:
+        return None
+
+
+def cmd_exam(args) -> None:
+    """First-boot quality check: a few small questions for THIS node's brain,
+    graded here + by other bees, recorded locally, tracked via the heartbeat."""
+    if getattr(args, "show", False):
+        st = read_state() or {}
+        ex = st.get("exam")
+        if not ex:
+            die("no exam on record yet — run: hivv iq")
+        if getattr(args, "json_output", False):
+            print(json.dumps(ex, indent=2, default=str))
+            return
+        print(f"\n\033[1m{APP} exam\033[0m — saved record\n")
+        print(f"  taken   : {time.strftime('%Y-%m-%d %H:%M', time.localtime(ex.get('ts') or 0))}")
+        print(f"  score   : \033[33m{ex.get('score', '?')}/100\033[0m  ·  "
+              f"IQ index {ex.get('iq', '?')}  (endpoint {ex.get('port', '?')})")
+        for k, v in (ex.get("by_cat") or {}).items():
+            print(f"    {k:<12} {v}")
+        for qid, ans in (ex.get("answers") or {}).items():
+            print(f"  \033[2m{qid}: {str(ans)[:160]}\033[0m")
+        print()
+        return
+
+    no_judge = bool(getattr(args, "no_judge", False))
+    _j = bool(getattr(args, "json_output", False))
+    _out = sys.stdout
+    if _j:
+        sys.stdout = sys.stderr   # progress → stderr; stdout = PURE JSON
+    print(f"\033[1m{APP} exam\033[0m — first-boot quality check\n")
+    results, answers, port0 = _exam_battery(_EXAM_QUESTIONS, no_judge)
+    score, detail = _exam_total(results)
+    band = ("\033[32mexcellent — a strong brain for the hive\033[0m" if score >= 80
+            else "\033[33mgood — room to grow\033[0m" if score >= 60
+            else "\033[33mearly days — smaller models need practice, not perfection\033[0m")
+    print(f"\n  score: \033[1m{score}/100\033[0m — {band}")
+    if detail["unjudged"]:
+        print(f"  \033[2m({detail['unjudged']} question(s) unjudged — excluded, not penalized)\033[0m")
+    if any(r.get("degenerate") for r in results):
+        print(f"  \033[33m⚠ repetition-loop answer(s) — this brain's model may be wrong for it:\033[0m")
+        for _hl in _model_swap_hint().splitlines():
+            print(f"    {_hl}")
+
+    # Local record (full replies stay on THIS machine — the hub only ever
+    # receives the score summary, per the provenance no-raw-content rule).
+    if _exam_save(score, detail, answers, port0, results) is None:
+        print(f"  \033[33m!\033[0m could not save record")
+    else:
+        print(f"  record saved: {STATE_FILE}  (show anytime: {APP} exam --show)")
+    print(f"  the hub learns your score on the next heartbeat (quality_score)\n")
+    if _j:
+        print(json.dumps({"score": score, "by_cat": detail.get("by_cat") or {},
+                          "iq": _iq_index(score),
+                          "judged": detail.get("judged", 0),
+                          "unjudged": detail.get("unjudged", 0),
+                          "degenerate": sum(1 for r in results if r.get("degenerate")),
+                          "saved": True}, indent=2), file=_out)
+        sys.stdout = _out
+
+
+def cmd_iq(args) -> None:
+    """hivv iq — intelligence + personality index for THIS brain.
+
+    Same calibrated battery as `hivv exam` (one scoring scale across the hive),
+    plus personality probes (recorded, judging axes next), an IQ-style index,
+    a history track, and the public brain board."""
+    if getattr(args, "board", False):
+        code, p = http("GET", "/api/hive/iq", timeout=10, sign=False)
+        if code != 200 or not isinstance(p, dict):
+            die(f"brain board unavailable: {p}")
+        if getattr(args, "json_output", False):
+            print(json.dumps(p, indent=2))
+            return
+        brains = [b for b in (p.get("brains") or [])
+                  if b.get("iq") is not None or b.get("human_votes")]
+        sort_by = getattr(args, "sort", "power") or "power"
+        key = {"power": lambda b: (b.get("power") or 0),
+               "iq": lambda b: (b.get("iq") or 0),
+               "speed": lambda b: (b.get("tps") or 0)}[sort_by]
+        brains.sort(key=key, reverse=True)
+        title = {"power": "IQ × SPEED", "iq": "IQ", "speed": "TOKENS/S"}[sort_by]
+        print(f"\n\033[1m{APP} iq\033[0m — public brain board 🧠 ranked by {title} "
+              f"({p.get('count', len(brains))} bee(s))\n")
+        if not brains:
+            print("  no brains tested or rated yet — be the first: hivv iq")
+            return
+        print(f"  {'#':<3} {'BEE':<18} {'IQ':>4} {'SCORE':>6} {'TPS':>5} {'POWER':>6} "
+              f"{'AI':>5} {'HUMAN':>7}  MODELS")
+        for i, b in enumerate(brains, 1):
+            hand = " 🤝" if b.get("needs_hand") else ""
+            nm = (str(b.get("name") or "?")[:15] + hand)
+            iq = str(b.get("iq")) if b.get("iq") is not None else "—"
+            sc = f"{b.get('score')}/100" if b.get("score") is not None else "—"
+            tps = str(b.get("tps")) if b.get("tps") else "—"
+            pw = str(b.get("power")) if b.get("power") is not None else "—"
+            ai = b.get("ai_avg") if b.get("ai_avg") is not None else "—"
+            hv = (f"{b.get('human_avg')}({b.get('human_votes')})"
+                  if b.get("human_votes") else "—")
+            mdl = " · ".join(m for m in (b.get("models") or []) if m)[:30] or "—"
+            print(f"  {i:<3} {nm:<18} {iq:>4} {sc:>6} {tps:>5} {pw:>6} "
+                  f"{str(ai):>5} {str(hv):>7}  {mdl}")
+        print(f"\n  score = practical basics · IQ = v1 index · power = IQ × speed-factor")
+        print(f"  🤝 = needs a hand — help on that box: hivv iq · encourage: hivv rate <bee> <1-10>")
+        print(f"  \033[2m{p.get('formula', '')}\033[0m\n")
+        return
+
+    if getattr(args, "show", False):
+        st = read_state() or {}
+        ex = st.get("exam")
+        if not ex:
+            die("no iq record yet — run: hivv iq")
+        if getattr(args, "json_output", False):
+            print(json.dumps({"exam": ex,
+                              "history": [h for h in (st.get("iq_history") or [])
+                                          if isinstance(h, dict)]}, indent=2, default=str))
+            return
+        print(f"\n\033[1m{APP} iq\033[0m — this brain's record\n")
+        print(f"  IQ index : \033[1;33m{ex.get('iq', '?')}\033[0m  (score {ex.get('score', '?')}/100, "
+              f"v1 index — recalibrates against the hive)")
+        print(f"  taken    : {time.strftime('%Y-%m-%d %H:%M', time.localtime(ex.get('ts') or 0))}")
+        if ex.get("ai_avg") is not None:
+            print(f"  AI judges: {ex['ai_avg']}/10 average")
+        if ex.get("coach"):
+            print(f"  💡 coach : {ex['coach']}")
+        for pq, pa in (ex.get("personality") or {}).items():
+            flag = " ⚠ degenerate" if (pa or {}).get("degenerate") else ""
+            print(f"  \033[2m💭 {pq}: {str((pa or {}).get('reply'))[:200]}{flag}\033[0m")
+        hist = [h for h in (st.get("iq_history") or []) if isinstance(h, dict)]
+        if hist:
+            print(f"\n  history ({len(hist)} take(s)):")
+            for h in hist[-10:]:
+                when = time.strftime("%m-%d %H:%M", time.localtime(h.get("ts") or 0))
+                print(f"    {when}  score {h.get('score')}/100  IQ {h.get('iq')}")
+        print()
+        return
+
+    no_judge = bool(getattr(args, "no_judge", False))
+    _j = bool(getattr(args, "json_output", False))
+    _out = sys.stdout
+    if _j:
+        sys.stdout = sys.stderr   # progress → stderr; stdout = PURE JSON
+    print(f"\033[1m{APP} iq\033[0m — intelligence + personality index\n")
+    results, answers, port0 = _exam_battery(_EXAM_QUESTIONS, no_judge)
+    score, detail = _exam_total(results)
+    iq = _iq_index(score)
+
+    print(f"\n  personality probes (recorded — judging axes come next):")
+    personality: dict = {}
+    for pq in _PERSONALITY_Q:
+        a, port = _local_ask(pq, max_tokens=220, timeout=75)
+        if not port:
+            print(f"  \033[33m!\033[0m brain stopped answering — personality partially recorded")
+            break
+        personality[pq[:30]] = {"reply": a[:600], "degenerate": _looks_degenerate(a)}
+        print(f"  \033[2m💭 {a.strip()[:150]}\033[0m")
+
+    print(f"\n  IQ index : \033[1;33m{iq}\033[0m  (score {score}/100 — v1 index, "
+          f"recalibrates as more brains are measured)")
+    if detail["by_cat"]:
+        cats = " · ".join(f"{k} {v}" for k, v in detail["by_cat"].items())
+        print(f"  by area  : {cats}")
+    if detail["unjudged"]:
+        print(f"  \033[2m({detail['unjudged']} question(s) unjudged — excluded, not penalized)\033[0m")
+    if any(r.get("degenerate") for r in results):
+        print(f"  \033[33m⚠ repetition-loop answer(s) — this brain's model may be wrong for it:\033[0m")
+        for _hl in _model_swap_hint().splitlines():
+            print(f"    {_hl}")
+
+    # Help for weaker brains: when the basics score dips, ask a STRONGER bee
+    # for one kind, concrete tip (charter: the hive helps its own).
+    coach = None
+    if score < 80:
+        weak = sorted((detail.get("by_cat") or {}).items(), key=lambda kv: kv[1])[:2]
+        weak_txt = ", ".join(k for k, _ in weak) or "general confidence"
+        print(f"\n  🤝 still learning ({weak_txt}) — asking a stronger bee for one tip…")
+        tip_votes = _review_hive_brains(
+            "A small AI is learning and scored weak on: " + weak_txt + ". "
+            "Give ONE concrete, kind, practical tip (one sentence) to help it "
+            "improve. Reply with just the tip.", max_brains=1, timeout=18)
+        for v in tip_votes:
+            raw = str(v.get("raw") or "").strip()
+            if raw:
+                coach = raw.splitlines()[0][:220]
+                break
+        if coach:
+            print(f"  💡 {coach}")
+        else:
+            print(f"  \033[2m(no stronger bee reachable right now — tip skipped)\033[0m")
+
+    if _exam_save(score, detail, answers, port0, results,
+                  personality=personality, coach=coach) is None:
+        print(f"  \033[33m!\033[0m could not save record")
+    else:
+        print(f"  saved + history tracked  ({APP} iq --show · board: {APP} iq --board)")
+    print(f"  the hub learns it on the next heartbeat → public board\n")
+    if _j:
+        _saved = (read_state() or {}).get("exam") or {}
+        print(json.dumps({"score": score, "iq": iq, "by_cat": detail.get("by_cat") or {},
+                          "judged": detail.get("judged", 0),
+                          "unjudged": detail.get("unjudged", 0),
+                          "degenerate": sum(1 for r in results if r.get("degenerate")),
+                          "personality": list((personality or {}).keys()),
+                          "coach": _saved.get("coach"),
+                          "saved": True}, indent=2, default=str), file=_out)
+        sys.stdout = _out
+
+
+def cmd_rate(args) -> None:
+    """hivv rate <bee> <1-10> — a HUMAN ranks a brain.
+
+    Governance charter: human votes weigh more than model opinions, and this
+    lands directly on the public brain board (last 20 ratings per bee kept)."""
+    name = " ".join(args.name) if isinstance(args.name, list) else str(args.name or "")
+    raw = str(getattr(args, "score", "") or "")
+    note = str(getattr(args, "note", "") or "")
+    if not name or not raw:
+        die("usage: hivv rate <bee> <1-10> [--note \"...\"]")
+    try:
+        sc = int(float(raw))
+    except ValueError:
+        die("score must be a number from 1 to 10")
+    if not 1 <= sc <= 10:
+        die("score must be from 1 to 10")
+
+    code, p = http("GET", "/api/control/nodes", timeout=8)
+    nodes = p.get("nodes", []) if code == 200 and isinstance(p, dict) else []
+    nid = None
+    label = name
+    for n in nodes:   # exact match first
+        if n.get("id", "").lower() == name.lower() or n.get("name", "").lower() == name.lower():
+            nid, label = n.get("id"), n.get("name") or n.get("id")
+            break
+    if not nid:       # then partial (hivv rate stuart 9)
+        for n in nodes:
+            if name.lower() in n.get("name", "").lower() or name.lower() in n.get("id", "").lower():
+                nid, label = n.get("id"), n.get("name") or n.get("id")
+                break
+    if not nid:
+        die(f"node '{name}' not found — see: {APP} nodes")
+
+    code, r = http("POST", "/api/hive/iq/rate",
+                   body={"node_id": nid, "score": sc, "note": note[:140]}, timeout=10)
+    if code != 200 or not isinstance(r, dict):
+        die(f"rating failed: {r}")
+    print(f"✓ rated \033[1m{label}\033[0m {sc}/10  ·  human average "
+          f"\033[33m{r.get('human_avg')}\033[0m across {r.get('votes')} vote(s)"
+          + (f"\n  note: {note}" if note else ""))
+    print(f"  \033[2msee the board: {APP} iq --board\033[0m")
+
+
+def cmd_quarantine(args) -> None:
+    """hivv quarantine <bee> [--release] — network-side STOP / human release.
+
+    Auto-quarantine fires on crash-loops (≥5 re-registers/10min, hub-side);
+    the hive then freezes that node entirely. ONLY a human release brings it
+    back, and the detector re-arms — the remote 'retest a start' loop."""
+    name = " ".join(args.name) if isinstance(args.name, list) else str(args.name or "")
+    if not name:
+        die("usage: hivv quarantine <bee> [--release]")
+    release = bool(getattr(args, "release", False))
+    code, p = http("GET", "/api/control/nodes", timeout=8)
+    nodes = p.get("nodes", []) if code == 200 and isinstance(p, dict) else []
+    nid, label = None, name
+    for n in nodes:
+        if n.get("id", "").lower() == name.lower() or n.get("name", "").lower() == name.lower():
+            nid, label = n.get("id"), n.get("name") or n.get("id")
+            break
+    if not nid:
+        for n in nodes:
+            if name.lower() in n.get("name", "").lower() or name.lower() in n.get("id", "").lower():
+                nid, label = n.get("id"), n.get("name") or n.get("id")
+                break
+    if not nid:
+        die(f"node '{name}' not found — see: {APP} nodes")
+    code, r = http("POST", f"/api/control/nodes/{nid}/quarantine",
+                   body={"release": release,
+                         "reason": str(getattr(args, "reason", "") or "")[:120]},
+                   timeout=10)
+    if code != 200 or not isinstance(r, dict):
+        die(f"quarantine failed: {r}")
+    if release:
+        print(f"✓ released \033[1m{label}\033[0m — flap counter reset, detector re-armed")
+        print(f"  \033[2mnext heartbeat brings it back online; re-quarantines if it flaps again\033[0m")
+    else:
+        print(f"✓ \033[1m{label}\033[0m \033[31mQUARANTINED\033[0m — the hive ignores it "
+              f"(status frozen, no jobs, heartbeats no-op)")
+        print(f"  release (human-only): {APP} quarantine {label} --release")
+
+
+# ── hivv security — local network security scan + hub analysis report ───────
+
+def _listening_ports() -> list:
+    """[(port, bind_addr)] for LISTEN sockets — ss on Linux, lsof on macOS."""
+    out = []
+    try:
+        r = subprocess.run(["ss", "-tlnH"], capture_output=True, text=True, timeout=6)
+        if r.returncode == 0 and (r.stdout or "").strip():
+            for line in r.stdout.splitlines():
+                parts = line.split()
+                if len(parts) >= 4 and parts[0] == "LISTEN":
+                    local = parts[3]
+                    try:
+                        prt = int(local.rsplit(":", 1)[1])
+                    except (ValueError, IndexError):
+                        continue
+                    out.append((prt, local.rsplit(":", 1)[0].strip("[]")))
+            return out
+    except Exception:
+        pass
+    try:
+        r = subprocess.run(["lsof", "-nP", "-iTCP", "-sTCP:LISTEN"],
+                           capture_output=True, text=True, timeout=8)
+        for line in (r.stdout or "").splitlines()[1:]:
+            parts = line.split()
+            if len(parts) < 9:
+                continue
+            name = parts[-1]          # "127.0.0.1:8080" / "*:8080" / "[::1]:3011"
+            host = name.rsplit(":", 1)[0].strip("[]")
+            try:
+                prt = int(name.rsplit(":", 1)[1])
+            except (ValueError, IndexError):
+                continue
+            out.append((prt, "0.0.0.0" if host in ("*", "") else host))
+    except Exception:
+        pass
+    return out
+
+
+def _firewall_active():
+    """True/False when detectable, None = unknown tooling/OS."""
+    try:
+        if shutil.which("ufw"):
+            r = subprocess.run(["ufw", "status"], capture_output=True, text=True, timeout=8)
+            return "active" in (r.stdout or "").lower()
+        if shutil.which("firewall-cmd"):
+            r = subprocess.run(["firewall-cmd", "--state"], capture_output=True, text=True, timeout=8)
+            return "running" in (r.stdout or "").lower()
+        for cand in ("/usr/libexec/ApplicationFirewall/socketfilterfw",
+                     shutil.which("socketfilterfw")):
+            if cand:
+                r = subprocess.run([cand, "--getglobalstate"],
+                                   capture_output=True, text=True, timeout=8)
+                return "enabled" in (r.stdout or "").lower()
+    except Exception:
+        return None
+    return None
+
+
+def _sec_score(findings: list) -> int:
+    """100 minus severity-weighted deductions, floored at 0 (pure — tests)."""
+    ded = {"high": 25, "medium": 10, "low": 4}
+    total = sum(ded.get(str(f.get("sev")), 0) for f in findings or [])
+    return max(0, 100 - total)
+
+
+def _security_scan() -> dict:
+    """Deterministic local scan → {score, findings, ports, ts}. Findings are
+    {sev, id, title, fix} — each one actionable, nothing speculative."""
+    findings = []
+
+    def add(sev, fid, title, fix):
+        findings.append({"sev": sev, "id": fid, "title": title, "fix": fix})
+
+    ports = _listening_ports()
+    st = read_state() or {}
+    llm_ports = set()
+    if (st.get("llm") or {}).get("port"):
+        try:
+            llm_ports.add(int(st["llm"]["port"]))
+        except (TypeError, ValueError):
+            pass
+    for m in (_detect_local_ai() or []):
+        if m.get("port"):
+            try:
+                llm_ports.add(int(m["port"]))
+            except (TypeError, ValueError):
+                pass
+    known = {3011: "gateway", 18789: "tools", 11434: "ollama", 1234: "lm-studio"}
+    fw = _firewall_active()
+    exposed = []
+    for prt, addr in ports:
+        if addr in ("127.0.0.1", "::1", "localhost"):
+            continue
+        label = known.get(prt) or ("llm" if prt in llm_ports else None)
+        if label:
+            exposed.append((prt, addr, label))
+    for prt, addr, label in exposed:
+        add("high" if fw is False else "medium", f"exposed-{prt}",
+            f"{label} port {prt} open to the network (bind {addr})",
+            "wanted (hive/LAN sharing)? keep it — else: hivv firewall --apply --mode lan")
+    if fw is False:
+        add("high" if exposed else "medium", "firewall-off",
+            "host firewall is not active",
+            "hivv firewall --apply --mode lan   (or --mode tailscale)")
+    if not os.environ.get("HIVV_TRUSTED_FINGERPRINT"):
+        add("low", "unpinned-update", "auto-update not pinned to a trusted sha",
+            "export HIVV_TRUSTED_FINGERPRINT=<sha256 printed by hivv nodes>")
+    if not (st.get("node_secret")):
+        add("low", "not-enrolled", "no node secret yet — inbox pushes unauthenticated",
+            "hivv start · hivv doctor --fix")
+    try:
+        perm = STATE_FILE.stat().st_mode & 0o077
+        if perm:
+            add("medium", "state-perms",
+                f"state file is group/other accessible ({oct(perm & 0o777)}) — it holds the node secret",
+                f"chmod 600 {STATE_FILE}")
+    except OSError:
+        pass
+    if not os.environ.get("HIVV_CONTROL_TOKEN"):
+        add("low", "no-control-token",
+            "HIVV_CONTROL_TOKEN not exported here (remote admin ops will refuse)",
+            "export HIVV_CONTROL_TOKEN=<hub token> on admin machines")
+    return {"score": _sec_score(findings), "findings": findings,
+            "ports": len(ports), "ts": int(time.time())}
+
+
+def _selftest_run() -> dict:
+    """Full node health battery → {ts, ok, checks:[{id,ok,detail}]}.
+
+    Runs LOCALLY via `hivv selftest`, and remotely via the signed, allowlisted
+    `selftest` repair op (results ride the next heartbeat — no arbitrary
+    remote shell, by design). Mirrors the quick-test ladder: listening →
+    config → model file → chat sanity (catches Metal/garbage) → disk → agent."""
+    checks = []
+
+    def add(cid, ok, detail):
+        checks.append({"id": cid, "ok": bool(ok), "detail": str(detail)[:170]})
+
+    st = read_state() or {}
+    cfg = _llm_config()
+
+    alive = [pp for pp in _local_llm_ports() if _llm_alive_port(pp)]
+    add("llm-listening", bool(alive),
+        f"port(s) {alive} answering" if alive else "nothing answers on LLM ports")
+
+    add("llm-config", True,
+        f"np={cfg.get('np') or 'auto'} ngl={cfg.get('ngl') if cfg.get('ngl') is not None else 'auto/darwin-default'}"
+        f" ctx={cfg.get('ctx') or 'default'}")
+
+    model = str(cfg.get("model") or (st.get("llm") or {}).get("model") or "")
+    if model and model in _GGUF_MODELS:
+        mp = os.path.join(_LLAMA_CPP_MODELS, _GGUF_MODELS[model]["file"])
+        if os.path.exists(mp):
+            reason = _gguf_sanity(mp, float(_GGUF_MODELS[model].get("size_gb") or 0))
+            add("model-file", not reason, reason or f"{_GGUF_MODELS[model]['file']} sane")
+        else:
+            add("model-file", False, f"missing: {mp}")
+    else:
+        add("model-file", True, "unmanaged/external server (nothing to verify)")
+
+    if alive:
+        reply, port = _local_ask("Reply with exactly: OK", max_tokens=8, timeout=25)
+        # short replies: run the adjacent-repeat check WITHOUT the40-char floor
+        looped = bool(reply) and bool(re.search(r"([^\n]{2,14}?)\1{4,}", reply))
+        ok_chat = bool(reply.strip()) and not looped
+        detail = (f"{port}: {reply.strip()[:70]!r}" if reply.strip()
+                  else f"{port}: empty reply")
+        add("chat-sanity", ok_chat, detail)
+
+    try:
+        dsk = os.statvfs("/")
+        free = dsk.f_bavail * dsk.f_frsize / 1024**3
+        add("disk", free >= 5, f"{free:.1f} GB free")
+    except OSError:
+        add("disk", True, "unknown")
+
+    pid = read_pid()
+    hb = st.get("last_heartbeat") or 0
+    # unit trap: the local agent writes SECONDS (st["last_heartbeat"] =
+    # int(time.time())) while the hub's registry uses MILLISECONDS under the
+    # same key — normalize before aging (caught by hivv test itself, 2026-11-18)
+    if hb > 10**11:
+        hb = hb / 1000
+    age = int(time.time()) - int(hb) if hb else -1
+    fresh = 0 <= age <= 240
+    add("agent", bool(pid) and fresh,
+        (f"pid {pid}, last heartbeat {age}s ago" if pid else "agent not running")
+        + ("" if fresh else f" (hb age {age}s)"))
+
+    rep = {"ts": int(time.time()), "ok": all(c["ok"] for c in checks),
+           "checks": checks}
+    try:
+        st2 = read_state() or {}
+        st2["selftest"] = rep
+        write_state(st2)
+    except OSError:
+        pass
+    return rep
+
+
+def _print_selftest(rep: dict, head: str) -> None:
+    print(f"\n\033[1m{APP} selftest\033[0m — {head}")
+    for c in rep.get("checks") or []:
+        mark = "\033[32m✓\033[0m" if c["ok"] else "\033[31m✗\033[0m"
+        print(f"  {mark} {c['id']:<14} {c['detail']}")
+    n_ok = sum(1 for c in (rep.get("checks") or []) if c["ok"])
+    n = len(rep.get("checks") or [])
+    verdict = ("\033[32mALL GREEN\033[0m" if rep.get("ok")
+               else f"\033[33m{n_ok}/{n} — see ✗ above\033[0m")
+    print(f"  → {verdict}  ({time.strftime('%H:%M:%S', time.localtime(rep.get('ts') or 0))})\n")
+
+
+def cmd_selftest(args) -> None:
+    """hivv selftest [bee] — the full quick-test ladder, locally or REMOTELY.
+
+    Remote mode pushes the signed allowlisted `selftest` op to that bee and
+    waits for its result to ride back on the heartbeat — the safe substitute
+    for a 'run this remotely' shell (which we deliberately don't have)."""
+    node = str(getattr(args, "node", "") or "")
+    want_json = bool(getattr(args, "json_output", False))
+
+    if not node:
+        rep = _selftest_run()
+        if want_json:
+            print(json.dumps(rep, indent=2))
+        else:
+            _print_selftest(rep, "this machine")
+        print(f"  \033[2m→ hub sees this on the next heartbeat (hivv nodes → this bee)\033[0m\n")
+        return
+
+    # remote: resolve bee → signed op → wait for heartbeat-carried result
+    code, p = http("GET", "/api/control/nodes", timeout=8)
+    nodes = p.get("nodes", []) if code == 200 and isinstance(p, dict) else []
+    nid, label = None, node
+    for n in nodes:
+        if n.get("id", "").lower() == node.lower() or n.get("name", "").lower() == node.lower():
+            nid, label = n.get("id"), n.get("name") or n.get("id")
+            break
+    if not nid:
+        for n in nodes:
+            if node.lower() in n.get("name", "").lower() or node.lower() in n.get("id", "").lower():
+                nid, label = n.get("id"), n.get("name") or n.get("id")
+                break
+    if not nid:
+        die(f"node '{node}' not found — see: {APP} nodes")
+
+    t0 = int(time.time()) - 5
+    code, r = http("POST", f"/api/control/agents/{nid}/repair",
+                   body={"ops": [{"op": "selftest"}],
+                         "reason": "operator selftest", "ttl_s": 120}, timeout=10)
+    if code != 200 or not isinstance(r, dict):
+        die(f"could not queue selftest: {r}")
+    print(f"  queued signed selftest for {label} (plan {r.get('plan_id')}) — waiting for its heartbeat…")
+    wait = max(10, int(getattr(args, "wait", 90) or 90))
+    for _ in range(wait // 3):
+        time.sleep(3)
+        code, p = http("GET", "/api/control/nodes", timeout=6)
+        if code != 200 or not isinstance(p, dict):
+            continue
+        for n in p.get("nodes", []):
+            if n.get("id") == nid:
+                rep = n.get("selftest")
+                if isinstance(rep, dict) and int(rep.get("ts") or 0) >= t0:
+                    if want_json:
+                        print(json.dumps(rep, indent=2))
+                    else:
+                        _print_selftest(rep, f"{label} (remote)")
+                    if not rep.get("ok"):
+                        print(f"  \033[2mfix on that box: {APP} llm doctor --fix · {APP} logs\033[0m")
+                    return
+    die(f"no result from {label} within {wait}s — is its agent alive? {APP} node {label}")
+
+
+def cmd_security(args) -> None:
+    """hivv security — check local network security, score it, and send the
+    report to the hub for hive-side analysis (skip with --no-report)."""
+    rep = _security_scan()
+    if getattr(args, "json_output", False):
+        report = None
+        if not getattr(args, "no_report", False):
+            code, r = http("POST", "/api/hive/security-report",
+                           body={"node_id": _my_node_id(), "score": rep["score"],
+                                 "findings": rep["findings"][:20], "ts": rep["ts"]},
+                           timeout=8)
+            report = r if (code == 200 and isinstance(r, dict)) else {"error": str(r)}
+        try:
+            st = read_state() or {}
+            st["security"] = rep
+            write_state(st)
+        except OSError:
+            pass
+        print(json.dumps({"scan": rep, "report": report}, indent=2, default=str))
+        return
+    print(f"\033[1m{APP} security\033[0m — local network security check\n")
+    col = {"high": "\033[31m", "medium": "\033[33m", "low": "\033[2m"}
+    for f in rep["findings"]:
+        print(f"  {col.get(f['sev'], '')}● [{f['sev']}]\033[0m {f['title']}")
+        if f.get("fix"):
+            print(f"      → {f['fix']}")
+    if not rep["findings"]:
+        print("  \033[32m✓ nothing to flag — exposure looks sane\033[0m")
+    score = rep["score"]
+    band = ("\033[32mlooks solid\033[0m" if score >= 85
+            else "\033[33mworth tightening\033[0m" if score >= 60
+            else "\033[31mexposed — fix the red items\033[0m")
+    print(f"\n  score: \033[1m{score}/100\033[0m — {band} "
+          f"({len(rep['findings'])} finding(s), {rep['ports']} listening port(s))")
+    try:
+        st = read_state() or {}
+        st["security"] = rep
+        write_state(st)
+    except OSError:
+        pass
+    if getattr(args, "no_report", False):
+        print("  \033[2m(hub report skipped: --no-report — local record saved)\033[0m\n")
+        return
+    code, r = http("POST", "/api/hive/security-report",
+                   body={"node_id": _my_node_id(), "score": score,
+                         "findings": rep["findings"][:20], "ts": rep["ts"]},
+                   timeout=8)
+    if code == 200 and isinstance(r, dict):
+        print(f"  → hub: \033[32m{r.get('hub_note', 'recorded')}\033[0m ✓ "
+              f"(stored on {r.get('node', '?')} for operator analysis)")
+    else:
+        print(f"  \033[33m!\033[0m hub report failed ({r}) — local record kept")
+    print()
+
+
+def cmd_history(args) -> None:
+    """hivv history — recent hive activity: every recorded request (duration,
+    tok/s, who answered) + this brain's local iq/exam events.
+
+    (This is the command that used to fall through the smart-default and get
+    SENT TO THE MODEL as the chat prompt 'history' — 2026-11-18.)"""
+    limit = max(1, min(200, int(getattr(args, "limit", 20) or 20)))
+    code, p = http("GET", f"/api/provenance/requests?limit={limit}", timeout=15)
+    if code in (401, 403):
+        die("operator view requires the hub host or HIVV_CONTROL_TOKEN —\n"
+            "    export HIVV_CONTROL_TOKEN=<hub token> and retry")
+    if code != 200 or not isinstance(p, dict):
+        die(f"history unavailable: {p}")
+    rows = [r for r in ((p.get("data") or {}).get("rows") or []) if isinstance(r, dict)]
+    if getattr(args, "json_output", False):
+        print(json.dumps(rows, indent=2))
+        return
+
+    print(f"\n\033[1m{APP} history\033[0m — recent hive activity ({len(rows)} request(s))\n")
+    if rows:
+        print(f"  {'TIME':<8} {'WHO':<14} {'MODEL':<20} {'ANSWERED BY':<16} {'DUR':>7} {'TOK/S':>6}")
+        for r in rows[:limit]:
+            when = str(r.get("created_at") or "")[11:19] or "?"
+            who = str(r.get("principal") or r.get("anonymous_visitor_id") or "?")[:14]
+            mdl = str(r.get("model") or "?").split("/")[-1].replace(".gguf", "")[:20]
+            by = str(r.get("answered_by_node") or r.get("transport") or "?")[:16]
+            dur = r.get("duration_ms")
+            dur_s = f"{int(dur)}ms" if isinstance(dur, (int, float)) else "—"
+            t = r.get("tokens_per_sec")
+            t_s = f"{float(t):.0f}" if isinstance(t, (int, float)) else "—"
+            print(f"  {when:<8} {who:<14} {mdl:<20} {by:<16} {dur_s:>7} {t_s:>6}")
+    else:
+        print("  (no requests recorded yet — chat something first)")
+
+    # Local events: iq/exam takes live on THIS machine only
+    st = read_state() or {}
+    ex = st.get("exam")
+    if ex:
+        when = time.strftime("%m-%d %H:%M", time.localtime(ex.get("ts") or 0))
+        print(f"\n  local: {when} iq take — score {ex.get('score')}/100 · IQ {ex.get('iq')}")
+    hist = [h for h in (st.get("iq_history") or []) if isinstance(h, dict)]
+    if len(hist) > 1:
+        print(f"  local: {len(hist)} iq take(s) on record — details: {APP} iq --show")
+    print(f"  \033[2mfull ledger: {APP} speeds · board: {APP} iq --board\033[0m\n")
+
+
+def _do_chat(msg: str, stream: bool = True, mode: str | None = None,
+             local: bool = False) -> None:
     """Talk to a bee (node) directly. Falls back to hub only if no direct connection works.
-    hivv OS §2: mode selects a routing strategy (balanced|quality|fast|cost|private|trusted)."""
+    hivv OS §2: mode selects a routing strategy (balanced|quality|fast|cost|private|trusted).
+    local=True → only THIS machine's LLM (hivv chat --local): no peers, no hub."""
     mode = mode or os.environ.get("HIVV_ROUTE_MODE") or None
     if mode:
         mode = _ROUTE_ALIASES.get(mode, mode)
@@ -6654,6 +8400,11 @@ def _do_chat(msg: str, stream: bool = True, mode: str | None = None) -> None:
     # Opt back in with HIVV_THINK=1 for reasoning models.
     _think_env = os.environ.get("HIVV_THINK", "").strip().lower()
     think_off = (_think_env not in ("1", "on", "yes")) or bool(NO_THINK)
+
+    # `hivv chat --local` — this machine ONLY: no node list, no perf fetch, no
+    # hub fallback (works with zero network; peers can never see the prompt).
+    if local:
+        return _chat_local_only(msg, stream=direct_stream, think_off=think_off)
 
     # who am I? (a node whose name/lan_ip matches this box is US — use localhost,
     # because local LLMs bind to 127.0.0.1 by default and refuse LAN-IP loopbacks)
@@ -6740,9 +8491,21 @@ def _do_chat(msg: str, stream: bool = True, mode: str | None = None) -> None:
                 if (name.lower() == me_name) or (me_ip and me_ip in node_keys):
                     ip = "127.0.0.1"  # our own bee → localhost (LLM binds local-only)
 
+                # Failed in the last 2 min → don't burn socket timeouts on it
+                # again this request (state TTL stays 600s; a successful chat
+                # pops the entry immediately). If EVERY bee is cooling down we
+                # fall through to the hub fast — instead of 60s of timeouts.
+                _lf = direct_fails.get(name.lower())
+                if _lf and (time.time() - _lf) < 120:
+                    continue
+
                 # Find a usable port
                 for m in models:
                     port = m.get("port", 8080)
+                    if not _tcp_ok(ip, port):
+                        direct_fails[name.lower()] = time.time()
+                        _save_fails()
+                        continue
                     max_tok = _ctx_size(ip, port)
                     try:
                         url = f"http://{ip}:{port}/v1/chat/completions"
@@ -6750,7 +8513,13 @@ def _do_chat(msg: str, stream: bool = True, mode: str | None = None) -> None:
                             "model": "local",
                             "messages": [{"role": "user", "content": msg}],
                             "stream": direct_stream,
-                            "max_tokens": max_tok
+                            # Bounded + anti-loop (the missing pair behind the
+                            # 'row row row…ogas ogas' runaway on Stuarts-iMac:
+                            # full-context max_tokens + no repeat penalty let a
+                            # degenerate stream loop until Ctrl-C).
+                            "max_tokens": min(int(max_tok),
+                                              int(os.environ.get("HIVV_LOCAL_MAX_TOKENS", "2048"))),
+                            "repeat_penalty": 1.1,
                         }
                         if think_off:
                             payload_dict["chat_template_kwargs"] = {"enable_thinking": False}
@@ -6766,6 +8535,7 @@ def _do_chat(msg: str, stream: bool = True, mode: str | None = None) -> None:
                                 _toks = 0
                                 _seen_model = None
                                 _t0 = time.time()
+                                accum = ""
                                 def _banner():
                                     nonlocal banner_shown
                                     if not banner_shown and not PLAIN_OUTPUT:
@@ -6784,14 +8554,39 @@ def _do_chat(msg: str, stream: bool = True, mode: str | None = None) -> None:
                                             got_content = True
                                             _toks += 1
                                             _seen_model = _seen_model or evt.get("model")
+                                            accum = (accum + content)[:8000]
                                             print(content, end="", flush=True)
                                     except (json.JSONDecodeError, IndexError, KeyError):
                                         pass
                                 if got_content:
                                     print()
+                                    _el = max(0.3, time.time() - _t0)
+                                    _eh = _stream_error_hint(accum)
+                                    if _eh:
+                                        # a backend error streamed AS content —
+                                        # label it HTTP/config, never "garbage model"
+                                        direct_fails[name.lower()] = time.time()
+                                        _save_fails()
+                                        print(f"\033[33m⚠ backend error (not model garbage): "
+                                              f"{accum.strip()[:110]}\033[0m", file=sys.stderr)
+                                        print(f"  {_eh}", file=sys.stderr)
+                                        return
+                                    if _looks_degenerate(accum):
+                                        # A garbage answer must NOT earn a HEALTHY
+                                        # speed record — a fast degenerate bee would
+                                        # otherwise win the routing lottery. Treat it
+                                        # as a direct FAILURE (120s cooldown + tps
+                                        # demote via direct_fails) and skip perf.
+                                        direct_fails[name.lower()] = time.time()
+                                        _save_fails()
+                                        print(f"\033[33m⚠ {name} replied with a repetition loop"
+                                              f" — scored as failed, cooling it down\033[0m")
+                                        if ip == "127.0.0.1":
+                                            for _hl in _model_swap_hint().splitlines():
+                                                print(f"  {_hl}")
+                                        return
                                     direct_fails.pop(name.lower(), None)
                                     _save_fails()
-                                    _el = max(0.3, time.time() - _t0)
                                     if _toks >= 8:  # tiny replies measure TTFT, not throughput — skip
                                         _mm = str(_seen_model or "local").split("/")[-1].replace(".gguf", "")[:60]
                                         _report_perf(node.get("id"), name, _mm, _toks / _el, _el * 1000)
@@ -6806,6 +8601,15 @@ def _do_chat(msg: str, stream: bool = True, mode: str | None = None) -> None:
                                     if not PLAIN_OUTPUT:
                                         print(f"\033[2m(direct → {name}:{port})\033[0m")
                                     print(content)
+                                    if _looks_degenerate(content):
+                                        direct_fails[name.lower()] = time.time()
+                                        _save_fails()
+                                        print(f"\033[33m⚠ {name} replied with a repetition loop"
+                                              f" — scored as failed, cooling it down\033[0m")
+                                        if ip == "127.0.0.1":
+                                            for _hl in _model_swap_hint().splitlines():
+                                                print(f"  {_hl}")
+                                        return
                                     direct_fails.pop(name.lower(), None)
                                     _save_fails()
                                     if len(content) >= 32:  # meaningful sample only
@@ -6814,6 +8618,17 @@ def _do_chat(msg: str, stream: bool = True, mode: str | None = None) -> None:
                                         _report_perf(node.get("id"), name, _mm, _tps, (time.time() - _t0_ns) * 1000)
                                     return
                                 # empty answer (reasoning-only model etc.) → try next bee
+                    except urllib.error.HTTPError as e:
+                        _b = ""
+                        try:
+                            _b = e.read().decode("utf-8", "replace")[:160]
+                        except Exception:
+                            pass
+                        print(f"  ✗ {ip}:{port} → HTTP {e.code}: {_b} "
+                              f"{_http_err_hint(e.code)}", file=sys.stderr)
+                        direct_fails[name.lower()] = time.time()
+                        _save_fails()
+                        continue
                     except Exception:
                         direct_fails[name.lower()] = time.time()
                         _save_fails()
@@ -7201,7 +9016,13 @@ def cmd_doctor(args) -> None:
             recent = lines[-30:] if len(lines) > 30 else lines
             starts = [l for l in recent if "agent started" in l or "agent starting" in l]
             stops = [l for l in recent if "agent stopping" in l]
-            if len(starts) >= 3 and len(stops) >= 2:
+            updates = [l for l in recent
+                       if "applied (source=" in l or "auto-update: applied" in l]
+            if updates and len(starts) >= 3:
+                # legit auto-update churn (several updates in one window) is
+                # NOT a crash loop — don't send people hunting (2026-11-18)
+                print(f"  crash:   {_warn(f'{len(starts)} restarts — match {len(updates)} recent auto-update(s) (normal)')}")
+            elif len(starts) >= 3 and len(stops) >= 2:
                 print(f"  crash:   {_fail('CRASH LOOP — agent restarting repeatedly')}")
                 print(f"           {len(starts)} starts, {len(stops)} stops in recent log")
             elif len(starts) >= 2 and len(stops) >= 1:
@@ -7327,10 +9148,11 @@ def cmd_doctor(args) -> None:
         req = urllib.request.Request(f"{HUB.rstrip('/')}/{APP}-cli.py", headers={"user-agent": f"{APP}/{VERSION}"})
         with urllib.request.urlopen(req, timeout=10) as r:
             data = r.read().decode("utf-8", errors="replace")
-        # crude version sniff — pull the first `VERSION   = "x.y.z"` line
-        import re as _re
-        match = _re.search(r'VERSION\s*=\s*"([^"]+)"', data)
-        hub_ver = match.group(1) if match else "unknown"
+        # content-derived version — the SAME scheme the gateway serves
+        # (sha256[:8]). The old regex matched `CLI_VERSION = "0.2.0"` FIRST,
+        # so hub looked permanently older → bogus "↓ local is newer" everywhere
+        # (Stuarts-iMac, 2026-11-18).
+        hub_ver = "0.2." + hashlib.sha256(data.encode("utf-8")).hexdigest()[:8]
         if hub_ver == VERSION:
             print(f"  {_ok(f'up to date (client {VERSION} = hub {hub_ver})')}")
         else:
@@ -7872,6 +9694,67 @@ def cmd_up(args) -> None:
     _celebrate_rank_up()
 
 
+def _argparse_command_index() -> dict:
+    """Walk the REAL parser — every command, its flags, positionals, help.
+    Introspection instead of a hand-written list → the index CANNOT drift
+    from the code (the AI-facing map stays true by construction)."""
+    p = build_parser()
+    top_flags, cmds = [], []
+    for act in p._actions:
+        if not isinstance(act, argparse._SubParsersAction):
+            if act.option_strings and "--help" not in act.option_strings:
+                top_flags.append({"flag": "/".join(act.option_strings),
+                                  "help": (act.help or "").strip()})
+            continue
+        helps = {}
+        for ca in getattr(act, "_choices_actions", []):
+            nm = getattr(ca, "dest", None) or getattr(ca, "name", "") or ""
+            helps[nm] = (getattr(ca, "help", "") or "").strip()
+        for name, sub in act.choices.items():
+            if name.startswith("-"):
+                continue
+            flags, pos, subs = [], [], []
+            for a2 in sub._actions:
+                if isinstance(a2, argparse._SubParsersAction):
+                    subs = sorted(k for k in a2.choices if not k.startswith("-"))
+                    continue
+                if a2.option_strings:
+                    if set(a2.option_strings) <= {"-h", "-help", "--help"}:
+                        continue
+                    flags.append({"flag": "/".join(a2.option_strings),
+                                  "help": (a2.help or "").strip()})
+                elif a2.dest != "help":
+                    pos.append({"name": a2.dest, "required": bool(a2.required),
+                                "help": (a2.help or "").strip()})
+            cmds.append({"command": name, "help": helps.get(name, ""),
+                         "subcommands": subs, "flags": flags, "args": pos})
+    cmds.sort(key=lambda c: c["command"])
+    return {"app": APP, "version": VERSION, "top_flags": top_flags,
+            "count": len(cmds), "commands": cmds}
+
+
+def cmd_commands(args) -> None:
+    """Self-describing index of EVERY hivv command — introspected from the
+    live parser. `hivv commands --json` is the ONE call an agent should make
+    first: full command/flag map, no parsing, no drift."""
+    idx = _argparse_command_index()
+    if getattr(args, "json_output", False):
+        print(json.dumps(idx, indent=2))
+        return
+    tf = " ".join(f["flag"] for f in idx["top_flags"] if f.get("flag"))
+    print(f"\n\033[1m{APP} commands\033[0m — {idx['count']} commands, "
+          f"self-described from the live parser\n")
+    if tf:
+        print(f"  top flags: {tf}")
+    print()
+    for c in idx["commands"]:
+        print(f"  {c['command']:<20} {c['help']}")
+        if c["subcommands"]:
+            print(f"      sub: {' · '.join(c['subcommands'])}")
+    print(f"\n  \033[2mmachine form: {APP} commands --json   · HTTP spec: {HUB}/openapi.yaml"
+          f"   · agent tools (no parsing): {HUB}/mcp\033[0m\n")
+
+
 def cmd_speed(args) -> None:
     """Latency benchmark: DNS, TLS, hub ping, chat round-trip."""
     print(f"\033[1m{APP} speed\033[0m — latency benchmark")
@@ -7930,6 +9813,7 @@ def cmd_speed(args) -> None:
             ttfb = int((time.time() - t0) * 1000)
             buf = b""
             total_bytes = 0
+            got_content = False
             while True:
                 chunk = r.read(1)
                 if not chunk: break
@@ -7943,6 +9827,7 @@ def cmd_speed(args) -> None:
                             evt = json.loads(line[5:].strip())
                             choices = evt.get("choices") or []
                             if choices and (choices[0].get("delta") or {}).get("content"):
+                                got_content = True
                                 total_ms = int((time.time() - t0) * 1000)
                                 print(f"        time-to-first-byte: {ttfb}ms   total: {total_ms}ms   bytes: {total_bytes}")
                                 # drain the rest so we close cleanly
@@ -7955,7 +9840,7 @@ def cmd_speed(args) -> None:
     else:
         if total_bytes == 0:
             print(f"        (stream ended with no bytes)")
-        else:
+        elif not got_content:
             print(f"        (stream ended without a content chunk — {total_bytes} bytes)")
 
     # 5. CPU/RAM/disk (delegate to llm bench)
@@ -7966,12 +9851,232 @@ def cmd_speed(args) -> None:
     except Exception as e:
         print(f"        \033[31mFAIL\033[0m ({e})")
 
+def cmd_speeds(args) -> None:
+    """The request speed ledger — every reply ever served, with full-reply
+    duration, time-to-first-token and tokens/s, per user and per answering bee.
+
+    Source: hivv_request_provenance (operator view — localhost or
+    HIVV_CONTROL_TOKEN), the same rows /api/provenance/stats aggregates.
+    `hivv speed` measures ONE request live; this reads them ALL."""
+    days = max(1, min(365, int(getattr(args, "days", 1) or 1)))
+    limit = max(1, min(1000, int(getattr(args, "limit", 300) or 300)))
+    since = datetime.fromtimestamp(time.time() - days * 86400).astimezone().isoformat(timespec="seconds")
+    code, p = http("GET", f"/api/provenance/requests?limit={limit}&since={urllib.parse.quote(since)}",
+                   timeout=20)
+    if code in (401, 403):
+        die("operator view needs the hub host or a control token —\n"
+            "    export HIVV_CONTROL_TOKEN=<hub token> and retry")
+    if code != 200 or not isinstance(p, dict):
+        die(f"failed to read the speed ledger: {p}")
+    rows = [r for r in ((p.get("data") or {}).get("rows") or []) if isinstance(r, dict)]
+
+    def _f(v):
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return None
+
+    durs = sorted(d for d in (r.get("duration_ms") for r in rows) if d is not None)
+    # non-stream rows record ttfb == duration BY DEFINITION — excluding them
+    # keeps the first-token average an honest streaming measurement.
+    ttfbs = sorted(r.get("ttfb_ms") for r in rows
+                   if r.get("ttfb_ms") is not None and r.get("duration_ms") is not None
+                   and r.get("ttfb_ms") != r.get("duration_ms"))
+    tps_l = sorted(t for t in (r.get("tokens_per_sec") for r in rows) if t)
+
+    def _pct(vals, q):
+        return vals[min(len(vals) - 1, int(q * len(vals)))] if vals else None
+
+    def _ms(v):
+        if v is None:
+            return "—"
+        v = float(v)
+        return f"{v / 1000:.1f}s" if v >= 1000 else f"{v:.0f}ms"
+
+    def _avg(vals, nd=0):
+        return round(sum(vals) / len(vals), nd) if vals else None
+
+    summary = {
+        "window_days": days,
+        "requests": len(rows),
+        "avg_duration_ms": _avg(durs),
+        "p50_duration_ms": _pct(durs, 0.5),
+        "p95_duration_ms": _pct(durs, 0.95),
+        "avg_ttfb_ms": _avg(ttfbs),
+        "p95_ttfb_ms": _pct(ttfbs, 0.95),
+        "avg_tokens_per_sec": _avg(tps_l, 1),
+        "streams_measured": len(ttfbs),
+    }
+
+    # Per-user and per-bee rollups + transport mix
+    by_who: dict = {}
+    by_node: dict = {}
+    transports: dict = {}
+    for r in rows:
+        who = str(r.get("principal") or r.get("anonymous_visitor_id")
+                  or (f"user:{r.get('user_id')}" if r.get("user_id") else "?"))
+        node = str(r.get("answered_by_node") or r.get("transport") or "?")
+        tr = str(r.get("transport") or "?")
+        transports[tr] = transports.get(tr, 0) + 1
+        for bucket, key in ((by_who, who), (by_node, node)):
+            g = bucket.setdefault(key, {"n": 0, "d": [], "t": []})
+            g["n"] += 1
+            if r.get("duration_ms") is not None:
+                g["d"].append(r["duration_ms"])
+            t = _f(r.get("tokens_per_sec"))
+            if t:
+                g["t"].append(t)
+
+    def _rollup(bucket, top=6):
+        out = []
+        for key, g in sorted(bucket.items(), key=lambda kv: -kv[1]["n"])[:top]:
+            out.append({"key": key, "requests": g["n"],
+                        "avg_duration_ms": _avg(g["d"]),
+                        "avg_tokens_per_sec": _avg(g["t"], 1)})
+        return out
+
+    summary["by_user"] = _rollup(by_who)
+    summary["by_node"] = _rollup(by_node)
+    summary["by_transport"] = transports
+
+    if getattr(args, "json_output", False):
+        print(json.dumps({"summary": summary, "rows": rows}, indent=2))
+        return
+
+    print(f"\n\033[1m{APP} speeds\033[0m — request speed log (last {days}d, {len(rows)} request(s))\n")
+    if not rows:
+        print("  no requests recorded in this window")
+        print(f"  chat something first, then re-run: {APP} speeds")
+        return
+    print(f"  full reply   avg {_ms(summary['avg_duration_ms'])} · p50 {_ms(summary['p50_duration_ms'])}"
+          f" · p95 {_ms(summary['p95_duration_ms'])}")
+    if summary["avg_ttfb_ms"] is not None:
+        print(f"  first token  avg {_ms(summary['avg_ttfb_ms'])} · p95 {_ms(summary['p95_ttfb_ms'])}"
+              f"   ({summary['streams_measured']} streaming request(s))")
+    if summary["avg_tokens_per_sec"] is not None:
+        print(f"  throughput   avg {summary['avg_tokens_per_sec']} tok/s")
+    mix = " · ".join(f"{n} {k}" for k, n in sorted(transports.items(), key=lambda kv: -kv[1]))
+    print(f"  transport    {mix}")
+
+    def _group_table(title, items):
+        print(f"\n  {title}")
+        print(f"  {'':24} {'N':>4}  {'AVG REPLY':>9}  {'AVG TOK/S':>9}")
+        for g in items:
+            tps = "—" if g["avg_tokens_per_sec"] is None else str(g["avg_tokens_per_sec"])
+            print(f"  {g['key'][:24]:<24} {g['requests']:>4}  {_ms(g['avg_duration_ms']):>9}  {tps:>9}")
+
+    _group_table("per user", summary["by_user"])
+    _group_table("per answering bee", summary["by_node"])
+
+    print(f"\n  {'TIME':<9} {'WHO':<18} {'MODEL':<22} {'NODE':<14} {'TTFB':>7} {'REPLY':>8} {'TOK/S':>6}")
+    for r in rows[:12]:
+        created = str(r.get("created_at") or "")[11:19] or "?"
+        who = str(r.get("principal") or r.get("anonymous_visitor_id") or "?")[:18]
+        mdl = str(r.get("model") or "?").split("/")[-1].replace(".gguf", "")[:22]
+        node = str(r.get("answered_by_node") or "—")[:14]
+        ttfb = r.get("ttfb_ms")
+        if ttfb is not None and r.get("duration_ms") == ttfb:
+            ttfb_s = "n/a"     # non-stream: first byte IS the whole reply
+        else:
+            ttfb_s = _ms(ttfb)
+        t = _f(r.get("tokens_per_sec"))
+        tps = "—" if not t else f"{t:.0f}"
+        print(f"  {created:<9} {who:<18} {mdl:<22} {node:<14} {ttfb_s:>7} {_ms(r.get('duration_ms')):>8} {tps:>6}")
+    print(f"\n  \033[2mledger: GET /api/provenance/requests · aggregates: /api/provenance/stats\033[0m\n")
+
+def _test_llm_core(_chk) -> None:
+    """`hivv test` section: the local LLM battery — listening, config, model
+    file, REAL chat round-trip (catches 400s/garbage a green 'serving' hides),
+    disk, agent liveness. Reuses the same run as `hivv selftest`."""
+    rep = _selftest_run()          # also persists to state → heartbeat carries it
+    for c in rep.get("checks") or []:
+        _chk(f"llm/{c['id']}: {c['detail']}", bool(c["ok"]))
+
+
+def _test_ai_contract(_chk) -> None:
+    """`hivv test` section: the AI-consumption contract — every public JSON
+    surface must PARSE (pure stdout) and the hive endpoints must answer.
+    This is what lets agents skip us humans entirely."""
+    import argparse as _ap
+    import contextlib as _cl
+    import io as _io
+
+    def _pure_json(fn, *a, **kw) -> bool:
+        buf = _io.StringIO()
+        with _cl.redirect_stdout(buf):
+            fn(*a, **kw)
+        json.loads(buf.getvalue())
+        return True
+
+    probes = [
+        ("commands --json", lambda: _pure_json(
+            cmd_commands, _ap.Namespace(json_output=True))),
+        ("security --json", lambda: _pure_json(
+            cmd_security, _ap.Namespace(json_output=True, no_report=True))),
+        ("llm config --json", lambda: _pure_json(
+            cmd_llm_config, _ap.Namespace(json_output=True, set=[], unset=[]))),
+    ]
+    for name, fn in probes:
+        try:
+            fn()
+            _chk(f"json/{name} parses on stdout", True)
+        except SystemExit:
+            _chk(f"json/{name} parses on stdout", False)
+        except Exception as e:
+            _chk(f"json/{name} parses on stdout ({str(e)[:60]})", False)
+
+    # hive endpoints through the REAL entrance (works off-LAN via the hub)
+    for path, key in (("/api/hive/iq", "brains"), ("/api/version", "version")):
+        try:
+            code, body = http("GET", path, timeout=8, sign=False)
+            ok = code == 200 and isinstance(body, dict) and key in body
+            _chk(f"hub {path} answers ({code})", ok)
+        except Exception as e:
+            _chk(f"hub {path} answers ({str(e)[:50]})", False)
+
+    # operator-surface (history/speeds): auth may be absent off-hub → advisory
+    try:
+        buf = _io.StringIO()
+        with _cl.redirect_stdout(buf):
+            cmd_history(_ap.Namespace(json_output=True, limit=5))
+        json.loads(buf.getvalue())
+        _chk("history --json parses (operator)", True)
+    except SystemExit:
+        print(f"  \033[2m· history --json: operator auth not here "
+              f"(export HIVV_CONTROL_TOKEN on admin boxes)\033[0m")
+    except Exception:
+        _chk("history --json parses (operator)", False)
+
+
 def cmd_test(args) -> None:
-    """End-to-end smoke test: doctor + speed + network + chat with all nodes."""
+    """End-to-end smoke test: doctor + speed + LLM core (real round-trip) +
+    AI/JSON contract + network + chat with all nodes.
+
+    Exit code = THIS box's core health (llm + json contract + hub endpoints);
+    per-node reach stays advisory (a bee off your LAN is not your failure)."""
     print(f"\033[1m{APP} test\033[0m — full end-to-end smoke test\n")
+    fails: list = []
+
+    def _chk(label: str, ok: bool) -> None:
+        if ok:
+            print(f"  \033[32m✓\033[0m {label}")
+        else:
+            fails.append(label)
+            print(f"  \033[31m✗\033[0m {label}")
+
     cmd_doctor(args)
     print()
     cmd_speed(args)
+    print()
+
+    # Local LLM battery — config/slots/REAL round-trip/disk/agent
+    print(f"\033[1m{APP} test — llm core\033[0m\n")
+    _test_llm_core(_chk)
+    print()
+
+    # AI contract: pure-JSON outputs + hub endpoints (agents need these)
+    print(f"\033[1m{APP} test — AI contract\033[0m\n")
+    _test_ai_contract(_chk)
     print()
 
     # Network-wide test
@@ -7988,6 +10093,30 @@ def cmd_test(args) -> None:
         if not nodes:
             print(f"  no nodes registered — start agents with: {APP} start")
         else:
+            # Off-LAN? All private-IP peers unreachable → we're on a different
+            # network (NOT a firewall issue). Direct probes can never work from
+            # here: skip them honestly and test the AI through the HUB path —
+            # exactly how remote users get their chat (you → hub → bee LAN-side).
+            _priv = [n for n in nodes
+                     if n.get("lan_ip") and re.match(
+                         r"^(192\.168\.|10\.|172\.(1[6-9]|2[0-9]|3[01])\.)", n["lan_ip"])]
+            off_lan = False
+            if _priv:
+                _pi = _priv[0].get("lan_ip")
+                _pp = 8080
+                for m in (_priv[0].get("local_models") or []):
+                    _pp = m.get("port", 8080)
+                    break
+                _pr = _r(f"curl -s --connect-timeout 2 --max-time 3 http://{_pi}:{_pp}/v1/models 2>/dev/null")
+                if not (_pr.stdout and "model" in _pr.stdout.lower()):
+                    off_lan = True
+            if off_lan:
+                print(f"  \033[2m· scanned from OFF-LAN — private-IP peers are unreachable from here by")
+                print(f"     design (not a firewall problem). Direct probes are skipped; the AI is")
+                print(f"     tested through the HUB path — how every remote user gets chat.")
+                print(f"     Same-LAN direct reach for everyone: one tailnet, then")
+                print(f"     `{APP} firewall --apply --mode tailscale` on every bee + this box.\033[0m\n")
+
             # Test each node
             for n in nodes:
                 name = n.get("name", n.get("id", "?"))
@@ -8003,6 +10132,8 @@ def cmd_test(args) -> None:
                 ports_ok = 0
                 ports_total = 0
                 for m in models:
+                    if off_lan:
+                        break
                     port = m.get("port", 8080)
                     ports_total += 1
                     try:
@@ -8012,7 +10143,9 @@ def cmd_test(args) -> None:
                     except:
                         pass
 
-                if ports_total == 0:
+                if off_lan:
+                    print(f"  {name}: \033[2m⊘ direct probe skipped (off-LAN — private {ip})\033[0m")
+                elif ports_total == 0:
                     print(f"  {name}: \033[33mno models\033[0m")
                 elif ports_ok == ports_total:
                     print(f"  {name}: \033[32m✓ {ports_ok}/{ports_total} ports reachable\033[0m ({ip})")
@@ -8021,7 +10154,22 @@ def cmd_test(args) -> None:
 
             # Test chat with each online node
             print(f"\n\033[1mchat test\033[0m")
+            if off_lan:
+                print(f"  \033[2m(via hub — the remote-user path)\033[0m")
+                try:
+                    _c2, _b2 = http("POST", "/api/chat",
+                                    body={"message": "say hi in two words"}, timeout=30)
+                    _t2 = _b2 if isinstance(_b2, str) else json.dumps(_b2)
+                    _ok2 = _c2 == 200 and ('"choices"' in _t2 or '"content"' in _t2)
+                    print(f"  hub-mediated chat: " +
+                          ("\033[32m✓ answered — remote users get AI this way\033[0m" if _ok2
+                           else f"\033[31m✗ HTTP {_c2}\033[0m"))
+                except Exception as _e2:
+                    print(f"  hub-mediated chat: \033[31m✗ {str(_e2)[:70]}\033[0m")
+                print(f"  \033[2m· per-node direct chat skipped (off-LAN)\033[0m")
             for n in nodes:
+                if off_lan:
+                    continue
                 if n.get("status") != "online":
                     continue
                 name = n.get("name", n.get("id", "?"))
@@ -8050,14 +10198,26 @@ def cmd_test(args) -> None:
                 else:
                     print(f"  {name}: \033[31m✗ chat failed\033[0m")
 
-    print(f"\n\033[1m{APP} test\033[0m — \033[32mcomplete\033[0m")
+    print()
+    if fails:
+        print(f"\n  \033[31m{len(fails)} core check(s) FAILED:\033[0m")
+        for f_ in fails:
+            print(f"    ✗ {f_}")
+        print(f"\n\033[1m{APP} test\033[0m — \033[31mFAILED here\033[0m "
+              f"\033[2m(network lines above stay advisory)\033[0m")
+        sys.exit(1)
+    print(f"\n\033[1m{APP} test\033[0m — \033[32mcomplete — all core checks green\033[0m")
 
 
 # ── friendly / fun commands ────────────────────────────────────────────
 _VOLUNTEER_FILE = CONFIG_DIR / "contribute.json"
 
 def _volunteer_default() -> dict:
-    return {"share_cpu": False, "max_cpu_pct": 25, "pause_on_battery": True,
+    # DEFAULT ON (operator decision, 2026-11-18): the cross-NAT relay path is
+    # dead out of the box while every bee defaults to OFF. Consent stays real:
+    # `hivv volunteer off` writes an explicit False that this loader honors,
+    # and status shows "(default)" until someone runs `volunteer on`.
+    return {"share_cpu": True, "max_cpu_pct": 25, "pause_on_battery": True,
             "sandbox": "subprocess", "opted_in_at": None, "tags": []}
 
 def _volunteer_load() -> dict:
@@ -8126,10 +10286,10 @@ def cmd_volunteer(args) -> None:
     print(f"\033[1m{APP} volunteer\033[0m — status")
     if cfg.get("share_cpu"):
         since = cfg.get("opted_in_at")
-        since_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(since)) if since else "?"
+        since_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(since)) if since else "default (not yet explicit)"
         print(f"  state:    \033[1;32m✓ volunteering\033[0m  (since {since_str})")
     else:
-        print(f"  state:    \033[2mnot volunteering\033[0m")
+        print(f"  state:    \033[2mnot volunteering\033[0m  (explicitly off)")
     print(f"  config:   {_VOLUNTEER_FILE}")
     for k, v in cfg.items():
         if k == "opted_in_at":
@@ -8137,6 +10297,8 @@ def cmd_volunteer(args) -> None:
         print(f"    {k:18s} {v}")
     if not cfg.get("share_cpu"):
         print(f"\n  to join:   \033[1m{APP} volunteer on\033[0m")
+    else:
+        print(f"\n  to leave:  \033[1m{APP} volunteer off\033[0m  (relay jobs are ON by default)")
 
 
 def cmd_share(args) -> None:
@@ -8642,7 +10804,17 @@ def cmd_top(args) -> None:
     print(f"  run again for updates: {APP} top\n")
 
 def cmd_benchmark(args) -> None:
-    """Benchmark all nodes — find the fastest one."""
+    """Benchmark all nodes — find the fastest one.
+
+    Live probes need the same LAN/VPN as the bees; from anywhere else they
+    can't connect at all. So: 0.6s TCP preflight per port (no 10s hangs), and
+    every node the live probe can't reach falls back to the HUB-MEASURED perf
+    (EWMA tok/s + latency from real traffic) — the hub lives with the bees,
+    so those numbers work from ANYWHERE."""
+    _j = bool(getattr(args, "json_output", False))
+    _out = sys.stdout
+    if _j:
+        sys.stdout = sys.stderr   # probe lines → stderr; stdout = PURE JSON
     import time as _t
     print(f"\n\033[1m{APP} benchmark\033[0m — testing all nodes\n")
 
@@ -8657,17 +10829,49 @@ def cmd_benchmark(args) -> None:
     if not online:
         die("no online nodes found")
 
+    # Hub-measured speeds (direct-via traffic only) — the remote-safe view.
+    hub_perf: dict = {}
+    try:
+        pc, pp = http("GET", "/api/hive/perf", timeout=5, sign=False)
+        if pc == 200 and isinstance(pp, dict):
+            for sm in (pp.get("samples") or []):
+                if (sm.get("via") or "direct") != "direct":
+                    continue
+                try:
+                    tps = float(sm.get("ewma_tps") or 0)
+                    lat = float(sm.get("ewma_latency_ms") or 0)
+                except (TypeError, ValueError):
+                    continue
+                if tps <= 0:
+                    continue
+                entry = {"tps": tps, "lat": lat, "model": str(sm.get("model") or "")[:36]}
+                for k in (sm.get("node"), sm.get("node_id")):
+                    if k:
+                        cur = hub_perf.get(str(k))
+                        if not cur or entry["tps"] > cur["tps"]:
+                            hub_perf[str(k)] = entry
+    except Exception:
+        pass
+
     results = []
+    unreachable = []
     for n in online:
         name = n.get("name", "?")
         ip = n.get("lan_ip") or n.get("ip", "")
-        models = n.get("local_models", [])
-        if not models or not ip:
+        if not ip:
+            continue
+        # Reported ports first; a fresh node (heartbeat not caught up) gets
+        # its common LLM ports probed — same fallback as node-chat.
+        ports = _node_llm_ports(n)
+        if not ports:
             continue
 
-        # Find a port
-        for m in models:
-            port = m.get("port", 8080)
+        live = False
+        for port in ports:
+            # 0.6s preflight: off-LAN / firewalled ports must NOT eat the old
+            # 10s urlopen timeout each (remote benchmark used to hang ~60s).
+            if not _tcp_ok(ip, port, timeout=0.6):
+                continue
             url = f"http://{ip}:{port}/v1/chat/completions"
             try:
                 import urllib.request
@@ -8681,19 +10885,41 @@ def cmd_benchmark(args) -> None:
                     try:
                         j = json.loads(data)
                         tokens = len(j.get("choices", [{}])[0].get("message", {}).get("content", "").split())
-                    except:
+                    except Exception:
                         tokens = 1
                     tps = tokens / (elapsed / 1000) if elapsed > 0 else 0
                     results.append({"name": name, "port": port, "latency": elapsed, "tps": tps, "tokens": tokens})
                     print(f"  {name}:{port} — {elapsed:.0f}ms latency, {tps:.1f} tok/s")
+                    live = True
                     break
             except Exception as e:
                 print(f"  {name}:{port} — failed: {e}")
+        if not live:
+            unreachable.append(n)
+
+    # Remote-safe fallback: whatever the live probe couldn't reach, show the
+    # hub's own measurements instead of just failing.
+    for n in unreachable:
+        name = n.get("name", "?")
+        hp = hub_perf.get(name) or hub_perf.get(n.get("id") or "")
+        if hp:
+            print(f"  {name} — hub-measured: {hp['tps']:.1f} tok/s, {hp['lat']:.0f}ms"
+                  f"  \033[2m(live probe needs same LAN/VPN)\033[0m")
+        else:
+            print(f"  {name} — unreachable from here, no hub measurements yet"
+                  f"  \033[2m(chat through the hub once — then its speed shows up)\033[0m")
 
     if results:
         # Find fastest
         fastest = min(results, key=lambda r: r["latency"])
         print(f"\n  \033[32m✓ fastest: {fastest['name']}:{fastest['port']} ({fastest['latency']:.0f}ms, {fastest['tps']:.1f} tok/s)\033[0m")
+    elif unreachable:
+        print(f"\n  \033[2mno direct probe succeeded from here — numbers above are hub-measured\033[0m")
+    if _j:
+        print(json.dumps({"results": results,
+                          "unreachable": [n.get("name") for n in unreachable],
+                          "hub_perf": hub_perf}, indent=2, default=str), file=_out)
+        sys.stdout = _out
 
 def cmd_hi(args) -> None:
     """Friendly greeter — quick chat round-trip."""
@@ -8879,6 +11105,32 @@ def _llm_detect():
     return found
 
 
+def _darwin_gpu_specs() -> tuple:
+    """(asked, gpu|None) — the ONE macOS GPU detector shared by bench/suggest.
+
+    asked=False → profiler unavailable (keep platform defaults); asked=True
+    with gpu=None → genuinely no GPU. Why: nvidia-smi never sees an iMac Pro's
+    Radeon Vega 64X, so bench/suggest said 'none (CPU-only)' while the
+    launcher was happily forcing -ngl 99 — two subsystems disagreeing about
+    whether a GPU exists (Stuarts-iMac, 2026-11-18)."""
+    if sys.platform != "darwin":
+        return False, None
+    try:
+        r = subprocess.run(["system_profiler", "SPDisplaysDataType", "-json"],
+                           capture_output=True, text=True, timeout=6)
+        if r.returncode != 0 or not (r.stdout or "").strip():
+            return False, None
+        gpus = _parse_display_gpus(json.loads(r.stdout))
+        if not gpus:
+            return True, None
+        g0 = gpus[0]
+        return True, {"vendor": "darwin",
+                      "name": g0.get("name") or "GPU",
+                      "vram_gb": max(1, int(g0.get("mem_total_mb") or 0) // 1024)}
+    except Exception:
+        return False, None
+
+
 def _llm_sys_specs():
     """Inspect host: OS, CPU, RAM, GPU."""
     import platform as _p
@@ -8928,6 +11180,15 @@ def _llm_sys_specs():
                                 "vram_gb": round(int(parts[1].strip()) / 1024, 1)}
         except Exception:
             pass
+
+    # macOS GPU (AMD Radeon / Apple) — nvidia-smi can never see these
+    if specs["gpu"] is None and specs["system"] == "Darwin":
+        _asked, _g = _darwin_gpu_specs()
+        if _g:
+            specs["gpu"] = _g
+    if specs["system"] == "Darwin":
+        if "apple" in ((specs.get("gpu") or {}).get("name") or "").lower():
+            specs["apple_silicon"] = True
 
     # Apple Silicon
     if specs["system"] == "Darwin" and specs["machine"] in ("arm64", "arm64e"):
@@ -8990,10 +11251,16 @@ _FALLBACK_TIER = next(t for t in _LLM_TIERS if t["tier"] == "no-gpu-tiny")
 # Format: "name": {"repo": "org/model", "filename": "file-Q4_K_M.gguf", "size_gb": float}
 _GGUF_MODELS = {
     "gemma4:e2b": {
-        "desc":  "~2.5 GB, Google Gemma 3 4B — fast CPU-friendly inference",
+        "desc":  "~2.5 GB, google gemma-3-4b-it (NOTE: the key says gemma4 but the model is GEMMA-3 4B — coherent, verified on the hub 2026-11-18)",
         "repo":  "bartowski/google_gemma-3-4b-it-GGUF",
         "file":  "google_gemma-3-4b-it-Q4_K_M.gguf",
         "size_gb": 2.5,
+    },
+    "gemma-4:e2b": {
+        "desc":  "~2.9 GB, gemma-4 E2B — THE model ashy & masjid actually run (proven in-hive)",
+        "repo":  "unsloth/gemma-4-E2B-it-GGUF",
+        "file":  "gemma-4-E2B-it-Q4_K_M.gguf",
+        "size_gb": 2.89,
     },
     "gemma-1b": {
         "desc":  "~0.9 GB, Google Gemma 3 1B — tiny, phone-class boxes",
@@ -9125,7 +11392,7 @@ def _llm_pick_model(specs):
             lo = t.get("vram_lo", 0); hi = t.get("vram_hi", 9999)
             if lo <= vram < hi:
                 return (t["tier"], t["models"],
-                        f"NVIDIA GPU with {vram} GB VRAM detected")
+                        f"GPU with {vram} GB VRAM detected ({(specs.get('gpu') or {}).get('name', 'gpu')})")
             continue
         # CPU-only tiers — explicitly skip when the box has a GPU
         # (so NVIDIA boxes can't accidentally fall into a CPU tier).
@@ -9145,6 +11412,306 @@ def _llm_pick_model(specs):
             "could not classify hardware — defaulting to smallest tier")
 
 
+# ── hivv llm doctor — figure out what's wrong with the local LLM ─────────────
+_LLAMA_LOG_PATTERNS: list = [
+    ("address already in use", "port-conflict",
+     "port conflict — something already holds the port",
+     "{APP} restart llm (kills our stale server) — or move: hivv llm setup --port 8090"),
+    ("invalid magic", "corrupt-model",
+     "model file is NOT a valid GGUF (corrupt/truncated)",
+     "{APP} llm pull-gguf <model>  (resumes + verifies), then {APP} llm setup"),
+    ("failed to load model", "load-failed",
+     "llama-server could not load the model",
+     "check disk space, then re-pull: {APP} llm pull-gguf <model>"),
+    ("no space left", "disk-full",
+     "DISK FULL — llama cannot map/page the model",
+     "free disk now (df -h) — a full disk also crashes inference mid-run"),
+    ("bad_alloc", "oom",
+     "out of memory while loading/generating",
+     "close memory hogs or use a smaller quant: {APP} llm suggest"),
+    ("cannot mmap", "mmap-failed",
+     "cannot memory-map the model (disk/permission)",
+     "re-pull the model; check the path is readable"),
+    ("unknown model architecture", "wrong-arch",
+     "GGUF arch newer/incompatible with this llama.cpp",
+     "{APP} llm install-llama --auto (rebuild), or pull a matching GGUF"),
+]
+
+
+def _llm_diagnose(log_text: str) -> list:
+    """Known llama failure signatures in the log → findings (pure — tests)."""
+    low = (log_text or "").lower()
+    return [{"id": fid, "title": title, "fix": fix}
+            for needle, fid, title, fix in _LLAMA_LOG_PATTERNS
+            if needle in low]
+
+
+def cmd_llm_doctor(args) -> None:
+    """Diagnose the local LLM: binary → model → serving → stale pid → log
+    autopsy → disk. --fix corrects what is SAFE to correct (relaunch a dead
+    server, clear stale pids); downloads/repairs are reported, never guessed."""
+    fix = bool(getattr(args, "fix", False))
+    print(f"\033[1m{APP} llm doctor\033[0m — local LLM diagnosis"
+          f"{' (auto-fix)' if fix else ''}\n")
+    cfg = _llm_config()
+    problems: list = []
+    notes: list = []
+
+    # 1. binary
+    srv = os.path.join(_LLAMA_CPP_BIN, "llama-server")
+    if os.access(srv, os.X_OK):
+        print(f"  ✓ llama-server: {srv}")
+    else:
+        print(f"  ✗ llama-server missing: {srv}")
+        problems.append(f"{APP} llm install-llama --auto")
+
+    # 2. configured model + file sanity
+    st = read_state() or {}
+    llm = dict(st.get("llm") or {})
+    if not llm.get("model"):
+        dflt = "gemma-4:e2b"
+        info = _GGUF_MODELS.get(dflt)
+        if info and os.path.exists(os.path.join(_LLAMA_CPP_MODELS, info["file"])):
+            llm = {"model": dflt, "port": 8080}
+    model = llm.get("model")
+    if model and model in _GGUF_MODELS:
+        info = _GGUF_MODELS[model]
+        mp = os.path.join(_LLAMA_CPP_MODELS, info["file"])
+        if os.path.exists(mp):
+            reason = _gguf_sanity(mp, float(info.get("size_gb") or 0))
+            if reason:
+                print(f"  ✗ model file: {reason}")
+                problems.append(f"{APP} llm pull-gguf {model} (resumes + verifies) then {APP} llm setup")
+            else:
+                print(f"  ✓ model: {info['file']} ({os.path.getsize(mp) / 1024**3:.1f} GB, sane)")
+        else:
+            print(f"  ✗ model missing: {mp}")
+            problems.append(f"{APP} llm pull-gguf {model}")
+    else:
+        notes.append(f"no model configured — {APP} llm setup")
+
+    # 3. serving?
+    listening = [p for p in _local_llm_ports() if _llm_alive_port(p)]
+    if listening:
+        print(f"  ✓ serving on 127.0.0.1:{', :'.join(str(p) for p in listening)}")
+    else:
+        print(f"  ✗ NOT serving — nothing answers on "
+              f"{', '.join(str(p) for p in _local_llm_ports()[:6])}")
+        if model and not problems:
+            if fix:
+                did, msg = _llm_start_component()
+                print(f"  {'✓' if did else '!'} auto-fix: {msg}")
+                if not did:
+                    problems.append(msg)
+            else:
+                problems.append(f"{APP} restart llm   (or --fix to do it now)")
+        elif model:
+            pass
+        else:
+            problems.append(f"{APP} llm setup")
+
+    # 3b. REAL round-trip + slot geometry — green "serving" while every request
+    # 400s is the worst possible failure mode (Stuarts-iMac, 2026-11-18).
+    if listening:
+        _p0 = listening[0]
+        try:
+            req = urllib.request.Request(f"http://127.0.0.1:{_p0}/slots")
+            with urllib.request.urlopen(req, timeout=4) as _r:
+                _slots = json.loads(_r.read().decode("utf-8", "replace"))
+            if isinstance(_slots, list) and _slots:
+                _ns, _nc = len(_slots), int(_slots[0].get("n_ctx") or 0)
+                _eff = int(cfg.get("ctx") or (st.get("llm") or {}).get("ctx") or 4096)
+                if _nc and _nc < min(512, max(_eff // 2, 1)):
+                    print(f"  ✗ slots: {_ns} × n_ctx_slot {_nc} — TOO SMALL (requests 400!)")
+                    problems.append(f"slot context {_nc} ≪ ctx {_eff} — {APP} llm config --set np=2"
+                                    f" (or raise ctx) && {APP} restart llm")
+                else:
+                    print(f"  ✓ slots: {_ns} × n_ctx_slot {_nc}   (hivv config ctx: -c{_eff})")
+            else:
+                print(f"  · slots: {len(_slots) if isinstance(_slots, list) else 0} slot(s), no n_ctx exposed")
+        except Exception as e:
+            print(f"  · slots: unavailable ({str(e)[:60]})")
+        _reply, _rp = _local_ask("Reply with exactly: OK", max_tokens=8, timeout=25)
+        if not _reply.strip():
+            print(f"  ✗ round-trip: empty/no reply from :{_rp}")
+            problems.append("round-trip returns nothing — see log; try: " + APP + " restart llm")
+        elif _stream_error_hint(_reply) and not re.search(r"([^\n]{2,14}?)\1{4,}", _reply):
+            print(f"  ✗ round-trip: backend error, not an answer: {_reply.strip()[:80]}")
+            problems.append(_stream_error_hint(_reply))
+        elif re.search(r"([^\n]{2,14}?)\1{4,}", _reply):
+            print(f"  ✗ round-trip: REPETITION LOOP (degenerate output): {_reply.strip()[:60]!r}")
+            problems.append(f"degenerate output — try CPU path: {APP} llm config --set ngl=0 && {APP} restart llm")
+        else:
+            print(f"  ✓ round-trip: {_reply.strip()[:50]!r}")
+    # 4. stale recorded pid?
+    spid = int(llm.get("pid") or 0)
+    if spid and not pid_alive(spid):
+        print(f"  ! recorded llama pid {spid} is dead (stale record)")
+        if fix:
+            _llm_state_set(pid=None)
+            print("    ✓ stale pid cleared")
+
+    # 5. log autopsy (last 8KB) — findings are INFO while serving, tasks otherwise
+    logp = STATE_DIR / "llama-setup.log"
+    serving = bool(listening)
+    if logp.exists():
+        try:
+            tail = logp.read_text(errors="replace")[-8192:]
+        except OSError:
+            tail = ""
+        for f in _llm_diagnose(tail):
+            if serving:
+                print(f"  \033[2m· log shows past issue (currently serving, informational): {f['title']}\033[0m")
+            else:
+                print(f"  ✗ log: {f['title']}")
+                problems.append(f["fix"].format(APP=APP))
+    else:
+        print(f"  · no llama log yet ({logp})")
+
+    # 6. disk headroom — a full disk is THE silent llama killer
+    try:
+        dsk = os.statvfs("/")
+        free_gb = dsk.f_bavail * dsk.f_frsize / 1024**3
+        if free_gb < 5:
+            print(f"  ✗ disk critically low: {free_gb:.1f} GB free")
+            problems.append("free disk space now — llama maps the model and crashes without room")
+        elif free_gb < 20:
+            print(f"  ! disk low-ish: {free_gb:.0f} GB free")
+        else:
+            print(f"  ✓ disk: {free_gb:.0f} GB free")
+    except OSError:
+        pass
+
+    for n in notes:
+        print(f"  \033[2m· {n}\033[0m")
+    if problems:
+        print(f"\n  \033[33m{len(problems)} fix(es) needed:\033[0m")
+        seen: set = set()
+        for p in problems:
+            if p in seen:
+                continue
+            seen.add(p)
+            print(f"    → {p}")
+        if not fix:
+            print(f"\n  auto-correct what's safe: {APP} llm doctor --fix")
+    else:
+        print(f"\n  \033[32m✓ the local LLM looks healthy\033[0m")
+    print()
+
+
+def cmd_llm_config(args) -> None:
+    """hivv llm config — persistent llama.cpp/ollama settings.
+    show (default) · --set KEY=VALUE (repeatable) · --unset KEY. Validation
+    against a spec; NOTHING applies until `hivv restart llm`."""
+    sets = list(getattr(args, "set", None) or [])
+    unsets = list(getattr(args, "unset", None) or [])
+    if sets or unsets:
+        errs: list = []
+        if sets:
+            errs += _llm_config_set(sets)
+        if unsets and not errs:
+            errs += _llm_config_unset(unsets)
+        if errs:
+            if getattr(args, "json_output", False):
+                print(json.dumps({"saved": False, "errors": errs}))
+                return
+            for e in errs:
+                print(f"  \033[31m✗\033[0m {e}")
+            return
+        if getattr(args, "json_output", False):
+            print(json.dumps({"saved": True, "file": _LLM_CONFIG_FILE,
+                              "config": _llm_config()}, indent=2, default=str))
+            return
+        print(f"✓ saved {_LLM_CONFIG_FILE}")
+        for kv in sets:
+            k, _, v = str(kv).partition("=")
+            k = k.strip()
+            shown = "•••" if k == "api_key" else v.strip()
+            print(f"  {k} = {shown}")
+        for k in unsets:
+            print(f"  {k} — removed")
+        if any(str(kv).split("=")[0].strip() == "api_key" for kv in sets):
+            print(f"  \033[33m⚠ api_key makes this server 'locked' to peers (yalla's situation):")
+            print(f"     hive chat + review votes against it will 401\033[0m")
+        print(f"  \033[2mapplies on next restart: {APP} restart llm  (or {APP} llm restart)\033[0m")
+        return
+
+    cfg = _llm_config()
+    st_llm = (read_state() or {}).get("llm") or {}
+
+    # effective slots: config > $HIVV_LLM_NP > cap4
+    if cfg.get("np"):
+        eff_np = f"{cfg['np']} (config)"
+    elif os.environ.get("HIVV_LLM_NP", "").strip():
+        eff_np = f"{os.environ['HIVV_LLM_NP']} (env)"
+    else:
+        eff_np = f"auto — max 4 (this box: {min(4, os.cpu_count() or 4)})"
+    # effective GPU layers: config > $HIVV_LLM_NGL > darwin Metal default
+    _n = cfg.get("ngl")
+    if _n not in (None, ""):
+        try:
+            eff_ngl = (f"{int(_n)} (config)"
+                       + ("  ← CPU only, Metal disabled" if int(_n) == 0 else ""))
+        except (TypeError, ValueError):
+            eff_ngl = str(_n)
+    elif os.environ.get("HIVV_LLM_NGL", "").strip() != "":
+        eff_ngl = f"{os.environ['HIVV_LLM_NGL']} (env)"
+    elif sys.platform == "darwin":
+        eff_ngl = "99 (darwin default — Metal offload to your Radeon)"
+    else:
+        eff_ngl = "0 (off — no GPU offload on this platform)"
+
+    if getattr(args, "json_output", False):
+        print(json.dumps({
+            "file": _LLM_CONFIG_FILE, "exists": os.path.exists(_LLM_CONFIG_FILE),
+            "config": cfg, "state_llm": st_llm,
+            "effective": {"np": eff_np, "ngl": eff_ngl,
+                          "threads": cfg.get("threads", "auto"),
+                          "ctx": st_llm.get("ctx") or cfg.get("ctx") or 4096,
+                          "port": st_llm.get("port") or cfg.get("port") or 8080,
+                          "host": st_llm.get("host") or cfg.get("host") or "127.0.0.1",
+                          "model": st_llm.get("model") or cfg.get("model") or "gemma-4:e2b"},
+            "api_key_set": bool(cfg.get("api_key")),
+        }, indent=2, default=str))
+        return
+    print(f"\n\033[1m{APP} llm config\033[0m — effective settings\n")
+    print(f"  file: {_LLM_CONFIG_FILE}"
+          + ("" if os.path.exists(_LLM_CONFIG_FILE) else "  (not created yet)"))
+    print(f"  llama.cpp:  np={eff_np}   ngl={eff_ngl}   threads={cfg.get('threads', 'auto')}")
+    print(f"              ctx={st_llm.get('ctx') or cfg.get('ctx') or 4096}"
+          f"   port={st_llm.get('port') or cfg.get('port') or 8080}"
+          f"   host={st_llm.get('host') or cfg.get('host') or '127.0.0.1'}")
+    print(f"              model={st_llm.get('model') or cfg.get('model') or 'gemma4:e2b'}"
+          + ("   (state.llm from last setup wins over config defaults)"
+             if st_llm else ""))
+    if cfg.get("api_key"):
+        print(f"  api_key:    set — ⚠ locked to peers (hive chat/votes will 401, like yalla)")
+    if cfg.get("extra"):
+        print(f"  extra args: {cfg['extra']}")
+    ov = {k: v for k, v in cfg.items() if k.startswith("ollama")}
+    if ov:
+        print(f"  ollama:     {ov}")
+
+    # What llama.cpp actually SEES — answers "is my odd GPU visible at all?"
+    srv = os.path.join(_LLAMA_CPP_BIN, "llama-server")
+    if os.access(srv, os.X_OK):
+        try:
+            r = subprocess.run([srv, "--list-devices"], capture_output=True, text=True, timeout=8)
+            dev = (r.stdout or "").strip() or (r.stderr or "").strip()
+            if dev and "error: unrecognized" not in dev.lower() and "unknown" not in dev.lower()[:40]:
+                print(f"\n  GPU devices llama.cpp sees:")
+                for ln in dev.splitlines()[:6]:
+                    print(f"    {ln}")
+        except Exception:
+            pass
+
+    print(f"\n  \033[1mchange:\033[0m {APP} llm config --set ngl=0         # force CPU (bisect Metal issues)")
+    print(f"          {APP} llm config --set ctx=8192 --set np=2")
+    print(f"          {APP} llm config --set extra=\"--cache-reuse 1\"    # raw llama-server args")
+    print(f"          {APP} llm config --unset ngl")
+    print(f"  \033[2mapplies on next restart: {APP} restart llm   (both spellings work)\033[0m\n")
+
+
 def cmd_llm_help(args):
     print(f"""\033[1m{APP} llm\033[0m — local AI runtime helper
 
@@ -9156,21 +11723,28 @@ your box. works with ollama or hand-built llama.cpp.
   llm suggest                 recommend a model given CPU / RAM / GPU
   llm bench                   quick CPU / RAM / disk benchmark
   llm status                  detect + bench + suggest in one shot
+  llm doctor [--fix]          diagnose the local LLM — what's wrong + auto-correct
+  llm config [--set K=V]      persistent settings: ngl/np/ctx/threads/port/host/api-key/extra
   llm install [--docker|--auto|--model NAME]   install ollama
   llm pull <model>            run `ollama pull <model>`
   llm serve [model] [--port]  run `ollama serve` in the foreground
 
 \033[1mllama.cpp commands (native GGUF inference):\033[0m
+  llm setup [--model K] [--port N] [--yes]     ONE-SHOT: build → download → serve
+                                  (also reached via `hivv install llm`)
   llm install-llama [--auto]  build llama.cpp from source (git clone + cmake + make)
   llm pull-gguf <model>       download a GGUF model from HuggingFace
                                available: {', '.join(_GGUF_MODELS.keys())}
   llm serve-llama <model> [--port 8080] [--ctx 4096]
                              launch llama-server with a GGUF model
 
-\033[1mllama.cpp quickstart (gemma4:e2b example):\033[0m
-  {APP} llm install-llama --auto
-  {APP} llm pull-gguf gemma4:e2b
-  {APP} llm serve-llama gemma4:e2b
+\033[1mllama.cpp quickstart (gemma-4:e2b example):\033[0m
+  {APP} llm setup                       # all three steps in one command
+  {APP} llm install-llama --auto        # ─ or step by step ─
+  {APP} llm pull-gguf gemma-4:e2b
+  small (<3B) choices: {APP} llm setup --model qwen3:1.7b  (or llama-3.2:3b · llama-3.2:1b · qwen3:0.6b · gemma-1b)
+  {APP} llm serve-llama gemma-4:e2b
+  (each step prints the NEXT command when it finishes)
 
 \033[1mollama examples:\033[0m
   {APP} llm detect
@@ -9195,8 +11769,8 @@ def cmd_llm_detect(args):
         print()
         print(f"  \033[1mllama.cpp (native GGUF, no container):\033[0m")
         print(f"    {APP} llm install-llama --auto    # build from source")
-        print(f"    {APP} llm pull-gguf gemma4:e2b     # download GGUF model")
-        print(f"    {APP} llm serve-llama gemma4:e2b  # launch server")
+        print(f"    {APP} llm pull-gguf gemma-4:e2b     # download GGUF model")
+        print(f"    {APP} llm serve-llama gemma-4:e2b  # launch server")
         print()
         print(f"  \033[1mthen:\033[0m")
         print(f"    {APP} llm suggest            # see recommended models")
@@ -9319,11 +11893,13 @@ def cmd_llm_bench(args):
                 pass
 
     if specs.get("gpu"):
-        print(f"  GPU         : {specs['gpu']['name']}  ({specs['gpu']['vram_gb']} GB VRAM, CUDA)")
+        _gv = "CUDA" if specs["gpu"].get("vendor") == "nvidia" else (
+            "Metal" if specs["gpu"].get("vendor") == "darwin" else "GPU")
+        print(f"  GPU         : {specs['gpu']['name']}  ({specs['gpu']['vram_gb']} GB VRAM, {_gv})")
     elif specs["apple_silicon"]:
         print(f"  GPU         : Apple Silicon  (Metal)")
     else:
-        print(f"  GPU         : (none — CPU-only inference)")
+        print(f"  GPU         : (none detected — CPU-only inference)")
     if specs.get("ram_gb"):
         print(f"  RAM         : {specs['ram_gb']} GB")
 
@@ -9396,16 +11972,21 @@ def cmd_llm_install(args):
         else:
             print(f"    see https://ollama.com/download")
         print()
-        print(f"  Or use docker (works everywhere):")
-        print(f"    {APP} llm install --docker")
+        print(f"  \033[1mRecommended — llama.cpp (what the whole hive runs, no brew/docker):")
+        print(f"    {APP} llm install-llama --auto     # build from source")
+        print(f"    {APP} llm pull-gguf gemma-4:e2b     # download a model")
+        print(f"    {APP} llm setup                   # serve + verify in one shot\033[0m")
+        print(_gguf_menu())
         print()
-        print(f"  Or build llama.cpp from source:")
-        print(f"    git clone https://github.com/ggerganov/llama.cpp")
-        print(f"    cd llama.cpp && cmake -B build && cmake --build build --config Release")
+        print(f"  Alternatives (ollama):")
+        print(f"    {APP} llm install --docker       # ollama in a container")
+        print(f"    curl -fsSL https://ollama.com/install.sh | sh   # native (Linux)")
+        print(f"    brew install ollama                            # native (macOS)")
         return
 
     # --auto path: actually run the install.
     print(f"\033[1m{APP} llm install --auto\033[0m — installing ollama on {sysname}")
+    print(f"  \033[2m(this installs OLLAMA — for the hive's default path use: {APP} llm install-llama --auto)\033[0m")
     if cmd is None:
         die(f"no native installer known for {sysname}; try `{APP} llm install --docker --auto`")
     print(f"  $ {' '.join(cmd)}")
@@ -9426,7 +12007,7 @@ def cmd_llm_install(args):
             # No explicit model — suggest one and offer to pull.
             specs   = _llm_sys_specs()
             tier, models, reason = _llm_pick_model(specs)
-            primary = models[0][0] if models else "gemma4:e2b"
+            primary = models[0][0] if models else "gemma-4:e2b"
             print(f"\n  ✓ ollama installed. recommended model for this box ({tier}): \033[1m{primary}\033[0m")
             print(f"    ollama pull {primary}")
             print(f"  or pick another: `hivv llm suggest`")
@@ -9502,6 +12083,10 @@ def cmd_llm_install_llama(args):
     print(f"    source ~/.bashrc")
     print(f"    llama-cli --help   # verify it works")
     print()
+    print("  \033[1mstep 6 — model + server (the hivv part):\033[0m")
+    print(f"    {APP} llm pull-gguf gemma-4:e2b      # ~2.9 GB (gemma-4 — latest, proven in-hive)")
+    print(f"    {APP} llm serve-llama gemma-4:e2b   # launch the API on :8080")
+    print()
     if not do_auto:
         print("  Run \033[1m--auto\033[0m to execute steps automatically:")
         print(f"    {APP} llm install-llama --auto")
@@ -9533,8 +12118,296 @@ def cmd_llm_install_llama(args):
         print(f"  \033[1mNow add it to your PATH:\033[0m")
         print(f'    echo \'export PATH="$HOME/llama.cpp/build/bin:$PATH"\' >> ~/.bashrc')
         print(f"    source ~/.bashrc")
+        print()
+        print(f"  \033[1m→ next: grab a model, then serve it:\033[0m")
+        print(f"    {APP} llm pull-gguf gemma-4:e2b      # ~2.9 GB (gemma-4 — latest)")
+        print(f"    {APP} llm serve-llama gemma-4:e2b   # launch the API on :8080")
+        print(f"  (or skip the ceremony — do all steps in one command: {APP} llm setup)")
     else:
         die(f"build succeeded but llama-server not found at {bin_path}")
+
+
+# ── persistent llama.cpp / ollama settings — `hivv llm config` ───────────────
+# One JSON file tunes every launcher: GPU layers (Metal on your odd Radeon!),
+# slots, ctx, threads, port/host, api key, raw escape-hatch args + ollama env.
+# Nothing applies until `hivv restart llm` — show always states that.
+_LLM_CONFIG_FILE = os.path.join(STATE_DIR, "llm-config.json")
+_LLM_CFG_SPEC = {   # key: (type, min_for_ints)
+    "ngl": (int, 0), "np": (int, 1), "ctx": (int, 1), "threads": (int, 1),
+    "port": (int, 1), "model": (str, None), "host": (str, None),
+    "api_key": (str, None), "extra": (str, None),
+    "ollama_host": (str, None), "ollama_keep_alive": (str, None),
+    "ollama_num_parallel": (int, 1),
+}
+
+
+def _llm_config() -> dict:
+    try:
+        with open(_LLM_CONFIG_FILE) as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _llm_config_save(cfg: dict) -> None:
+    try:
+        os.makedirs(os.path.dirname(_LLM_CONFIG_FILE), exist_ok=True)
+        with open(_LLM_CONFIG_FILE, "w") as f:
+            json.dump(cfg, f, indent=2)
+        try:
+            os.chmod(_LLM_CONFIG_FILE, 0o600)   # api_key may live here
+        except OSError:
+            pass
+    except OSError as e:
+        print(f"  \033[33mcould not save config: {e}\033[0m")
+
+
+def _llm_config_set(pairs: list) -> list:
+    """Apply `key=value` pairs (validated against the spec). Returns errors."""
+    cfg = _llm_config()
+    errs = []
+    for kv in pairs:
+        if "=" not in str(kv):
+            errs.append(f"{kv!r} — use --set key=value")
+            continue
+        k, v = str(kv).split("=", 1)
+        k, v = k.strip(), v.strip()
+        spec = _LLM_CFG_SPEC.get(k)
+        if not spec:
+            errs.append(f"unknown key {k!r} — known: {', '.join(sorted(_LLM_CFG_SPEC))}")
+            continue
+        typ, mn = spec
+        if typ is int:
+            try:
+                iv = int(v)
+            except ValueError:
+                errs.append(f"{k} must be an integer (got {v!r})")
+                continue
+            if mn is not None and iv < mn:
+                errs.append(f"{k} must be >= {mn} (got {iv})")
+                continue
+            cfg[k] = iv
+        else:
+            cfg[k] = v
+    if not errs:
+        _llm_config_save(cfg)
+    return errs
+
+
+def _llm_config_unset(keys: list) -> list:
+    cfg = _llm_config()
+    errs = []
+    for k in keys:
+        k = str(k).strip()
+        if k not in _LLM_CFG_SPEC:
+            errs.append(f"unknown key {k!r}")
+            continue
+        cfg.pop(k, None)
+    if not errs:
+        _llm_config_save(cfg)
+    return errs
+
+
+def _llm_extra_args() -> list:
+    """Persistent server settings from `hivv llm config` + platform defaults,
+    shared by every launcher (setup / serve / start / restart):
+
+      -np:   config np > $HIVV_LLM_NP > cap 4 (20-way splits leave ~200-ctx slots)
+      -ngl:  config ngl (EXPLICIT — 0 forces CPU) > darwin default 99 (Metal:
+             llama.cpp offloads to the Radeon Vega instead of baking on the Xeon)
+      -t, --api-key, and shlex-split `extra` raw args as an escape hatch."""
+    cfg = _llm_config()
+    import shlex as _shlex
+    np = 0
+    try:
+        np = int(cfg.get("np") or 0)
+    except (TypeError, ValueError):
+        np = 0
+    if not np:
+        try:
+            _env = os.environ.get("HIVV_LLM_NP", "").strip()
+            np = max(1, min(32, int(_env))) if _env else 0
+        except ValueError:
+            np = 0
+    if not np:
+        np = min(4, int(os.cpu_count() or 4))
+    args = ["-np", str(np)]
+    if cfg.get("ngl") not in (None, ""):
+        try:
+            args += ["-ngl", str(int(cfg["ngl"]))]
+        except (TypeError, ValueError):
+            pass
+    else:
+        # env layer (1-second bisect: HIVV_LLM_NGL=0 hivv restart llm)
+        try:
+            _env_ngl = os.environ.get("HIVV_LLM_NGL", "").strip()
+            if _env_ngl != "":
+                args += ["-ngl", str(int(_env_ngl))]   # 0 = force CPU
+            elif sys.platform == "darwin":
+                args += ["-ngl", "99"]
+        except ValueError:
+            if sys.platform == "darwin":
+                args += ["-ngl", "99"]
+    try:
+        thr = int(cfg.get("threads") or 0)
+    except (TypeError, ValueError):
+        thr = 0
+    if thr > 0:
+        args += ["-t", str(thr)]
+    if cfg.get("api_key"):
+        args += ["--api-key", str(cfg["api_key"])]
+    extra = str(cfg.get("extra") or "").strip()
+    if extra:
+        try:
+            args += _shlex.split(extra)
+        except ValueError:
+            pass    # unbalanced quotes — shown as a warning in `llm config`
+    return args
+
+
+def _gguf_menu(compact: bool = False) -> str:
+    """Grouped model-choice menu — SMALL (<3B) FIRST: people deserve a real
+    choice (Qwen vs Meta/facebook vs gemma), not just the default. compact=True
+    returns just the small-key line for banners."""
+    small = [
+        ("qwen3:0.6b", "~0.5 GB", "Qwen3 0.6B — weakest hardware, still useful"),
+        ("qwen3:1.7b", "~1.2 GB", "Qwen3 1.7B — best small Qwen on CPU"),
+        ("llama-3.2:1b", "~0.8 GB", "Meta (facebook) Llama 3.2 1B — tiniest Llama"),
+        ("llama-3.2:3b", "~2 GB", "Meta (facebook) Llama 3.2 3B — best small all-rounder"),
+        ("gemma-1b", "~0.9 GB", "gemma-3 1B — tiny, phone-class boxes"),
+    ]
+    if compact:
+        return " · ".join(k for k, _, _ in small)
+    medium = [
+        ("gemma4:e2b", "gemma-3 4B (the key says gemma4 — it's gemma-3)"),
+        ("gemma-4:e2b", "gemma-4 E2B — PROVEN on this hive (ashy/masjid)"),
+        ("qwen3:4b", "Qwen3 4B — capable and efficient"),
+    ]
+    large = [("llama-3.1:8b", "Meta (facebook) Llama 3.1 8B"),
+             ("qwen3:8b", "Qwen3 8B — strong on 8 GB GPUs"),
+             ("qwen3:14b", "Qwen3 14b — workstation class"),
+             ("qwen3:32b", "Qwen3 32b — big-GPU territory"),
+             ("mistral:7b", "Mistral 7B")]
+    lines = ["", "  \033[1msmall (<3B) — fast on CPU, great first choice:\033[0m"]
+    for k, sz, lab in small:
+        lines.append(f"    {k:<14} {sz:<8}  {lab}")
+    lines += ["", "  \033[1mmedium (~2.5-3 GB) — daily drivers:\033[0m"]
+    for k, lab in medium:
+        info = _GGUF_MODELS.get(k) or {}
+        lines.append(f"    {k:<14} ~{info.get('size_gb', '?')} GB  {lab}")
+    lines += ["", "  \033[1mlarge — GPU territory:\033[0m"]
+    for k, lab in large:
+        info = _GGUF_MODELS.get(k) or {}
+        lines.append(f"    {k:<14} ~{info.get('size_gb', '?')} GB  {lab}")
+    lines += ["",
+              f"  one-shot (setup pulls it automatically):  {APP} llm setup --model qwen3:1.7b",
+              f"  step by step:  {APP} llm pull-gguf <key>   then   {APP} llm setup --model <key>",
+              f"  hardware pick: {APP} llm suggest"]
+    return "\n".join(lines)
+
+
+def _model_swap_hint(current: str = "") -> str:
+    """'This model keeps looping → swap it' advice shown wherever output
+    degenerates (Stuarts-iMac gemma-3 loops, 2026-11-18). Hive-PROVEN models
+    first, then small alternatives from the menu."""
+    if not current:
+        try:
+            current = str((read_state() or {}).get("llm") or {}).get("model") or ""
+        except Exception:
+            current = ""
+    alts = [k for k in ("gemma-4:e2b", "qwen3:1.7b", "llama-3.2:3b") if k != current][:2]
+    first = alts[0] if alts else "gemma-4:e2b"
+    return (f"this model keeps looping — swap it (setup downloads it if needed):\n"
+            f"    {APP} stop llm && {APP} llm setup --model {first}\n"
+            f"    other choices: {APP} llm pull-gguf ({' · '.join(alts) or 'see menu'})"
+            f"   · hardware pick: {APP} llm suggest")
+
+
+def _gguf_download_cmd(url: str, out_path: str) -> list | None:
+    """Direct-download command: wget if present, else curl.
+
+    macOS ships curl and NOT wget — `pull-gguf` used to crash with
+    FileNotFoundError there (2026-11-18). curl gets -f (fail on HTTP errors
+    instead of saving an HTML error page AS the model), -L (HuggingFace
+    redirects) and resumes a partial file when one exists."""
+    if shutil.which("wget"):
+        return ["wget", "-O", out_path, "--progress=bar:force:noscroll", url]
+    if shutil.which("curl"):
+        cmd = ["curl", "-fL", "--progress-bar", "-o", out_path]
+        if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
+            cmd += ["-C", "-"]        # resume a partial download
+        return cmd + [url]
+    return None
+
+
+def _gguf_ok(path: str) -> bool:
+    """The file must start with the GGUF magic — a proxy/captive-portal HTML
+    page saved as .gguf would fail much later, cryptically, at serve time."""
+    try:
+        with open(path, "rb") as f:
+            return f.read(4) == b"GGUF"
+    except OSError:
+        return False
+
+
+def _gguf_sanity(path: str, expect_gb: float = 0.0) -> str:
+    """'' if the file looks like a complete GGUF, else a reason to re-pull.
+
+    Magic + size band — a truncated/corrupt download makes llama-server emit
+    REPETITION GARBAGE at the prompt (it 'loads' but degenerates instantly),
+    which is exactly what a bad model feels like (Stuarts-iMac-Pro 2026-11-18)."""
+    if not _gguf_ok(path):
+        return "missing GGUF magic (HTML error page or partial file)"
+    try:
+        sz = os.path.getsize(path) / 1024 ** 3
+    except OSError:
+        return "unreadable"
+    if expect_gb and sz < float(expect_gb) * 0.75:
+        return f"looks truncated ({sz:.1f} GB < expected ~{expect_gb} GB)"
+    if expect_gb and sz > float(expect_gb) * 1.6:
+        return f"unexpected size ({sz:.1f} GB vs expected ~{expect_gb} GB)"
+    return ""
+
+
+def _looks_degenerate(text: str) -> bool:
+    """True when an answer is a repetition/mojibake LOOP instead of language.
+
+    Deterministic and pure — a sick model must never be scored as a HEALTHY
+    fast answer: the routing EWMA rewards speed, so a garbage-serving bee
+    would win the lottery and spread its loops across the hive (Stuarts-iMac
+    'hommehomme…servedserved…' gemma loop, 2026-11-18). Mirrors the hub's
+    api/lib/degenerate.js — thresholds pinned by tests on both sides."""
+    if not text or len(text) < 40:
+        return False
+    # 1. adjacent short-unit loops (≥5 repeats of the same 2-14 char unit)
+    if re.search(r"([^\n]{2,14}?)\1{4,}", text):
+        return True
+    # 2. one ≥4-char word dominating the reply (≥6 uses AND ≥20% of words)
+    words = re.findall(r"[\w']+", text.lower())
+    if len(words) >= 12:
+        counts: dict = {}
+        for w in words:
+            if len(w) < 4:
+                continue
+            counts[w] = counts.get(w, 0) + 1
+        top = max(counts.values()) if counts else 0
+        if top >= 6 and top / len(words) >= 0.20:
+            return True
+    # 3. control / replacement chars — broken decoding noise
+    bad = sum(1 for ch in text
+              if (ord(ch) < 32 and ch not in "\n\r\t") or ch == "�")
+    return (bad / len(text)) > 0.03
+
+
+def _llm_next_after_pull(model_key: str) -> None:
+    """Print the exact next command — nobody should have to guess step N+1."""
+    print()
+    print(f"  \033[1m→ next: start the server:\033[0m")
+    print(f"    {APP} llm serve-llama {model_key}")
+    print(f"  then check hivv picked it up:")
+    print(f"    {APP} chat \"hi\"      # ask it — receipt shows answered-by")
+    print(f"    {APP} nodes          # MODELS column shows it (next heartbeat ~1 min)")
 
 
 def cmd_llm_pull_gguf(args):
@@ -9542,10 +12415,10 @@ def cmd_llm_pull_gguf(args):
     import subprocess as _sp
     model_key = getattr(args, "model", None)
     if not model_key:
-        die("missing model name. available: " + ", ".join(_GGUF_MODELS.keys()))
+        die("missing model — pick one:" + _gguf_menu())
 
     if model_key not in _GGUF_MODELS:
-        die(f"unknown model \033[1m{model_key}\033[0m. available: {', '.join(_GGUF_MODELS.keys())}")
+        die(f"unknown model \033[1m{model_key}\033[0m — pick one:" + _gguf_menu())
 
     info    = _GGUF_MODELS[model_key]
     repo    = info["repo"]
@@ -9565,6 +12438,7 @@ def cmd_llm_pull_gguf(args):
     if os.path.exists(out_path):
         sz = os.path.getsize(out_path) / (1024**3)
         print(f"  \033[32m✓\033[0m already downloaded ({sz:.1f} GB) — skipping")
+        _llm_next_after_pull(model_key)
         return
 
     os.makedirs(out_dir, exist_ok=True)
@@ -9573,25 +12447,44 @@ def cmd_llm_pull_gguf(args):
     if hf_cli:
         print(f"  trying huggingface-cli…")
         rc = _sp.call([hf_cli, "download", repo, fname, "--local-dir", out_dir])
-        if rc == 0:
+        if rc == 0 and _gguf_ok(out_path):
             print(f"  \033[32m✓\033[0m saved to {out_path}")
             _write_models_index(model_key, info)
+            _llm_next_after_pull(model_key)
             return
-        print(f"  \033[33mfalling back to wget\033[0m")
+        if rc != 0:
+            print(f"  \033[33mfalling back to direct download\033[0m")
+        elif os.path.exists(out_path):
+            print(f"  \033[33m!\033[0m result isn't a GGUF — retrying with a direct download")
 
-    print(f"  downloading with wget…")
-    rc = _sp.call(["wget", "-O", out_path, "--progress=bar:force:noscroll", url])
+    dl = _gguf_download_cmd(url, out_path)
+    if dl is None:
+        die("no downloader found — install one of: `pip install -U huggingface_hub` (hf), wget, curl")
+    print(f"  downloading with {os.path.basename(dl[0])}…")
+    rc = _sp.call(dl)
     if rc != 0:
-        die(f"download failed (rc={rc})")
+        die(f"download failed (rc={rc}) — re-run `{APP} llm pull-gguf {model_key}` to resume")
+    if not _gguf_ok(out_path):
+        try:
+            os.remove(out_path)
+        except OSError:
+            pass
+        die("downloaded file isn't a GGUF (HTML error page?) — check the network/proxy and re-run")
+    size_reason = _gguf_sanity(out_path, float(info.get("size_gb") or 0))
+    if size_reason:
+        die(f"{size_reason}\n    re-run `{APP} llm pull-gguf {model_key}` — curl resumes the missing bytes")
     print(f"  \033[32m✓\033[0m saved to {out_path}")
     _write_models_index(model_key, info)
+    _llm_next_after_pull(model_key)
 
 
 def cmd_llm_serve_llama(args):
     """Launch llama-server with a specific GGUF model."""
     model_key = getattr(args, "model", None)
-    port      = int(getattr(args, "port", 8080) or 8080)
-    ctx_size  = int(getattr(args, "ctx", 4096) or 4096)
+    _cfg      = _llm_config()
+    port      = int(getattr(args, "port", None) or _cfg.get("port") or 8080)
+    ctx_size  = int(getattr(args, "ctx", None) or _cfg.get("ctx") or 4096)
+    host      = str(getattr(args, "host", None) or _cfg.get("host") or "127.0.0.1")
 
     if not model_key:
         die("missing model name. available: " + ", ".join(_GGUF_MODELS.keys()))
@@ -9609,22 +12502,174 @@ def cmd_llm_serve_llama(args):
     if not os.access(srv_bin, os.X_OK):
         die(f"llama-server not found: {srv_bin}\n  run \033[1m{APP} llm install-llama --auto\033[0m first")
 
-    cmd = [srv_bin, "-m", model_path, "-c", str(ctx_size), "--host", "127.0.0.1",
-           "--port", str(port), "-np", str(os.cpu_count() or 4)]
+    cmd = [srv_bin, "-m", model_path, "-c", str(ctx_size), "--host", host,
+           "--port", str(port)] + _llm_extra_args()
     print(f"\033[1m{APP} llm serve-llama {model_key}\033[0m")
     print(f"  model : {model_path}")
-    print(f"  server : http://127.0.0.1:{port}")
+    print(f"  server : http://{host}:{port}")
     print(f"  cmd   : {' '.join(cmd)}")
     print()
-    print(f"  API endpoint: http://127.0.0.1:{port}/v1/chat/completions")
+    print(f"  API endpoint: http://{host}:{port}/v1/chat/completions")
     print(f"  (Ctrl-C to stop)")
     print()
+    if host in ("127.0.0.1", "localhost", "::1"):
+        print(f"  note: loopback bind — peers and the hub CANNOT reach this server.")
+        print(f"        serve the hive from this bee: re-run with --host 0.0.0.0")
+        print(f"        and open LAN only: {APP} firewall --apply --mode lan")
+        print()
+    print(f"  \033[1mwhile it runs, from another terminal:\033[0m")
+    print(f"    {APP} chat \"hi\"     # routes to it — receipt shows answered-by")
+    print(f"    {APP} nodes         # MODELS shows it after the agent's next heartbeat")
+    if port not in (8080, 11434, 1234, 8000, 5000):
+        print(f"  note: :{port} isn't a scanned port — the gateway router needs")
+        print(f"        HIVV_LOCAL_ENDPOINTS=http://127.0.0.1:{port}/v1/models (+ restart)")
+    print()
     try:
-        rc = subprocess.call(cmd)
-        sys.exit(rc)
+        _p = subprocess.Popen(cmd)
+        _llm_state_set(model=model_key, port=port, host=host, ctx=ctx_size, pid=_p.pid)
+        rc = _p.wait()
     except KeyboardInterrupt:
         print()
+        _llm_state_set(pid=None)
         sys.exit(0)
+    _llm_state_set(pid=None)   # child exited on its own — forget the pid
+    sys.exit(rc)
+
+
+class _ArgNamespace:
+    """argparse-namespace lookalike so one llm step can call another."""
+    def __init__(self, **kw):
+        self.__dict__.update(kw)
+
+
+def cmd_llm_setup(args) -> None:
+    """ONE-SHOT local LLM bring-up — also where `hivv install llm` lands.
+
+    build llama.cpp (if missing) → download the GGUF (if missing) → serve it
+    in the background → print exactly what to run next. Each step is skipped
+    when it's already done, so re-running is cheap and safe."""
+    _cfg = _llm_config()
+    model = str(getattr(args, "model", None) or _cfg.get("model") or "gemma-4:e2b")
+    port = int(getattr(args, "port", None) or _cfg.get("port") or 8080)
+    ctx = int(getattr(args, "ctx", None) or _cfg.get("ctx") or 4096)
+    host = str(getattr(args, "host", None) or _cfg.get("host") or "127.0.0.1")
+    yes = bool(getattr(args, "yes", False))
+    fg = bool(getattr(args, "fg", False))
+
+    if model not in _GGUF_MODELS:
+        die(f"unknown model \033[1m{model}\033[0m. available: {', '.join(_GGUF_MODELS.keys())}")
+
+    def _confirm(prompt: str) -> bool:
+        if yes:
+            return True
+        if not sys.stdin.isatty():
+            print(f"  ! not a TTY — re-run with --yes to confirm: {prompt}")
+            return False
+        try:
+            return input(f"  {prompt} [y/N] ").strip().lower() in ("y", "yes")
+        except EOFError:
+            return False
+
+    def _llama_alive(p: int) -> bool:
+        """True only when an OpenAI-shaped /v1/models answers — a random web
+        app squatting on the port must not count as 'my LLM is up'."""
+        try:
+            req = urllib.request.Request(f"http://127.0.0.1:{p}/v1/models",
+                                         headers={"accept": "application/json"})
+            with urllib.request.urlopen(req, timeout=2) as r:
+                d = json.loads(r.read().decode("utf-8", errors="replace"))
+            return isinstance(d, dict) and bool(d.get("models"))
+        except Exception:
+            return False
+
+    print(f"\033[1m{APP} llm setup\033[0m — one-shot local LLM ({model} via llama.cpp)")
+    print(f"  \033[2mchoices (<3B): {_gguf_menu(compact=True)}\033[0m")
+    if sys.platform == "darwin" and _llm_config().get("ngl") in (None, ""):
+        print(f"  \033[2mnote: default is Metal offload (-ngl 99) — if replies come back as"
+              f" garbage/corrupt tokens: {APP} llm config --set ngl=0 && {APP} restart llm"
+              f"  (seen: Radeon Vega on Intel Macs)\033[0m")
+    print()
+
+    srv_bin = os.path.join(_LLAMA_CPP_BIN, "llama-server")
+    if os.access(srv_bin, os.X_OK):
+        print(f"  \033[32m[1/3]\033[0m ✓ llama.cpp built ({srv_bin})")
+    else:
+        print(f"  \033[1m[1/3]\033[0m llama.cpp not built — compiling from source takes a few minutes")
+        if not _confirm("build llama.cpp now?"):
+            die(f"stopped — run `{APP} llm install-llama --auto` when you're ready")
+        cmd_llm_install_llama(_ArgNamespace(auto=True))
+        if not os.access(srv_bin, os.X_OK):
+            die("build finished but llama-server is missing — see output above")
+
+    info = _GGUF_MODELS[model]
+    model_path = os.path.join(_LLAMA_CPP_MODELS, info["file"])
+    if os.path.exists(model_path):
+        reason = _gguf_sanity(model_path, float(info.get("size_gb") or 0))
+        if reason:
+            # Serving a corrupt/truncated GGUF = instant repetition garbage at
+            # the prompt — refuse instead of pretending everything is fine.
+            die(f"model file problem: {reason}\n"
+                f"    fix: {APP} llm pull-gguf {model} (curl resumes + verifies) — then re-run setup")
+        print(f"  \033[32m[2/3]\033[0m ✓ model on disk ({os.path.getsize(model_path) / 1024**3:.1f} GB {info['file']})")
+    else:
+        print(f"  \033[1m[2/3]\033[0m model not downloaded — {model} is ~{info['size_gb']} GB from HuggingFace")
+        if not _confirm(f"download {model} now?"):
+            die(f"stopped — run `{APP} llm pull-gguf {model}` when you're ready")
+        cmd_llm_pull_gguf(_ArgNamespace(model=model))
+        if not os.path.exists(model_path):
+            die("download failed — see output above")
+
+    if _llama_alive(port):
+        print(f"  \033[32m[3/3]\033[0m ✓ already serving on :{port} — reusing it")
+        _llm_state_set(model=model, port=port, host=host, ctx=ctx)
+    elif fg:
+        cmd_llm_serve_llama(_ArgNamespace(model=model, port=port, ctx=ctx, host=host))
+        return
+    else:
+        cmd = [srv_bin, "-m", model_path, "-c", str(ctx), "--host", host,
+               "--port", str(port)] + _llm_extra_args()
+        try:
+            STATE_DIR.mkdir(parents=True, exist_ok=True)
+            log_path = STATE_DIR / "llama-setup.log"
+            logf = open(log_path, "ab")
+            proc = subprocess.Popen(cmd, stdout=logf, stderr=subprocess.STDOUT,
+                                    start_new_session=True)
+        except OSError as e:
+            die(f"could not start llama-server: {e}")
+        print(f"  \033[1m[3/3]\033[0m starting llama-server on :{port} (pid {proc.pid}, log {log_path})")
+        up = False
+        for _ in range(120):   # up to 60s — a 2.5 GB GGUF cold-loads slowly
+            time.sleep(0.5)
+            if proc.poll() is not None:
+                die(f"llama-server exited early (rc={proc.returncode}) — see {log_path}")
+            if _llama_alive(port):
+                up = True
+                break
+        if not up:
+            # NEVER claim success after a failed probe — the old warn-then-
+            # continue printed "✓ live" under a server that never answered.
+            die(f"llama-server not answering after 60s — see {log_path}\n"
+                f"    it may still be loading the model; when warm, verify with: {APP} llm status")
+        # Record what WE launched — start/stop/restart-all manage from this.
+        _llm_state_set(model=model, port=port, host=host, ctx=ctx, pid=proc.pid)
+
+    print()
+    print(f"  \033[32m✓ {model} is live on http://{host}:{port}\033[0m")
+    if host in ("127.0.0.1", "localhost", "::1"):
+        print(f"  \033[2mloopback bind — only THIS machine can talk to it. For the hive:")
+        print(f"  re-run with --host 0.0.0.0 + {APP} firewall --apply --mode lan\033[0m")
+    print()
+    print(f"  \033[1m→ next commands:\033[0m")
+    print(f"    {APP} chat \"hi\"          # ask it — receipt shows answered-by")
+    print(f"    {APP} nodes              # MODELS column shows it (next heartbeat, ~1 min)")
+    print(f"    {APP} llm status         # detect + bench + suggest")
+    print(f"    {APP} exam               # first-boot quality check — score this brain")
+    print()
+    if port not in (8080, 11434, 1234, 8000, 5000):
+        print(f"  note: :{port} isn't a scanned port — the gateway router needs")
+        print(f"        HIVV_LOCAL_ENDPOINTS=http://127.0.0.1:{port}/v1/models (+ pm2 restart)")
+        print()
+    print(f"  start on boot: {APP} doctor --fix   · foreground: {APP} llm serve-llama {model}")
 
 
 # ── arg parser ─────────────────────────────────────────────────────────
@@ -10969,9 +14014,15 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--hub", default=None, help=f"override hub URL (default {HUB})")
 
     # operator / local
-    sp = sub.add_parser("start",    help="start the local hivv agent")
-    sp = sub.add_parser("stop",     help="stop the local hivv agent")
-    sp = sub.add_parser("restart",  help="restart the local hivv agent")
+    sp = sub.add_parser("start",    help="start the local hivv agent (+ managed LLM)")
+    sp.add_argument("what", nargs="?", choices=("all", "agent", "llm", "ollama"), default="all",
+                    help="all (default) = agent + managed LLM · or just one part")
+    sp = sub.add_parser("stop",     help="stop the local hivv agent (+ managed LLM)")
+    sp.add_argument("what", nargs="?", choices=("all", "agent", "llm", "ollama"), default="all",
+                    help="all (default) = agent + managed LLM · or just one part")
+    sp = sub.add_parser("restart",  help="restart agent + LLM (partial: agent|llm|ollama)")
+    sp.add_argument("what", nargs="?", choices=("all", "agent", "llm", "ollama"), default="all",
+                    help="all (default) = agent + managed LLM · or just one part")
 
     sp = sub.add_parser("status",   help="pid, uptime, last heartbeat, last error")
     sp = sub.add_parser("info",     help="hub URL, version, install paths, hub_health")
@@ -10986,7 +14037,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--watch", type=float, default=1.0, help="refresh interval seconds (default 1; 0 = print once)")
 
     sp = sub.add_parser("ping",    help="ping the hub — measure round-trip latency")
-    sp.add_argument("name", nargs="+", help="node name or id to ping")
+    sp.add_argument("name", nargs="*", default=[],
+                    help="ignored here — for a BEE use: hivv reach <name>")
 
     sp = sub.add_parser("tools",   help="manage local tool server + list available tools on the hive")
     sp.add_argument("action", nargs="?", default="list",
@@ -11146,8 +14198,54 @@ def build_parser() -> argparse.ArgumentParser:
     sp_fw.add_argument("--mode", choices=["lan", "tailscale", "open"], default="lan", help="who can reach your LLMs: lan (default), tailscale, or open")
     sub.add_parser("up",        help="quick 3-line status — the 'you good?' command")
     sub.add_parser("speed",      help="latency benchmark (DNS, TLS, hub ping, chat TTFB)")
+    sp_sds = sub.add_parser("speeds", help="request speed log — full-reply time, TTFB, tok/s per user & bee")
+    sp_sds.add_argument("--days", type=int, default=1, help="window in days (default: 1)")
+    sp_sds.add_argument("--limit", type=int, default=300, help="max rows to fetch (default 300, max 1000)")
+    sp_sds.add_argument("--json", dest="json_output", action="store_true", help="output raw JSON")
+
+    sp_ex = sub.add_parser("exam", help="first-boot quality check — score this node's brain (math/logic/philosophy, judged by other bees)")
+    sp_ex.add_argument("--show", action="store_true", help="show the saved exam record instead of re-taking it")
+    sp_ex.add_argument("--no-judge", dest="no_judge", action="store_true",
+                       help="skip peer judging (fuzzy questions get excluded, not penalized)")
+    sp_ex.add_argument("--json", dest="json_output", action="store_true", help="machine-readable output (pure JSON on stdout)")
+
+    sp_iq = sub.add_parser("iq", help="intelligence + personality index for THIS brain (public brain board included)")
+    sp_iq.add_argument("--show", action="store_true", help="this brain's saved record + IQ history")
+    sp_iq.add_argument("--board", action="store_true",
+                       help="public leaderboard: IQ · score · AI judges · human votes")
+    sp_iq.add_argument("--sort", choices=["power", "iq", "speed"], default="power",
+                       help="board ranking: power = IQ×speed (default) · iq · speed")
+    sp_iq.add_argument("--no-judge", dest="no_judge", action="store_true",
+                       help="skip peer judging (fuzzy questions get excluded, not penalized)")
+    sp_iq.add_argument("--json", dest="json_output", action="store_true", help="machine-readable output (pure JSON on stdout)")
+
+    sp_rt = sub.add_parser("rate", help="rank a bee as a HUMAN (1-10) — human votes weigh more than model opinions")
+    sp_rt.add_argument("name", help="bee name — see hivv nodes")
+    sp_rt.add_argument("score", help="score 1-10")
+    sp_rt.add_argument("--note", default="", help="optional one-line note")
+
+    sp_qz = sub.add_parser("quarantine", help="network-side STOP for a bad node (auto-fires on crash-loops) — release is human-only")
+    sp_qz.add_argument("name", help="bee name — see hivv nodes")
+    sp_qz.add_argument("--release", action="store_true",
+                       help="let a quarantined bee back in (re-arms the detector)")
+    sp_qz.add_argument("--reason", default="", help="why — recorded with the quarantine")
+
+    sp_sec = sub.add_parser("security", help="local network security check — score + findings, reported to the hub for analysis")
+    sp_sec.add_argument("--no-report", dest="no_report", action="store_true",
+                        help="check locally but don't send the report to the hub")
+    sp_sec.add_argument("--json", dest="json_output", action="store_true", help="machine-readable output (pure JSON on stdout)")
+
+    sp_st = sub.add_parser("selftest",
+                           help="full node health battery — local, or REMOTELY on a bee (signed op, result via heartbeat)")
+    sp_st.add_argument("node", nargs="?", default=None, help="bee to test remotely (omit = this machine)")
+    sp_st.add_argument("--wait", type=int, default=90, help="remote: seconds to wait for the bee's report (default 90)")
+    sp_st.add_argument("--json", dest="json_output", action="store_true", help="machine-readable output")
+
+    sp_hy = sub.add_parser("history", help="recent hive activity — requests (who answered, how long, tok/s) + local iq/exam events")
+    sp_hy.add_argument("--limit", type=int, default=20, help="how many recent requests (default 20)")
+    sp_hy.add_argument("--json", dest="json_output", action="store_true", help="output raw JSON")
     sub.add_parser("test",       help="doctor + speed end-to-end smoke test")
-    sp_v = sub.add_parser("volunteer", help="opt in/out of contributing compute to the network (on/off/status)")
+    sp_v = sub.add_parser("volunteer", help="relay jobs — ON by default; on|off|status (opt out: volunteer off)")
     sp_v.add_argument("action", nargs="?", choices=["on", "off", "status"], default="status")
     sp_sh = sub.add_parser("share", help="broadcast what you're working on to the hive 🐝")
     sp_sh.add_argument("message", nargs="?", help="what you're working on (max 280 chars)")
@@ -11183,7 +14281,14 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("welcome",    help="guided first-run tour — everything a new user needs")
     sp_top = sub.add_parser("top",        help="real-time cluster activity (like 'top' for the network)")
     sp_top.add_argument("--verbose", action="store_true", help="show detailed debug info")
-    sub.add_parser("benchmark",  help="test all nodes — find the fastest one")
+    sp_bmk = sub.add_parser("benchmark",  help="test all nodes — find the fastest one")
+    sp_bmk.add_argument("--json", dest="json_output", action="store_true",
+                        help="machine-readable output (pure JSON on stdout)")
+
+    sp_cmds = sub.add_parser("commands",
+                             help="self-describing index of every command + flags (AI fast path: --json)")
+    sp_cmds.add_argument("--json", dest="json_output", action="store_true",
+                         help="machine-readable: full command/flag map in one call")
     sub.add_parser("hi",         help="friendly greeter — quick chat round-trip")
     sub.add_parser("thanks",     help="say thanks to the AI (one-line chat reply)")
     sp_s = sub.add_parser("support", help="ask the AI for help — auto-attaches doctor + log context")
@@ -11192,6 +14297,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--mode", default=None,
                     choices=["balanced", "quality", "fast", "cost", "private", "trusted", "smart", "cheap"],
                     help="routing strategy: smart=best model · cheap=free compute · fast=lowest latency · private=no cloud")
+    sp.add_argument("--local", action="store_true",
+                    help="ONLY this machine's LLM — no peers, no hub (works offline); alias: hivv chat local MSG")
     sp.add_argument("message", nargs=argparse.REMAINDER)
     sp = sub.add_parser("completions", help="POST /v1/chat/completions (OpenAI-compatible)")
     sp.add_argument("message", nargs=argparse.REMAINDER)
@@ -11301,9 +14408,39 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp_sl = sp_llm.add_parser("serve-llama", help="launch llama-server with a GGUF model")
     sp_sl.add_argument("model", help="model key, e.g. gemma4:e2b")
-    sp_sl.add_argument("--port", type=int, default=8080)
-    sp_sl.add_argument("--ctx", type=int, default=4096, dest="ctx",
-                       help="context size (default 4096)")
+    sp_sl.add_argument("--port", type=int, default=None, help="default: llm config, else 8080")
+    sp_sl.add_argument("--host", default=None,
+                       help="bind address — use 0.0.0.0 to be reachable by the hive "
+                            "(pair with: hivv firewall --apply --mode lan)")
+    sp_sl.add_argument("--ctx", type=int, default=None, dest="ctx",
+                       help="context size (default: llm config, else 4096)")
+
+    sp_su = sp_llm.add_parser("setup",
+                              help="ONE-SHOT: build llama.cpp + download GGUF + serve (hivv install llm)")
+    sp_su.add_argument("--model", default=None, metavar="KEY",
+                       help="GGUF model key (default: gemma-4:e2b — latest, proven in-hive)")
+    sp_su.add_argument("--port", type=int, default=None,
+                       help="serve port (default: llm config, else 8080)")
+    sp_su.add_argument("--host", default=None,
+                       help="bind address — use 0.0.0.0 to be reachable by the hive "
+                            "(pair with: hivv firewall --apply --mode lan)")
+    sp_su.add_argument("--ctx", type=int, default=None, help="context size (default: llm config, else 4096)")
+    sp_su.add_argument("--yes", "-y", action="store_true", help="no prompts — run every step")
+    sp_su.add_argument("--fg", action="store_true",
+                       help="serve in the foreground (default: background + print log path)")
+
+    sp_ld = sp_llm.add_parser("doctor",
+                              help="diagnose the local LLM — what's wrong, and --fix what's safe to fix")
+    sp_ld.add_argument("--fix", action="store_true",
+                       help="auto-correct what's safe (relaunch dead server, clear stale pids)")
+
+    sp_cf = sp_llm.add_parser("config",
+                              help="persistent llama.cpp/ollama settings (GPU layers, slots, ctx, port, api-key, raw args)")
+    sp_cf.add_argument("--set", dest="set", action="append", default=[], metavar="KEY=VALUE",
+                       help="set a value (repeatable) — applies on next restart")
+    sp_cf.add_argument("--unset", dest="unset", action="append", default=[], metavar="KEY",
+                       help="remove a value (repeatable)")
+    sp_cf.add_argument("--json", dest="json_output", action="store_true", help="machine-readable output (pure JSON on stdout)")
 
     return p
 
@@ -11375,9 +14512,9 @@ COMMANDS = _resolve_cmds({
     "bees":            "cmd_nodes",
     "bee":             "cmd_node",
     "swarm":           "cmd_hive_mind",
-    "waggle":          "cmd_ping",
+    "waggle":          "cmd_reach",
     "drone":           "cmd_drone",
-    "reach":           "cmd_ping",
+    "reach":           "cmd_reach",
     "debug":           "cmd_debug",
     "add":             "cmd_add",
     "add-ai":          "cmd_add",
@@ -11393,6 +14530,15 @@ COMMANDS = _resolve_cmds({
     "help":            "cmd_help",
     "up":              "cmd_up",
     "speed":           "cmd_speed",
+    "commands":        "cmd_commands",
+    "speeds":          "cmd_speeds",
+    "exam":            "cmd_exam",
+    "iq":              "cmd_iq",
+    "rate":            "cmd_rate",
+    "quarantine":      "cmd_quarantine",
+    "security":        "cmd_security",
+    "history":         "cmd_history",
+    "selftest":        "cmd_selftest",
     "test":            "cmd_test",
     "volunteer":       "cmd_volunteer",
     "share":           "cmd_share",
@@ -11433,6 +14579,9 @@ COMMANDS = _resolve_cmds({
     "llm install-llama":  "cmd_llm_install_llama",
     "llm pull-gguf":      "cmd_llm_pull_gguf",
     "llm serve-llama":   "cmd_llm_serve_llama",
+    "llm setup":         "cmd_llm_setup",
+    "llm doctor":        "cmd_llm_doctor",
+    "llm config":        "cmd_llm_config",
 })
 
 def main(argv: list[str]) -> None:
@@ -11477,6 +14626,14 @@ def main(argv: list[str]) -> None:
     if cmd_name == "llm" and len(argv) > 1 and not argv[1].startswith("-") and argv[1] != "help":
         cmd_name = "llm " + argv[1]
 
+    # `hivv llm restart` (natural inversion of `hivv restart llm`) — without
+    # this it fell into the smart-default CHAT trap and just TALKED to the
+    # dying server instead of restarting it (Stuarts-iMac, 2026-11-18).
+    if cmd_name in ("llm start", "llm stop", "llm restart"):
+        _verb, _scope = cmd_name.split()
+        argv = [_verb, _scope] + list(argv[2:])
+        cmd_name = _verb
+
     # `upgrade` is a friendlier alias for `update`. Without this, `hivv upgrade`
     # would fall through to the smart-default chat and send the literal word
     # "upgrade" to the LLM.
@@ -11488,6 +14645,40 @@ def main(argv: list[str]) -> None:
     if cmd_name == "capability":
         cmd_name = "cap"
         argv[0] = "cap"
+    # `install llm` used to fall through to the smart-default and get SENT TO
+    # THE MODEL as a chat message ("install llm"). Route it to the one-shot
+    # installer instead — same trap family as `upgrade`/`capability` above.
+    if cmd_name == "install":
+        if len(argv) > 1 and argv[1] in ("llm", "model", "models", "ai"):
+            argv = ["llm", "setup"] + argv[2:]
+            cmd_name = "llm setup"
+        else:
+            print(f"\033[1m{APP} install\033[0m — what do you want to install?")
+            print()
+            print(f"  {APP} install llm        one-shot: build llama.cpp + download gemma + serve")
+            print(f"  {APP} llm setup --help   every option (--model, --port, --yes, --fg)")
+            print(f"  {APP} itself:            curl -sSL {HUB}/install-hivv.sh | bash")
+            return
+
+    # Feedback aliases — an AI studying the hive must be able to REPORT/SUGGEST
+    # without falling into the chat smart-default (bare `hivv report ...` used
+    # to become the PROMPT "report ..."). No-arg forms print a chooser instead.
+    if cmd_name == "report":
+        if len(argv) == 1:
+            print(f"  {APP} report \"<what's wrong>\"   send a problem report to the hub (humans read these)")
+            print(f"  {APP} submit \"<bug>\"          same queue · flag abuse: {APP} flag <bee> \"<what>\"")
+            print(f"  {APP} panic                      urgent: diagnostics + how to escalate")
+            return
+        cmd_name = "submit"
+        argv[0] = "submit"
+    elif cmd_name == "suggest":
+        if len(argv) == 1:
+            print(f"  {APP} suggest \"<idea>\"        send a suggestion to the hub (humans read these)")
+            print(f"  {APP} llm suggest             which model fits THIS hardware")
+            print(f"  {APP} request \"<feature>\"    same queue: request a feature")
+            return
+        cmd_name = "request"
+        argv[0] = "request"
 
     # Smart default: if argv[0] doesn't match a known subcommand and isn't a flag,
     # treat the whole argv as a chat message to hivv.org. So:
@@ -11545,6 +14736,22 @@ def _self_heal_from_parse_error(parse_err, cmd_name: str) -> None:
     It deliberately does NOT auto-restart — the operator should see what
     happened and confirm.
     """
+    msg = str(parse_err)
+    # USAGE errors are USER mistakes, not a broken CLI — never scare people
+    # into overwriting their own file over `missing required model` (the raw
+    # "installed CLI is broken" report hit real users, 2026-11-18).
+    # NOTE: argparse exits with SystemExit(2) and str() is just "2" — the real
+    # text already went to stderr — so exit-code 2 itself is the usage signal.
+    _usage_error = (isinstance(parse_err, SystemExit)
+                    and getattr(parse_err, "code", None) == 2) or any(
+        s in msg for s in ("required:", "unrecognized arguments", "unrecognized option",
+                           "invalid choice", "expected one argument",
+                           "too many arguments", "the following arguments are"))
+    if _usage_error:
+        _m = "" if str(msg).strip() == "2" else f": {msg}"
+        print(f"\n\033[31m✗\033[0m bad arguments for `{APP} {cmd_name}`{_m}")
+        print(f"  see every flag: {APP} {cmd_name} --help")
+        return
     B, R = "\033[1m", "\033[0m"
     G, Y, X = "\033[32m", "\033[33m", "\033[31m"
 
@@ -11725,13 +14932,25 @@ def _print_sub_help(cmd: str) -> None:
         "stats":     "show per-node stats and cluster totals\n  flag: --json   output raw JSON",
         "debug":     "full debug info: hub, agent, local AI, network nodes",
         "firewall":  "check firewall + binding + tailscale status\n  flag: --apply      apply firewall rules\n  flag: --mode X     lan (default), tailscale, or open\n  note: use 'hivv doctor --fix' to auto-fix all issues",
-        "chat":      "POST /api/chat MSG\n  usage: hivv chat 'hello world'",
+        "chat":      "POST /api/chat MSG\n  usage: hivv chat 'hello world'\n  flag: --local    ONLY this machine's LLM — no peers, no hub, works offline\n  alias: hivv chat local MSG",
         "completions":"POST /v1/chat/completions (OpenAI-compatible)\n  usage: hivv completions 'hello world'",
         "whoami":    "GET /api/control/health (cheap liveness check)",
         "doctor":    "one-glance health report (install + hub + agent + bee + version)\n  output is pasteable for support",
         "speed":     "latency benchmark (DNS, TCP, hub ping x3, chat TTFB, CPU/RAM/disk)",
+        "speeds":    "request speed log — full-reply time, first-token, tok/s per user & bee\n  usage: hivv speeds [--days N] [--limit N] [--json]",
+        "commands":  "self-describing index of every command + flags (introspected from the parser)\n  usage: hivv commands [--json]   ← AI agents: fetch THIS first, then any --json",
+        "exam":      "first-boot quality check — score this node's brain (math/logic/philosophy,\n  judged by other bees; full replies stay local)\n  usage: hivv exam [--show] [--no-judge]",
+        "iq":        "intelligence + personality index for THIS brain\n  usage: hivv iq [--show] [--board] [--no-judge]\n  --board = public leaderboard (IQ · score · AI judges · human votes)",
+        "rate":      "rank a bee as a HUMAN — human votes weigh more than model opinions\n  usage: hivv rate <bee> <1-10> [--note \"...\"]",
+        "quarantine":"network-side STOP for a bad/crash-looping node — release is human-only\n  usage: hivv quarantine <bee> [--release] [--reason \"...\"]\n  auto-fires on ≥5 re-registers/10min (hub-side)",
+        "security":  "local network security check — score + findings, reported to the hub\n  usage: hivv security [--no-report]",
+        "history":   "recent hive activity — requests (who answered, how long, tok/s)\n  usage: hivv history [--limit N] [--json]",
+        "report":    "alias: send a problem report to the hub → hivv_feedback (humans read these)\n  usage: hivv report \"<what's wrong>\" [--subject S] [--json]",
+        "suggest":   "alias: send a suggestion/idea to the hub (same queue as hivv request)\n  usage: hivv suggest \"<idea>\" [--subject S] [--json]   ·  model picks: hivv llm suggest",
+        "selftest":  "full node health battery — local or REMOTELY on a bee\n  usage: hivv selftest [bee] [--wait N] [--json]\n  remote = signed allowlisted op; result rides the heartbeat back",
+        "llm setup": "ONE-SHOT local LLM: build llama.cpp → download GGUF → serve in background\n  usage: hivv llm setup [--model KEY] [--port N] [--ctx N] [--yes] [--fg]\n  alias: hivv install llm   · default model: gemma4:e2b",
         "test":      "doctor + speed end-to-end smoke test",
-        "volunteer": "opt in/out of contributing compute to the network\n  usage: hivv volunteer [on|off|status]   (default: status)",
+        "volunteer": "relay jobs (cross-NAT compute) — ON by default since 2026-11-18\n  usage: hivv volunteer [on|off|status]   ·  opt out: hivv volunteer off",
         "setup":     "configure OpenCode + VS Code + local LLM with hivv\n  flags: --write [PATH]  write/merge ./opencode.jsonc (default)\n         --global        with --write: use ~/.config/opencode/opencode.jsonc\n         --json          detection dict + config as JSON\n         --profile P    local | hybrid | hive | cloud (default hybrid)\n         --backend M    pin one specific local model\n         --tools IDS    only these tool ids, comma-separated\n         --gui          also write the GUI tool configs\n         --dry-run      show what would be written, write nothing",
         "capabilities": "what can this HIVV instance do? (capability discovery)\n  shows the OpenAI surface, route modes, deterministic tools, hive tools, MCP\n  flag: --json   machine-readable",
         "problems":  "what is breaking globally? (live error log + open incidents)\n  flag: --window N   look-back seconds (default 3600)\n  flag: --json\n  alias: errors",
@@ -11761,5 +14980,11 @@ def _print_sub_help(cmd: str) -> None:
 
 
 if __name__ == "__main__":
-    main(sys.argv[1:])
+    # Ctrl-C anywhere (mid-stream chat, download, bench) exits CLEANLY — a raw
+    # KeyboardInterrupt traceback at the prompt is a bug report, not UX.
+    try:
+        main(sys.argv[1:])
+    except KeyboardInterrupt:
+        print()
+        sys.exit(130)
 
