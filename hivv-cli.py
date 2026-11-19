@@ -219,6 +219,47 @@ def _is_dev_mode() -> bool:
     return False
 
 
+# ── source-tree protection: a checkout is SOURCE, never an update target ─
+def _in_git_worktree(path: Path) -> bool:
+    """True when `path` lives inside a git working tree.
+
+    `hivv update` used to fall back to "the file I am executing" whenever no
+    install prefix existed. Run from a clone, that silently REPLACED the
+    repo's own CLI with the hub's copy — local work destroyed, `git status`
+    dirty (2026-11-18). Detection walks up for a `.git` entry, so it needs no
+    git binary and works in worktrees and submodules too (`.git` is a file
+    there, not a directory).
+    """
+    try:
+        p = Path(path).resolve()
+    except OSError:
+        return False
+    for parent in p.parents:
+        try:
+            if (parent / ".git").exists():
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def _update_target() -> tuple[Path, bool]:
+    """Where an update would land → (target, is_source_tree).
+
+    Installed layout: <prefix>/lib/hivv/hivv-cli.py — the normal case.
+    Running in place (no install): the file being executed — flagged when it
+    sits inside a git checkout, which must never be overwritten.
+    """
+    target = INSTALL_DIR / f"{APP}-cli.py"
+    if not target.exists():
+        target = Path(__file__).resolve()
+    return target, _in_git_worktree(target)
+
+
+# Set by cmd_update / repair flows: --force overrides the source-tree guard.
+_UPDATE_FORCE = False
+
+
 # ── tiny utilities ─────────────────────────────────────────────────────
 # Auto-heal tips: when something fails, the fix should be one glance away.
 # die()/warn() match the message against these rules and print up to 2 tips.
@@ -930,9 +971,14 @@ def _apply_update(data: bytes, expected_sha256=None, source: str = "") -> tuple:
     # A8: PyInstaller binaries carry no separate .py — swap the executable itself.
     if _is_frozen():
         return _apply_update_frozen(data, expected_sha256, source)
-    target = INSTALL_DIR / f"{APP}-cli.py"
-    if not target.exists():
-        target = Path(__file__).resolve()
+    target, in_source_tree = _update_target()
+    # A git checkout is SOURCE. Overwriting the file we run from destroys the
+    # user's working copy (and dirties `git status`). Refuse unless forced.
+    if in_source_tree and not _UPDATE_FORCE:
+        return (False,
+                "refusing to overwrite a git source file — install the CLI to a "
+                "prefix (hivv doctor) or re-run with --force",
+                target)
     bak = target.with_suffix(target.suffix + ".bak")
     bad = target.with_suffix(target.suffix + ".bad")
     new = target.with_suffix(target.suffix + ".new")
@@ -2392,6 +2438,86 @@ def _print_metrics_local(m: dict) -> None:
 
 
 # ── self-repair: agent-run fixes without user intervention ─────────────
+def _unit_add_startlimit(text: str) -> tuple[str, bool]:
+    """Insert crash-loop bounds into a systemd unit's [Unit] section.
+
+    Idempotent — returns (new_text, changed). Pre-2026-11-18 templates shipped
+    without StartLimit*, and systemd's DEFAULT rate limit (5 starts / 10 s)
+    can NEVER trip when RestartSec >= 10 (starts land 10 s+ apart), so a
+    broken unit restarts forever: masjid's llama abrt-stormed every 5 s and
+    its agent once looped 73+ times. Bounds: 3 starts / 5 min → failed."""
+    if "StartLimit" in text:
+        return text, False
+    lines = text.splitlines(keepends=True)
+    out, inserted = [], False
+    for ln in lines:
+        out.append(ln)
+        if not inserted and ln.strip() == "[Unit]":
+            out.append("# crash-loop bound added by hivv self-repair (3 starts/5 min → failed)\n")
+            out.append("StartLimitIntervalSec=300\n")
+            out.append("StartLimitBurst=3\n")
+            inserted = True
+    if not inserted:
+        out = ["[Unit]\n",
+               "# crash-loop bound added by hivv self-repair (3 starts/5 min → failed)\n",
+               "StartLimitIntervalSec=300\n", "StartLimitBurst=3\n", "\n"] + out
+    return "".join(out), True
+
+
+def _harden_unit_file(path: Path, scope: str) -> tuple[bool, str] | None:
+    """Add StartLimit* to an existing unit file we own — the REMOTE correction
+    for old installs: the hub ships the fixed CLI, self-repair fixes the box.
+
+    scope '--user'  → direct write + user daemon-reload.
+    scope 'system'  → sudo -n ONLY (a password prompt would hang the agent
+                      loop — setup-scripts rule), and when sudo isn't
+                      passwordless we report the exact manual command instead
+                      of failing. Never restarts the service: file patch +
+                      daemon-reload only, so there is zero downtime.
+    Returns (fixed, message), or None when nothing needed doing."""
+    try:
+        text = path.read_text()
+    except OSError:
+        return None                      # unit doesn't exist here — fine
+    new, changed = _unit_add_startlimit(text)
+    if not changed:
+        return None                      # already bounded (idempotent)
+
+    def _run(cmd: list) -> int:
+        try:
+            return subprocess.run(cmd, capture_output=True, timeout=20).returncode
+        except Exception:
+            return 1
+
+    manual = (f"add StartLimitIntervalSec=300 + StartLimitBurst=3 to its "
+              f"[Unit] section, then: {'sudo ' if scope == 'system' else ''}"
+              f"systemctl {'--user ' if scope == '--user' else ''}daemon-reload")
+    if scope == "--user":
+        try:
+            path.write_text(new)
+        except OSError as e:
+            return (False, f"{path}: cannot write ({e}) — {manual}")
+        _run(["systemctl", "--user", "daemon-reload"])
+        return (True, f"{path}: crash-loop bound added (3 starts/5 min → failed)")
+    # system scope — sudo -n only, never prompt
+    if _run(["sudo", "-n", "true"]) != 0:
+        return (False, f"{path}: no passwordless sudo — {manual}")
+    tmp = tempfile.NamedTemporaryFile("w", suffix=".service", delete=False)
+    try:
+        tmp.write(new)
+        tmp.close()
+        rc = _run(["sudo", "-n", "cp", tmp.name, str(path)])
+    finally:
+        try:
+            os.unlink(tmp.name)
+        except OSError:
+            pass
+    if rc != 0:
+        return (False, f"{path}: sudo -n cp failed — {manual}")
+    _run(["sudo", "-n", "systemctl", "daemon-reload"])
+    return (True, f"{path}: crash-loop bound added (3 starts/5 min → failed)")
+
+
 def _self_repair(log_path) -> list:
     """Run automatic self-healing checks. Returns list of (fixed, message).
     Includes crash-loop circuit breaker: max 3 restarts per 5 minutes, then stops."""
@@ -2474,6 +2600,9 @@ def _self_repair(log_path) -> list:
             svc_content = f"""[Unit]
 Description=hivv AI node agent
 After=network.target
+# crash-loop bound: 3 starts / 5 min then failed, not an endless restart storm
+StartLimitIntervalSec=300
+StartLimitBurst=3
 
 [Service]
 Type=simple
@@ -2519,6 +2648,9 @@ WantedBy=default.target
                 good = f"""[Unit]
 Description=hivv AI node agent
 After=network.target
+# crash-loop bound: 3 starts / 5 min then failed, not an endless restart storm
+StartLimitIntervalSec=300
+StartLimitBurst=3
 
 [Service]
 Type=simple
@@ -2556,6 +2688,25 @@ WantedBy=default.target
                         fixes.append((False, "linger is OFF (node goes offline when you log out) — run: sudo loginctl enable-linger $USER"))
             except Exception:
                 pass
+
+    # 2c. OLD units shipped without crash-loop bounds (pre-2026-11-18) —
+    #     patch them in place. This is the remote correction: every bee's
+    #     agent runs this every ~10 min, so the whole fleet's hivv-agent and
+    #     llama units get StartLimit without touching a box by hand.
+    #     Additive only, daemon-reload only, never restarts a service.
+    if system == "Linux":
+        _ul = Path.home() / ".config" / "systemd" / "user"
+        for _up in (_ul / "hivv-agent.service", _ul / "llama.service",
+                    _ul / "llama-server.service",
+                    Path("/etc/systemd/system/hivv-agent.service"),
+                    Path("/etc/systemd/system/llama.service"),
+                    Path("/etc/systemd/system/llama-server.service")):
+            _scope = "--user" if str(_up).startswith(str(_ul)) else "system"
+            _res = _harden_unit_file(_up, _scope)
+            if _res:
+                fixes.append(_res)
+                log_path.write(f"[{time.strftime('%H:%M:%S')}] SELF-REPAIR: {_res[1]}\n")
+                log_path.flush()
 
     # 3. Fix localhost-only LLM bindings (ollama)
     if system == "Linux":
@@ -3534,6 +3685,21 @@ def _systemd_agent_state() -> str | None:
     except Exception:
         return None
 
+
+def _sd_reset_failed() -> None:
+    """Clear a tripped StartLimit so `hivv start` can try again.
+
+    systemd refuses to start a start-limited unit until reset-failed —
+    without this, a node whose agent hit the 3-per-5-min bound could never
+    be started by the CLI (only by a human running systemctl by hand)."""
+    if IS_WINDOWS:
+        return
+    try:
+        subprocess.run(["systemctl", "--user", "reset-failed", "hivv-agent.service"],
+                       capture_output=True, timeout=10)
+    except Exception:
+        pass
+
 # ── LLM component control (hivv start|stop|restart [all|agent|llm|ollama]) ──
 # The user model: `hivv <verb>` = EVERYTHING (agent + managed LLM + ollama if
 # present); a positional scope restarts just one part (crash recovery: only the
@@ -3602,25 +3768,41 @@ def _systemctl(scope: str, action: str, unit: str) -> int:
 
 
 def _service_state(unit: str) -> tuple[str, bool] | None:
-    """(scope, active) for a unit — '--user' or 'system'; None = no unit
-    (macOS has no systemctl → None, everything degrades to message-only)."""
+    """(scope, active) for a unit — '--user' or 'system'; None when the unit
+    does NOT exist in either scope (macOS has no systemctl → None too).
+
+    Probes with `show -p LoadState,ActiveState`, NOT `is-active`: on this
+    systemd is-active exits 3 ('inactive') for BOTH an existing-inactive unit
+    AND a nonexistent one (4 never happens), so the exit code cannot tell
+    existence apart — a phantom name used to look like a real stopped unit
+    (ashy 2026-11-18: start tried to launch never-installed
+    llama-server.service and gave up before reaching the real llama.service)."""
     for scope in ("--user", "system"):
-        cmd = ["systemctl"] + (["--user"] if scope == "--user" else []) + ["is-active", unit]
+        cmd = ["systemctl"] + (["--user"] if scope == "--user" else []) + \
+              ["show", unit, "-p", "LoadState,ActiveState", "--no-pager"]
         try:
             r = subprocess.run(cmd, capture_output=True, text=True, timeout=8)
         except Exception:
             continue
-        if r.returncode in (0, 3):   # 0=active, 3=inactive but EXISTS (4=no unit)
-            return scope, r.returncode == 0
+        out = r.stdout or ""
+        if "LoadState=not-found" in out or "LoadState=" not in out:
+            continue                      # this scope has no such unit
+        return scope, "ActiveState=active" in out
     return None
 
 
 def _llm_stop_component() -> tuple[bool, str]:
+    """Stop every llama we own: systemd units FIRST (a bare SIGTERM of a
+    unit's MainPID gets resurrected by Restart=on-failure), then EVERY
+    listener on the known ports — masjid's leftover qwen on :8081 survived a
+    stop that returned after reaping only the first pid (2026-11-18).
+    The comm guard in _llm_listener_pid ('llama' but never 'ollama') keeps
+    this from touching anything that isn't ours."""
     st = read_state() or {}
     llm = st.get("llm") or {}
     pid = int(llm.get("pid") or 0)
     # Known LLM ports even without a state record (old `llm setup` runs never
-    # recorded one) — the comm guard ('llama' but never 'ollama') keeps this safe.
+    # recorded one).
     ports = []
     if llm.get("port"):
         try:
@@ -3630,38 +3812,117 @@ def _llm_stop_component() -> tuple[bool, str]:
     for p in (8080, 8090, 8081, 8082):
         if p not in ports:
             ports.append(p)
-    if not pid:
-        for p in ports:
-            pid = _llm_listener_pid(p) or 0
-            if pid:
-                break
-    if pid and pid_alive(pid):
-        try:
-            os.kill(pid, signal.SIGTERM)
-            for _ in range(50):
-                if not pid_alive(pid):
-                    break
-                time.sleep(0.1)
-            if pid_alive(pid):
-                os.kill(pid, signal.SIGKILL)
-            _llm_state_set(pid=None)
-            return True, f"llama-server stopped (pid {pid})"
-        except ProcessLookupError:
-            _llm_state_set(pid=None)
-            return False, "llama-server already gone"
-        except OSError as e:
-            return False, f"could not stop llama-server: {e}"
+    did, msgs = False, []
+    # 1. units first — stopping through systemd, so nothing can resurrect them
     for unit in ("llama-server.service", "llama.service"):
         stt = _service_state(unit)
         if stt and stt[1]:
             rc = _systemctl(stt[0], "stop", unit)
             if rc == 0:
-                _llm_state_set(pid=None)
-                return True, f"{unit} stopped ({stt[0]})"
-            return False, f"{unit}: stop failed (rc={rc})"
+                did = True
+                msgs.append(f"{unit} stopped ({stt[0]})")
+            else:
+                msgs.append(f"{unit}: stop failed (rc={rc})")
+    # 2. every remaining llama listener — strays included
+    victims = set()
+    if pid and pid_alive(pid):
+        victims.add(pid)
+    for p in ports:
+        sp = _llm_listener_pid(p)
+        if sp:
+            victims.add(sp)
+    for vp in sorted(victims):
+        try:
+            os.kill(vp, signal.SIGTERM)
+            for _ in range(50):
+                if not pid_alive(vp):
+                    break
+                time.sleep(0.1)
+            if pid_alive(vp):
+                os.kill(vp, signal.SIGKILL)
+            did = True
+            msgs.append(f"llama-server stopped (pid {vp})")
+        except ProcessLookupError:
+            did = True                       # already gone — goal met
+            msgs.append(f"llama-server already gone (pid {vp})")
+        except OSError as e:
+            msgs.append(f"pid {vp}: {e}")
+    if did:
+        _llm_state_set(pid=None)
+        return True, " · ".join(msgs)
     if llm:
         return False, "recorded LLM is not running"
     return False, "no managed LLM (external server: stop it where it runs)"
+
+
+def _gpu_free_mib() -> tuple[int, int] | None:
+    """(free, total) VRAM in MiB, or None when there is no NVIDIA GPU
+    (CPU-only / macOS / no driver) — callers skip the gate then."""
+    try:
+        r = subprocess.run(["nvidia-smi", "--query-gpu=memory.free,memory.total",
+                            "--format=csv,noheader,nounits"],
+                           capture_output=True, text=True, timeout=6)
+        parts = [p.strip() for p in (r.stdout or "").strip().split(",")]
+        return int(parts[0]), int(parts[1])
+    except Exception:
+        return None
+
+
+def _gpu_consumers() -> str:
+    """Compact 'who is holding VRAM' line for gate messages (max 6 entries)."""
+    try:
+        r = subprocess.run(["nvidia-smi",
+                            "--query-compute-apps=pid,process_name,used_memory",
+                            "--format=csv,noheader"], capture_output=True, text=True, timeout=6)
+        lines = [ln.strip() for ln in (r.stdout or "").splitlines() if ln.strip()]
+        return "; ".join(lines[:6]) or "none listed"
+    except Exception:
+        return "unknown"
+
+
+def _llm_vram_gate(model_path: str, port: int) -> tuple[bool, str]:
+    """Pre-flight before spawning llama-server → (ok, msg).
+
+    masjid 2026-11-18: a stray qwen on :8081 plus a full 4 GB card meant the
+    first big hub prompt grew the CUDA pool into cuMemCreate → ggml_abort →
+    SIGABRT → systemd restart-storm forever. This gate refuses the two
+    GROSS mistakes (card already full · another llama owns a tight card) and
+    warns on thin headroom; StartLimit bounds whatever slips through.
+    ok=False → do not start (message says what to do). Override: HIVV_LLM_FORCE_START=1."""
+    if os.environ.get("HIVV_LLM_FORCE_START"):
+        return True, ""
+    free_total = _gpu_free_mib()
+    if free_total is None:
+        return True, ""                  # no NVIDIA GPU — nothing to gate
+    free, total = free_total
+    try:
+        file_mib = os.path.getsize(model_path) // (1024 * 1024)
+    except OSError:
+        return True, ""                  # caller already validated the file
+    headroom = file_mib + 768            # weights (worst case full offload) + KV/compute floor
+    if free < 1024:
+        return False, (f"GPU is full: {free}/{total} MiB free — llama-server "
+                       f"would abort on its first prompt. consumers: "
+                       f"{_gpu_consumers()}. Reap strays: {APP} stop llm · "
+                       f"override: HIVV_LLM_FORCE_START=1")
+    stray_port = stray_pid = None
+    for p in (8080, 8090, 8081, 8082):
+        if p == port:
+            continue
+        sp = _llm_listener_pid(p)
+        if sp:
+            stray_port, stray_pid = p, sp
+            break
+    if stray_port and free < headroom:
+        return False, (f"another llama-server already owns this GPU (:"
+                       f"{stray_port}, pid {stray_pid}) and only {free} MiB is "
+                       f"free (< {headroom} MiB needed) — one owner per GPU. "
+                       f"Run: {APP} stop llm · override: HIVV_LLM_FORCE_START=1")
+    if free < headroom:
+        return True, (f"thin VRAM headroom: {free} MiB free, ~{headroom} MiB "
+                      f"needed for {os.path.basename(model_path)} — a big prompt "
+                      f"may abort this server. consumers: {_gpu_consumers()}")
+    return True, ""
 
 
 def _llm_start_component() -> tuple[bool, str]:
@@ -3678,14 +3939,59 @@ def _llm_start_component() -> tuple[bool, str]:
         if info and os.path.exists(os.path.join(_LLAMA_CPP_MODELS, info["file"])):
             llm = {"model": dflt, "port": 8080, "host": "127.0.0.1", "ctx": 4096}
             model = dflt
-        else:
-            return False, f"no LLM configured — set one up: {APP} llm setup"
+        # no default on disk → leave model EMPTY: a systemd-managed unit below
+        # doesn't need it (its ExecStart carries the model), so the
+        # "no LLM configured" bail moves AFTER the unit loop
     port = int(cfg.get("port") or llm.get("port") or 8080)
     host = str(cfg.get("host") or llm.get("host") or "127.0.0.1")
     ctx = int(cfg.get("ctx") or llm.get("ctx") or 4096)
     if _llm_alive_port(port):
-        _llm_state_set(model=model, port=port, host=host, ctx=ctx)
+        _llm_state_set(model=model or None, port=port, host=host, ctx=ctx)
         return False, f"LLM already serving on :{port}"
+    # A managed unit exists → start it THROUGH systemd. Stop already knows
+    # about units (it stops them), so start must too: after `hivv stop llm`
+    # killed llama.service, `hivv start llm` used to spawn an orphan on the
+    # configured port instead of reviving the unit — and when that port isn't
+    # the unit's port, the orphan died on bind while the unit sat inactive
+    # forever (ashy 2026-11-18). One owner, both directions.
+    for _unit in ("llama-server.service", "llama.service"):
+        _stt = _service_state(_unit)
+        if not _stt:
+            continue
+        _scope, _active = _stt
+        _known = [port, 8090, 8081, 8082]
+        if _active:
+            for _p in _known:
+                if _llm_alive_port(_p):
+                    _llm_state_set(model=model or None, port=_p, host=host, ctx=ctx)
+                    return False, f"LLM already serving on :{_p} ({_unit})"
+            _rc = _systemctl(_scope, "restart", _unit)   # hung unit → bounce it
+        else:
+            # Gate before start: old units have no ExecStartPre guard; the
+            # gate refuses a full card, StartLimit bounds whatever slips through.
+            _info = _GGUF_MODELS.get(model)
+            _mp = os.path.join(_LLAMA_CPP_MODELS, _info["file"]) if _info else ""
+            if _mp and os.path.exists(_mp):
+                g_ok, g_msg = _llm_vram_gate(_mp, port)
+                if not g_ok:
+                    return False, g_msg
+                if g_msg:
+                    warn(g_msg)
+            _rc = _systemctl(_scope, "start", _unit)
+        if _rc != 0:
+            _jc = ("journalctl " + ("--user " if _scope == "--user" else "")
+                   + f"-u {_unit} -n 20")
+            return False, f"{_unit}: start failed (rc={_rc}) — see: {_jc}"
+        for _ in range(120):   # big GGUFs load slowly under systemd
+            time.sleep(0.5)
+            for _p in _known:
+                if _llm_alive_port(_p):
+                    _llm_state_set(model=model or None, port=_p, host=host, ctx=ctx)
+                    return True, f"{_unit} started (systemd) — serving on :{_p}"
+        return True, f"{_unit} started (systemd) — still loading; verify: {APP} llm status"
+    if not model:
+        # no unit either — nothing manages an LLM here
+        return False, f"no LLM configured — set one up: {APP} llm setup"
     info = _GGUF_MODELS.get(model)
     if not info:
         return False, f"unknown recorded model {model!r} — re-run: {APP} llm setup"
@@ -3700,6 +4006,11 @@ def _llm_start_component() -> tuple[bool, str]:
         return False, f"model file problem: {reason} — {APP} llm pull-gguf {model}"
     cmd = [srv, "-m", model_path, "-c", str(ctx), "--host", host,
            "--port", str(port)] + _llm_extra_args()
+    g_ok, g_msg = _llm_vram_gate(model_path, port)
+    if not g_ok:
+        return False, g_msg
+    if g_msg:
+        warn(g_msg)
     try:
         STATE_DIR.mkdir(parents=True, exist_ok=True)
         log_path = STATE_DIR / "llama-setup.log"
@@ -3832,6 +4143,7 @@ def cmd_start(args) -> None:
     # systemctl start there would block on the very job we're part of.
     if sd is not None and sd not in ("active", "activating"):
         try:
+            _sd_reset_failed()   # a start-limited unit won't start until cleared
             r = subprocess.run(["systemctl", "--user", "start", "hivv-agent.service"],
                                capture_output=True, text=True, timeout=20)
             if r.returncode == 0:
@@ -3956,6 +4268,7 @@ def cmd_restart(args) -> None:
     if sd is not None:
         # atomic within systemd — no stop/start window for a duplicate to slip in
         try:
+            _sd_reset_failed()   # a start-limited unit won't restart until cleared
             r = subprocess.run(["systemctl", "--user", "restart", "hivv-agent.service"],
                                capture_output=True, text=True, timeout=30)
             if r.returncode == 0:
@@ -4374,7 +4687,10 @@ def cmd_call(args) -> None:
     force_local = getattr(args, "local", False)
     if force_local or _tools_running():
         try:
-            import urllib.request
+            # NO `import urllib.request` here — the module imports it already,
+            # and a function-level import made `urllib` local to cmd_call, so
+            # the hive-routing path below (which runs when the local tools
+            # server is NOT up) died with UnboundLocalError.
             local_path = f"http://localhost:{TOOLS_PORT}/{tool}"
             if params:
                 local_path += "?" + "&".join(f"{k}={urllib.parse.quote(str(v))}" for k, v in params.items())
@@ -5243,9 +5559,10 @@ def cmd_repair(args) -> None:
 
 
 def cmd_update(args) -> None:
+    global _UPDATE_FORCE
     url = getattr(args, "from_url", None) or f"{HUB.rstrip('/')}/hivv-cli.py"
     sha = getattr(args, "sha256", None)
-    target = INSTALL_DIR / f"{APP}-cli.py"
+    target, in_source_tree = _update_target()
 
     # --show-review: surface the cached review verdict without touching anything
     if getattr(args, "show_review", False):
@@ -5282,8 +5599,9 @@ def cmd_update(args) -> None:
             "Run with --force to override, or remove the dev marker to update normally.")
     if getattr(args, "force", False) and _is_dev_mode():
         warn("force updating despite dev mode — this will overwrite your local changes!")
-    if not target.exists():
-        target = Path(__file__).resolve()
+    if in_source_tree and getattr(args, "force", False):
+        _UPDATE_FORCE = True
+        warn(f"force updating inside a git checkout — {target} will be overwritten")
     try:
         data = _http_get_bytes(url, timeout=30)
     except Exception as e:
@@ -5308,6 +5626,22 @@ def cmd_update(args) -> None:
                 else:
                     print(f"  \033[33m!\033[0m agent not running — start it with: {APP} start")
             return
+    # Running from a git checkout: the file we would overwrite is the user's
+    # SOURCE, not an install. Only reached when the content actually DIFFERS
+    # (an identical file needs no write — that keeps `hivv update` working on
+    # the hub host, where the served file IS the source of truth).
+    if in_source_tree and not getattr(args, "force", False):
+        die("refusing to update inside a git checkout — that would overwrite "
+            "your source tree.\n"
+            f"  running from: {target}\n"
+            "  install the CLI to a prefix instead (it lands in "
+            f"~/.local/lib/{APP}/ and ~/.local/bin/{APP}):\n"
+            "    ./setup.sh          # from a clone\n"
+            f"    or see {HUB.rstrip('/')}/cli.html for the standalone install\n"
+            "  already installed? then run the update from the installed copy:\n"
+            f"    {APP} update\n"
+            "  (override with --force if you really mean to overwrite the file)")
+
     log(f"fetching {url}")
     # ── pre-apply review: static scan + local/hive LLM vote ──────────
     # Suspicious → block + report to hub (override with --force, or skip
@@ -8471,6 +8805,11 @@ def _do_chat(msg: str, stream: bool = True, mode: str | None = None,
 
             # Probe context window size per (ip, port) so we can fill the context
             def _ctx_size(ip, port):
+                # Import HERE, not in the enclosing scope: `_do_chat` does
+                # `import urllib.request` further down, which makes `urllib`
+                # a LOCAL of _do_chat — the closure here then read an
+                # unbound cell and every probe silently fell back to 8192.
+                import urllib.request
                 try:
                     req = urllib.request.Request(f"http://{ip}:{port}/props",
                         headers={"Content-Type": "application/json"}, timeout=3)
@@ -8524,7 +8863,11 @@ def _do_chat(msg: str, stream: bool = True, mode: str | None = None,
                         if think_off:
                             payload_dict["chat_template_kwargs"] = {"enable_thinking": False}
                         payload = json.dumps(payload_dict)
-                        import urllib.request, socket as _sock
+                        # NO `import urllib.request` here: the module already
+                        # imports it, and a function-level import made
+                        # `urllib` a LOCAL of _do_chat — the HUB-FALLBACK path
+                        # below then hit an unbound local and `hivv chat`
+                        # crashed whenever no direct node could answer.
                         _t0_ns = time.time()
                         req = urllib.request.Request(url, data=payload.encode(),
                                                      headers={"Content-Type": "application/json"})
@@ -8975,6 +9318,11 @@ def _fail(s): return f"\033[31m✗\033[0m {s}"
 def cmd_doctor(args) -> None:
     """One-glance health report: install + hub + agent + local bee + version.
     Output is pasteable for support — pure text + ANSI colors only."""
+    import tempfile   # function-scope: the --fix branches below use it, and a
+                      # nested `import tempfile` in ONE branch makes Python
+                      # treat the name as local for the WHOLE function — the
+                      # other branch then died with UnboundLocalError, which
+                      # broke the very command that repairs a broken install.
     print(f"\033[1m{APP} doctor\033[0m — {time.strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"hub = {HUB}   client = {VERSION}")
 
@@ -9289,7 +9637,6 @@ def cmd_doctor(args) -> None:
                     override_dir = candidate + ".d"
                     override_file = f"{override_dir}/hivv-network.conf"
                     _r(f"sudo mkdir -p {override_dir}")
-                    import tempfile
                     tmp = tempfile.NamedTemporaryFile(mode='w', suffix='.conf', delete=False)
                     tmp.write('[Service]\nEnvironment="OLLAMA_HOST=0.0.0.0:11434"\n')
                     tmp.close()
@@ -9334,6 +9681,9 @@ def cmd_doctor(args) -> None:
             svc_content = f"""[Unit]
 Description=hivv AI node agent
 After=network.target
+# crash-loop bound: 3 starts / 5 min then failed, not an endless restart storm
+StartLimitIntervalSec=300
+StartLimitBurst=3
 
 [Service]
 Type=simple
@@ -12639,6 +12989,11 @@ def cmd_llm_serve_llama(args):
 
     cmd = [srv_bin, "-m", model_path, "-c", str(ctx_size), "--host", host,
            "--port", str(port)] + _llm_extra_args()
+    g_ok, g_msg = _llm_vram_gate(model_path, port)
+    if not g_ok:
+        die(g_msg)
+    if g_msg:
+        warn(g_msg)
     print(f"\033[1m{APP} llm serve-llama {model_key}\033[0m")
     print(f"  model : {model_path}")
     print(f"  server : http://{host}:{port}")
@@ -12763,6 +13118,11 @@ def cmd_llm_setup(args) -> None:
     else:
         cmd = [srv_bin, "-m", model_path, "-c", str(ctx), "--host", host,
                "--port", str(port)] + _llm_extra_args()
+        g_ok, g_msg = _llm_vram_gate(model_path, port)
+        if not g_ok:
+            die(g_msg)
+        if g_msg:
+            warn(g_msg)
         try:
             STATE_DIR.mkdir(parents=True, exist_ok=True)
             log_path = STATE_DIR / "llama-setup.log"
