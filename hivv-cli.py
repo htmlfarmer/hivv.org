@@ -3659,22 +3659,40 @@ def _relay_endpoints() -> list[str]:
     real ones —8090, custom ports, a second slot), legacy list as backstop.
 
     `_llm_alive_port` filters by an OpenAI-shaped /v1/models answer, so a web
-    app squatting :8080 (ashy) is skipped instead of wasting a 40s timeout."""
+    app squatting :8080 (ashy) is skipped instead of wasting a 40s timeout.
+    Dedup is by HOST:PORT, not full URL — `127.0.0.1:8090` and `localhost:8090`
+    are the same llama-server and would otherwise be tried twice."""
     eps: list[str] = []
+    seen: set[str] = set()
+    _LOOPBACK = {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
+
+    def _add(u: str) -> None:
+        try:
+            pr = urllib.parse.urlsplit(u)
+            host = (pr.hostname or "").lower()
+            # loopback aliases are ONE machine — canonicalise so the detected
+            # `127.0.0.1:8090` shadows the legacy `localhost:8090`.
+            if host in _LOOPBACK:
+                host = "loopback"
+            key = f"{host}:{pr.port or ''}"
+        except ValueError:
+            key = u
+        if key in seen:
+            return
+        seen.add(key)
+        eps.append(u)
+
     try:
         for p in _local_llm_ports():
             try:
                 if _llm_alive_port(int(p)):
-                    u = f"http://127.0.0.1:{int(p)}/v1/chat/completions"
-                    if u not in eps:
-                        eps.append(u)
+                    _add(f"http://127.0.0.1:{int(p)}/v1/chat/completions")
             except (TypeError, ValueError):
                 continue
     except Exception:
         pass
     for u in _RELAY_LOCAL_ENDPOINTS:
-        if u not in eps:
-            eps.append(u)
+        _add(u)
     return eps
 
 def _run_relay_job(payload: dict, log_path) -> None:
@@ -7775,11 +7793,14 @@ _BEE_CHAT_VERBS = ("ask", "talk", "chat")
 def _find_node(name: str, nodes: list) -> dict | None:
     """Resolve a bee by exact id/name first, then substring — so `ask`, `talk`,
     `node`, `bee` and `reach` all agree on what a bee is called."""
+    name = str(name or "").strip().lower()
+    if not name:
+        return None          # "" is a substring of EVERY name — never match all
     for n in nodes:
-        if str(n.get("id", "")).lower() == name.lower() or str(n.get("name", "")).lower() == name.lower():
+        if str(n.get("id", "")).lower() == name or str(n.get("name", "")).lower() == name:
             return n
     for n in nodes:
-        if name.lower() in str(n.get("id", "")).lower() or name.lower() in str(n.get("name", "")).lower():
+        if name in str(n.get("id", "")).lower() or name in str(n.get("name", "")).lower():
             return n
     return None
 
@@ -14548,9 +14569,10 @@ def cmd_llm_serve_llama(args):
     # raw `couldn't bind HTTP server socket ... port: 8080` (yalla 2026-11-18).
     # Re-running serve must be a friendly no-op, never a crash.
     if _llm_alive_port(port):
-        cur = str(((read_state() or {}).get("llm") or {}).get("model") or "unknown model")
-        print(f"  \033[32m✓ already serving on :{port}\033[0m ({cur}) — nothing to start")
-        if cur != model_key:
+        cur = str(((read_state() or {}).get("llm") or {}).get("model") or "")
+        head = f"already serving on :{port}" + (f" ({cur})" if cur else "")
+        print(f"  \033[32m✓ {head}\033[0m — nothing to start")
+        if cur and cur != model_key:
             print(f"    switch models: {APP} stop llm && {APP} llm serve-llama {model_key}")
         else:
             print(f"    stop: {APP} stop llm   ·   foreground: {APP} stop llm && {APP} llm serve-llama {model_key}")
