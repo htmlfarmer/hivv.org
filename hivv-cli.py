@@ -8108,25 +8108,52 @@ def cmd_node_chat(args) -> None:
     name = str(getattr(args, "name", "") or "").strip()
     raw = getattr(args, "message", None) or []
     msg = " ".join(str(x) for x in raw).strip()
+
+    # Output modes (see the parser): json beats details beats quiet.
+    as_json = bool(getattr(args, "json_output", False))
+    quiet = bool(getattr(args, "quiet", False))
+    details = bool(getattr(args, "details", False))
+    show_ui = not (as_json or quiet)   # banner + progress lines
+
+    def _fail(m: str, code: int = 1):
+        """ONE failure path for both modes: a JSON consumer must get JSON
+        on stdout even when things go wrong (exit code still nonzero) —
+        parsing human error text is exactly what --json exists to avoid."""
+        if as_json:
+            print(json.dumps({"ok": False, "error": str(m)}))
+            sys.exit(code)
+        die(str(m), code)
+
+    # Thinking OFF by default — the SAME rule `hivv chat` and the hub router
+    # use. yalla's gemma is a REASONING model: with thinking on it streams a
+    # `reasoning_content` preamble ("Thinking Process: …") for ~11 seconds
+    # before the first real token, so a casual `ask whats up` measured
+    # first-token 14.6s of a 16.0s reply — that preamble IS the slowness
+    # people feel (2026-11-19). Opt back in: HIVV_THINK=1.
+    _think_env = os.environ.get("HIVV_THINK", "").strip().lower()
+    think_off = (_think_env not in ("1", "on", "yes")) or bool(NO_THINK)
+
     if not name or not msg:
         # `hivv ask "whats up"` (quoted, no bee) is a hive question wearing the
         # wrong verb — point at the right one instead of just refusing.
         if name and not msg and " " in name:
-            die(f"that looks like a question for the HIVE, not one bee:\n"
-                f"    {APP} chat \"{name}\"\n"
-                f"    (to pin a bee: {APP} ask <bee> \"<msg>\")")
-        die("usage: hivv ask <bee> <message>\n"
-            f"    e.g.  {APP} ask ashy \"whas up\"\n"
-            f"    alias: {APP} talk <bee> <msg>  ·  {APP} node-chat <bee> <msg>\n"
-            f"    no bee in mind? {APP} chat <msg> asks the whole hive")
+            _fail(f"that looks like a question for the HIVE, not one bee: "
+                  f'use {APP} chat "{name}" (to pin a bee: {APP} ask <bee> "<msg>")')
+        _fail("usage: hivv ask <bee> <message> — e.g. "
+              f'{APP} ask ashy "whas up"  ·  alias: {APP} talk <bee> <msg>')
 
     # Find the bee
     code, p = http("GET", "/api/control/nodes")
     if code != 200 or not isinstance(p, dict):
-        die(f"failed to fetch nodes: {p}")
+        _fail(f"failed to fetch nodes: {p}")
     nodes = p.get("nodes", [])
     match = _find_node(name, nodes)
     if not match:
+        available = [f"{n.get('id', '?')} ({n.get('status', '?')})" for n in nodes]
+        if as_json:
+            print(json.dumps({"ok": False, "error": f"bee '{name}' not found",
+                              "available": available}))
+            sys.exit(1)
         print(f"bee '{name}' not found — available:")
         for n in nodes:
             print(f"  {n.get('id', '?')} ({n.get('name', '?')}) — {n.get('status', '?')}")
@@ -8139,7 +8166,7 @@ def cmd_node_chat(args) -> None:
     label = str(match.get("name") or match.get("id") or name)
     ip = str(match.get("lan_ip") or match.get("ip") or "")
     if not ip:
-        die(f"bee '{label}' has no IP address")
+        _fail(f"bee '{label}' has no IP address")
 
     # This box IS that bee → localhost (a model bound to 127.0.0.1 refuses its
     # own LAN IP; same rule `hivv chat`'s direct loop already uses).
@@ -8156,7 +8183,7 @@ def cmd_node_chat(args) -> None:
     # this works the moment the server is actually up.
     ports_to_try = _node_llm_ports(match)
     if not ports_to_try:
-        die(f"bee '{label}' has no LLM — run on that box: {APP} llm status"
+        _fail(f"bee '{label}' has no LLM — run on that box: {APP} llm status"
             + ("" if models else "  (no models reported yet — the heartbeat may just be catching up)"))
 
     # TCP preflight: never print "chatting with X (:8090)" for a port that is
@@ -8165,21 +8192,33 @@ def cmd_node_chat(args) -> None:
     open_ports = [pt for pt in ports_to_try if _tcp_ok(ip, pt, timeout=0.6)]
 
     sent = False
+    # The transaction we will report (json / --details / the footer all
+    # read from this — one measurement, three presentations).
+    tx: dict = {"ok": False, "bee": label, "endpoint": "", "transport": "direct",
+                "reply": "", "tokens": 0, "duration_s": None,
+                "ttft_s": None, "tok_per_s": None, "errors": []}
+
     for port in open_ports:
         url = f"http://{ip}:{port}/v1/chat/completions"
-        payload = json.dumps({
+        payload_dict = {
             "model": "local",
             "messages": [{"role": "user", "content": msg}],
             "stream": True,
             "max_tokens": 500
-        })
+        }
+        if think_off:
+            payload_dict["chat_template_kwargs"] = {"enable_thinking": False}
+        payload = json.dumps(payload_dict)
 
-        print(f"\n\033[1mchatting with {label}\033[0m ({ip}:{port})")
-        print(f"  {msg}")
-        print()
+        if show_ui:
+            print(f"\n\033[1mchatting with {label}\033[0m ({ip}:{port})")
+            print(f"  {msg}")
+            print()
 
+        buf: list = []
         try:
             start_time = time.time()
+            ttft = None
             tokens = 0
             req = urllib.request.Request(url, data=payload.encode(),
                                          headers={"Content-Type": "application/json"})
@@ -8193,48 +8232,111 @@ def cmd_node_chat(args) -> None:
                         delta = evt.get("choices", [{}])[0].get("delta", {})
                         content = delta.get("content", "")
                         if content:
-                            print(content, end="", flush=True)
+                            if ttft is None:
+                                ttft = time.time() - start_time
+                            if as_json:
+                                buf.append(content)   # never mix progress into JSON
+                            else:
+                                print(content, end="", flush=True)
                             tokens += 1
                     except (json.JSONDecodeError, IndexError, KeyError):
                         pass
             elapsed = time.time() - start_time
             tps = tokens / elapsed if elapsed > 0 else 0
-            print(f"\n  \033[2m{tokens} tokens · {tps:.1f} tok/s · {elapsed:.1f}s\033[0m\n")
+            tx.update(ok=True, endpoint=url, reply="".join(buf), tokens=tokens,
+                      duration_s=round(elapsed, 2),
+                      ttft_s=round(ttft, 2) if ttft is not None else None,
+                      tok_per_s=round(tps, 1))
+
+            if as_json:
+                print(json.dumps(tx))
+                return
+            if details:
+                print(f"\n  \033[1m── transaction ──\033[0m")
+                print(f"  endpoint   {url}")
+                print(f"  thinking   {'off (HIVV_THINK=1 to enable)' if think_off else 'ON'}")
+                print(f"  transport  direct ({'loopback' if ip == '127.0.0.1' else 'lan'}: {ip}:{port})")
+                if ttft is not None:
+                    print(f"  first tok  {ttft:.2f}s")
+                print(f"  full reply {elapsed:.1f}s · {tokens} tokens · {tps:.1f} tok/s")
+                print()
+            elif not quiet:
+                _tnoun = "token" if tokens == 1 else "tokens"
+                foot = f"{tokens} {_tnoun} · {tps:.1f} tok/s · {elapsed:.1f}s"
+                if ttft is not None:
+                    foot += f" · first token {ttft:.2f}s"
+                print(f"\n  \033[2m{foot}\033[0m\n")
             sent = True
             break
         except Exception as e:
-            print(f"  \033[33m!\033[0m port {port} failed: {e}")
+            tx["errors"].append(f":{port} {e}")
+            if show_ui:
+                print(f"  \033[33m!\033[0m port {port} failed: {e}")
             continue
 
     if sent:
         return
 
     if not open_ports:
-        print(f"\n  \033[33m!\033[0m no open LLM port on {label} ({ip}) — "
-              f"tried {', '.join(str(x) for x in ports_to_try)}")
-        print(f"    a model bound to localhost only refuses LAN connections — "
-              f"on that box: {APP} llm status")
+        tx["errors"].append(f"no open LLM port (tried {ports_to_try})")
+        if show_ui:
+            print(f"\n  \033[33m!\033[0m no open LLM port on {label} ({ip}) — "
+                  f"tried {', '.join(str(x) for x in ports_to_try)}")
+            print(f"    a model bound to localhost only refuses LAN connections — "
+                  f"on that box: {APP} llm status")
     else:
-        print(f"\n  \033[31m✗\033[0m every open port on {label} failed")
+        tx["errors"].append("every open port failed")
+        if show_ui:
+            print(f"\n  \033[31m✗\033[0m every open port on {label} failed")
 
     # Fallback: the HUB RELAY, pinned to this bee — the only path that reaches
     # a localhost-bound model. Never a plain /api/chat (that answers from
     # whoever is free and calls it this bee).
-    print(f"  \033[2mtrying the hub relay → {label} …\033[0m")
+    if show_ui:
+        print(f"  \033[2mtrying the hub relay → {label} …\033[0m")
+    t_rel = time.time()
     status, text = _relay_chat_to_bee(str(match.get("id") or label), msg)
+    rel_dur = round(time.time() - t_rel, 2)
     if status == "ok" and text:
-        print(f"\033[2m(via hub relay → {label})\033[0m")
-        print(f"\n  {text}\n")
+        if as_json:
+            print(json.dumps({"ok": True, "bee": label, "transport": "relay",
+                              "endpoint": f"hub relay → inbox of {label}",
+                              "reply": text, "duration_s": rel_dur,
+                              "tokens": None, "ttft_s": None, "tok_per_s": None,
+                              "errors": tx["errors"]}))
+            return
+        if details:
+            print(f"\n  \033[1m── transaction ──\033[0m")
+            print(f"  endpoint   hub relay → inbox of {label}")
+            print(f"  transport  relay (direct path unavailable)")
+            print(f"  duration   {rel_dur}s (hub round-trip — no per-token stats)")
+            print(f"\n  {text}\n")
+        elif quiet:
+            print(text)
+        else:
+            if show_ui:
+                print(f"\033[2m(via hub relay → {label})\033[0m")
+            print(f"\n  {text}\n")
         return
 
-    print(f"\n  \033[31m✗\033[0m {label} didn't answer")
-    if status == "refused":
-        print(f"    relay refused: {text}")
-        print(f"    → turn on sharing on that box: {APP} volunteer on")
+    # relay failed too
+    if as_json:
+        print(json.dumps({"ok": False, "bee": label, "transport": "relay",
+                          "error": f"relay {status}: {text}",
+                          "duration_s": rel_dur, "errors": tx["errors"]}))
+        sys.exit(1)
+    if show_ui:
+        print(f"\n  \033[31m✗\033[0m {label} didn't answer")
+        if status == "refused":
+            print(f"    relay refused: {text}")
+            print(f"    → turn on sharing on that box: {APP} volunteer on")
+        else:
+            print(f"    relay: {text}")
+        print(f"    → check the bee: {APP} reach {label} · on that box: {APP} llm status")
+        print(f"    → or ask the hive: {APP} chat \"{msg}\"")
     else:
-        print(f"    relay: {text}")
-    print(f"    → check the bee: {APP} reach {label} · on that box: {APP} llm status")
-    print(f"    → or ask the hive: {APP} chat \"{msg}\"")
+        # quiet/json never pollute stdout with prose: the error goes to stderr
+        print(f"{label} didn't answer (relay {status}: {text})", file=sys.stderr)
     sys.exit(1)
 
 def cmd_reach(args) -> None:
@@ -12238,6 +12340,16 @@ def cmd_speeds(args) -> None:
         except (TypeError, ValueError):
             return None
 
+    # Numeric columns sometimes arrive as STRINGS (pg numeric → JSON), and
+    # `sum(['1', '2'])` raised TypeError — `hivv speeds` crashed on its own
+    # data in three places (summary, by-user, by-bee rollups). Normalise
+    # ONCE here so every consumer gets numbers; coercing at each read site
+    # missed the rollup and the crash came back.
+    for _r in rows:
+        for _k in ("duration_ms", "ttfb_ms", "tokens_per_sec"):
+            if _k in _r:
+                _r[_k] = _f(_r[_k])
+
     durs = sorted(d for d in (r.get("duration_ms") for r in rows) if d is not None)
     # non-stream rows record ttfb == duration BY DEFINITION — excluding them
     # keeps the first-token average an honest streaming measurement.
@@ -12250,9 +12362,9 @@ def cmd_speeds(args) -> None:
         return vals[min(len(vals) - 1, int(q * len(vals)))] if vals else None
 
     def _ms(v):
+        v = _f(v)
         if v is None:
             return "—"
-        v = float(v)
         return f"{v / 1000:.1f}s" if v >= 1000 else f"{v:.0f}ms"
 
     def _avg(vals, nd=0):
@@ -16961,6 +17073,20 @@ def build_parser() -> argparse.ArgumentParser:
         # hive-routing hint) instead of argparse's terse "required: name".
         _sp.add_argument("name", nargs="?", default="", help="bee name or id to chat with")
         _sp.add_argument("message", nargs="*", help="message to send")
+        # Output modes — the reply is the same; only the packaging differs:
+        #   default  banner + reply + timing footer
+        #   --json   ONE JSON object on stdout (even on failure) — for AIs
+        #            and scripts; no ANSI, no progress lines
+        #   --quiet  reply TEXT ONLY (streamed) — no banner, no stats: the
+        #            mode an AI wants when it is feeding the answer onward
+        #   --details/--verbose  the network transaction: endpoint,
+        #            transport (direct|relay), first-token, full timing
+        _sp.add_argument("--json", dest="json_output", action="store_true",
+                         help="one JSON object on stdout: reply + timing + transport")
+        _sp.add_argument("--quiet", "-q", action="store_true",
+                         help="reply text only — no banner, no stats footer")
+        _sp.add_argument("--details", "--verbose", dest="details", action="store_true",
+                         help="show the network transaction (endpoint, transport, timing)")
     sp_r = sub.add_parser("reach",      help="test connectivity to another node on the network")
     sp_r.add_argument("name", nargs="+", help="node name or id to reach")
     sp_bees = sub.add_parser("bees",      help="all bees in the hive — alias for nodes 🐝")
