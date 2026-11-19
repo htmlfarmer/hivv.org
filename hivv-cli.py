@@ -232,6 +232,15 @@ def _is_dev_mode() -> bool:
     ]:
         if candidate.exists():
             return True
+    # Running THROUGH a link (`hivv link`) means running from a checkout:
+    # `git pull` is your update path, so the auto-updater must stand aside.
+    # Without this the update loop would try every 5 min and be refused by
+    # the source-tree guard every time — noise with no way to win.
+    try:
+        if Path(__file__).is_symlink():
+            return True
+    except OSError:
+        pass
     return False
 
 
@@ -265,7 +274,18 @@ def _update_target() -> tuple[Path, bool]:
     Installed layout: <prefix>/lib/hivv/hivv-cli.py — the normal case.
     Running in place (no install): the file being executed — flagged when it
     sits inside a git checkout, which must never be overwritten.
+    Running THROUGH a link (`hivv link`): the LINK path is the target —
+    that is the file the wrapper execs and the only one an update may
+    replace. Replacing the link (never writing through it) keeps the clone
+    it points at untouched, and the worktree flag below still refuses the
+    overwrite unless --force.
     """
+    me = Path(__file__)
+    try:
+        if me.is_symlink():
+            return me, _in_git_worktree(me)
+    except OSError:
+        pass
     target = INSTALL_DIR / f"{APP}-cli.py"
     if not target.exists():
         target = Path(__file__).resolve()
@@ -1212,6 +1232,224 @@ def cmd_rollback(args) -> None:
     print(f"  the previous copy is kept as {bad.name} (sha {cur_sha[:12]}…)")
     print(f"  forward again: {APP} update")
     print()
+
+# ── link/unlink: WHICH copy runs, chosen explicitly ──────────────────────
+# THE PROBLEM (it bites in both orders)
+#   curl-install → later `git clone`: `hivv` keeps running the INSTALLED
+#     copy; the clone sits inert and ROTS — edits do nothing, silently.
+#   `git clone` → later curl-install: the installer overwrites the active
+#     copy with the hub version; the clone's work vanishes from the path
+#     that matters.
+# Two copies of the truth, and nothing says which one is live.
+#
+# THE RULE: one active copy, chosen explicitly, always visible.
+#   Someone who clones is saying "I intend to modify this" — so a clone
+#   SHOULD be primary, but by saying so (`hivv link`), not by accident.
+#   `hivv status` always shows which file is executing and where it came
+#   from, so the answer is never a guess.
+#
+# WHY A LINK AND NOT A COPY
+#   A copy goes stale the moment you edit the clone — that IS the rot
+#   problem. A symlink keeps `git pull` = instant effect on `hivv`. The
+#   wrapper self-heals if the clone disappears (its healthcheck follows a
+#   broken link → re-downloads a hub copy), and `hivv update` refuses to
+#   overwrite a source tree, so the link can never silently destroy work.
+
+def _installed_client_path() -> Path | None:
+    """Where the PATH wrapper looks for the client — or None.
+
+    Resolution mirrors the WRAPPER's own logic (the wrapper computes
+    CLIENT_FILE relative to ITSELF: <prefix>/bin/hivv →
+    <prefix>/lib/hivv/hivv-cli.py), because that is the file that actually
+    runs. Falling back to INSTALL_DIR covers running from an install.
+    """
+    w = shutil.which(APP)
+    if w:
+        try:
+            wp = Path(w).resolve()
+        except OSError:
+            wp = Path(w)
+        if wp.parent.name == "bin":
+            cand = wp.parent.parent / "lib" / APP / f"{APP}-cli.py"
+            if cand.parent.is_dir():
+                return cand
+    cand = INSTALL_DIR / f"{APP}-cli.py"
+    if INSTALL_DIR.is_dir():
+        return cand
+    return None
+
+
+def _active_cli_info() -> dict:
+    """What is executing RIGHT NOW: path, link target, origin.
+
+    Purely descriptive — `hivv status` uses it so 'which copy runs?' is
+    always answerable at a glance.
+    """
+    me = Path(__file__)
+    info = {"path": str(me), "is_link": False, "link_target": "",
+            "origin": "installed", "display": str(me)}
+    try:
+        info["is_link"] = me.is_symlink()
+    except OSError:
+        pass
+    if info["is_link"]:
+        try:
+            tgt = me.resolve()
+            info["link_target"] = str(tgt)
+            in_tree = _in_git_worktree(tgt)
+            info["origin"] = "clone-link" if in_tree else "link"
+            rel = _pretty_path(tgt)
+            info["display"] = f"{_pretty_path(me)} → {rel} (clone link)"
+        except OSError:
+            info["origin"] = "broken-link"
+            info["display"] = f"{_pretty_path(me)} (BROKEN link)"
+    elif _in_git_worktree(me):
+        info["origin"] = "source-tree"
+        info["display"] = f"{_pretty_path(me)} (source tree)"
+    return info
+
+
+def _pretty_path(p: Path) -> str:
+    """~/… instead of /home/you/… — the display half of 'which copy runs?'."""
+    try:
+        return str(p).replace(str(Path.home()), "~", 1)
+    except Exception:
+        return str(p)
+
+
+def cmd_link(args) -> None:
+    """Make YOUR CLONE the copy that `hivv` runs.
+
+    `hivv link`              → link ./public_html/hivv-cli.py (this clone)
+    `hivv link <path>`       → link that hivv-cli.py instead
+    `hivv unlink`            → go back to a standalone copy
+
+    WHY: two copies of the truth (installed vs clone) with nothing saying
+    which is live is how a clone rots — you edit it, `hivv` doesn't change,
+    and nobody notices. A clone is an intent to modify, so it should be
+    primary — explicitly. From then on `git pull` IS your `hivv update`.
+    """
+    raw = getattr(args, "path", None)
+    # locate the clone's client: explicit arg, else this clone (cwd walk)
+    if raw:
+        cand = Path(str(raw)).expanduser()
+        if cand.is_dir():
+            cand = cand / "public_html" / f"{APP}-cli.py"
+    else:
+        cand = None
+        cur = Path.cwd()
+        for d in [cur, *cur.parents]:
+            c = d / "public_html" / f"{APP}-cli.py"
+            if c.exists():
+                cand = c
+                break
+    if cand is None or not cand.exists():
+        die(f"no {APP}-cli.py found"
+            + (f" at {raw}" if raw else " in this clone (or above it)")
+            + f"\n  usage: {APP} link <path/to/hivv-cli.py>"
+            + f"\n  or run this from your clone: cd ~/hivv && {APP} link")
+
+    try:
+        src = cand.resolve()
+    except OSError as e:
+        die(f"cannot resolve {cand}: {e}")
+
+    # sanity: it must BE a hivv client (compile check — a wrong link would
+    # brick every `hivv` invocation, since the wrapper execs this file)
+    try:
+        compile(src.read_text(encoding="utf-8", errors="replace"), str(src), "exec")
+    except SyntaxError as e:
+        die(f"{src} does not compile ({e}) — refusing to link to it\n"
+            "  a broken link breaks every `hivv` command")
+
+    client = _installed_client_path()
+    if client is None:
+        die(f"no install found to link FROM\n"
+            f"  install the command first:  {APP} start   (or ./setup.sh)")
+
+    if client.is_symlink():
+        try:
+            if client.resolve() == src:
+                print(f"  \033[33m○\033[0m already linked → {_pretty_path(src)}")
+                return
+        except OSError:
+            pass  # broken link — fall through and repair it
+
+    # keep the current copy once (the same .bak convention as update/rollback)
+    bak = client.with_suffix(client.suffix + ".bak")
+    try:
+        if client.exists() and not client.is_symlink() and not bak.exists():
+            shutil.copy2(client, bak)
+    except OSError:
+        pass
+
+    # atomic: symlink at a temp name, then replace. os.replace swaps the
+    # LINK, never writes through it — so the clone is never touched.
+    tmp = client.with_name(client.name + ".link-tmp")
+    try:
+        client.parent.mkdir(parents=True, exist_ok=True)
+        if tmp.is_symlink() or tmp.exists():
+            tmp.unlink()
+        tmp.symlink_to(src)
+        os.replace(tmp, client)
+    except OSError as e:
+        try:
+            if tmp.exists() or tmp.is_symlink():
+                tmp.unlink()
+        except OSError:
+            pass
+        die(f"could not create the link: {e}\n"
+            f"  (a system prefix like /usr/local may need sudo: sudo {APP} link)")
+
+    st = read_state() or {}
+    st["cli_link"] = str(src)
+    write_state(st)
+
+    ok(f"linked: {_pretty_path(client)} → {_pretty_path(src)}")
+    print("  from now on `hivv` runs YOUR clone — edits and `git pull` are live")
+    print(f"  check:  {APP} status     (the client line shows what's running)")
+    print(f"  undo:   {APP} unlink     (freezes the current code as a real file)")
+
+
+def cmd_unlink(args) -> None:
+    """Freeze the link into a real standalone copy.
+
+    `hivv unlink` replaces the symlink with a FILE — a snapshot of exactly
+    what was running a moment ago. Nothing is fetched and nothing is lost:
+    your code keeps working, decoupled from the clone, and `hivv update`
+    then moves it to the hub's copy when you want that.
+    """
+    client = _installed_client_path()
+    if client is None:
+        die(f"no install found — nothing to unlink")
+    if not client.is_symlink():
+        print(f"  \033[33m○\033[0m not linked — {_pretty_path(client)} is a real file")
+        print(f"  (nothing to do; {APP} update moves it to the hub copy)")
+        return
+
+    try:
+        data = client.resolve().read_bytes()
+    except OSError as e:
+        die(f"the link is broken ({e}) — the wrapper re-downloads on next run:\n"
+            f"  rm {_pretty_path(client)} && {APP} --version")
+
+    tmp = client.with_name(client.name + ".new")
+    try:
+        tmp.write_bytes(data)
+        tmp.chmod(0o755)
+        os.replace(tmp, client)     # replaces the LINK with a real file
+    except OSError as e:
+        die(f"could not freeze the link: {e}")
+
+    st = read_state() or {}
+    st.pop("cli_link", None)
+    write_state(st)
+
+    ok(f"unlinked: {_pretty_path(client)} is now a standalone copy")
+    print("  it holds a SNAPSHOT of your clone — the clone no longer affects it")
+    print(f"  refresh from the hub:  {APP} update")
+    print(f"  re-link your clone:    {APP} link")
+
 
 
 def _http_get_bytes(url: str, timeout: float = 30.0) -> bytes:
@@ -4828,6 +5066,16 @@ def cmd_status(args) -> None:
     pid = read_pid()
     st  = read_state()
     print(f"  hub:           {HUB}")
+    # WHICH copy is running — the answer to 'did my clone edits take effect?'
+    a = _active_cli_info()
+    print(f"  client:        {a['display']}")
+    if a["origin"] == "clone-link":
+        print(f"                   \033[2mgit pull is your `hivv update`\033[0m")
+    linked = st.get("cli_link")
+    if linked and a["origin"] != "clone-link":
+        print(f"  \033[33m! your clone link was replaced"
+              f" ({_pretty_path(Path(linked))} no longer active) —"
+              f" run `{APP} link` to restore it\033[0m")
     print(f"  state:         {'online' if pid else 'stopped'}")
     if pid:
         print(f"  pid:           {pid}")
@@ -16210,6 +16458,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("boot",     help="auto-start the agent at login (yes|no|on|off)")
     sp.add_argument("state", nargs="?", default=None,
                     help="yes|no (on|off work too). Omit to just REPORT the setting.")
+    sp = sub.add_parser("link",      help="make YOUR CLONE the copy `hivv` runs")
+    sp.add_argument("path", nargs="?", default=None,
+                    help="path to a hivv-cli.py (default: this clone's public_html/)")
+    sp = sub.add_parser("unlink",    help="freeze the link into a standalone copy")
     sp = sub.add_parser("verify",    help="run the shipped test suite against YOUR changes")
     sp.add_argument("--diff", action="store_true", help="also show what changed vs GitHub")
     sp.add_argument("--review", action="store_true", help="ask the hive whether the diff looks safe")
@@ -16709,6 +16961,8 @@ COMMANDS = _resolve_cmds({
     "update":          "cmd_update",
     "rollback":        "cmd_rollback",
     "verify":          "cmd_verify",
+    "link":            "cmd_link",
+    "unlink":          "cmd_unlink",
     "repair":          "cmd_repair",
     "upgrades":        "cmd_upgrades",
     "dev":             "cmd_dev",
@@ -17192,6 +17446,8 @@ def _print_sub_help(cmd: str) -> None:
         "metrics":   "GET /api/control/metrics/global\n  flag: --local   print this bee's local CPU/GPU/MEM/DISK snapshot",
         "nodes":     "table view of all registered nodes (fits your terminal) + hive TOTALS\n  flag: --json   output raw JSON",
         "boot":      "auto-start the agent at login (survive reboot)\n  usage: hivv boot yes | hivv boot no   (on/off work too)\n  bare:   hivv boot          → report the current setting",
+        "link":      "make YOUR CLONE the copy `hivv` runs (git pull = live updates)\n  usage: hivv link [path/to/hivv-cli.py]\n  alias: none — unlink to go back",
+        "unlink":    "freeze the link into a standalone copy (snapshot; hivv update then moves it to the hub)",
         "verify":    "run the shipped test suite against YOUR changes\n  flag: --diff    also show what changed vs GitHub\n  flag: --review  ask the hive whether the diff looks safe",
         "rollback":  "restore the last known-good CLI\n  flag: --list   show current/pinned/.bak/.bad\n  (healthchecked before restore; the replaced copy is kept as .bad)",
         "contributors": "who is helping — contributors by commit count\n  flag: --github  read straight from the GitHub API",

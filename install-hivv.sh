@@ -618,6 +618,14 @@ $SUDO mkdir -p "$BIN_DIR" "$LIB_DIR"
 # place with $SUDO when needed (dirs may be root-owned after sudo mkdir -p)
 dl() {
     local url="$1" out="$2" tmp
+    # NEVER write through a symlink: `cp`/`mv` onto a link follows it, so a
+    # `hivv link`ed client would have the CLONE it points at overwritten by
+    # this download. The link is the user's explicit choice — keep it.
+    if [[ -L "$out" ]]; then
+        printf '[hivv] kept existing link: %s -> %s (nothing downloaded)\n' \
+            "$out" "$(readlink "$out" 2>/dev/null)" >&2
+        return 0
+    fi
     tmp=$(mktemp "${TMPDIR:-/tmp}/hivv-dl.XXXXXX") || return 1
     local retry=0
     local max_retry=2
