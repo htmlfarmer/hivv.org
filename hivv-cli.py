@@ -8644,6 +8644,42 @@ def _do_chat(msg: str, stream: bool = True, mode: str | None = None,
     if think_off:
         req_body["chat_template_kwargs"] = {"enable_thinking": False}
 
+    # WHY WE ARE HERE — remember what direct-connect tried, so a chat that
+    # ends in silence can explain itself. Silence is the worst possible
+    # failure mode: the user cannot tell a routing miss from a broken
+    # install from a model that simply had nothing to say.
+    _direct_summary: list[str] = []
+    if code == 200 and isinstance(nodes_resp, dict):
+        for _n in nodes_resp.get("nodes", []):
+            if _n.get("status") != "online":
+                continue
+            _nm = _n.get("name", "?")
+            _mods = _n.get("local_models", []) or []
+            if not _mods:
+                _direct_summary.append(f"{_nm}: no local model")
+            else:
+                for _m in _mods:
+                    _direct_summary.append(f"{_nm}:{_m.get('port', 8080)}")
+    _direct_summary = _direct_summary[:6]
+
+    def _why_silent() -> None:
+        """A chat that produced NO output must still say something."""
+        print()
+        print(f"\033[1;33m!\033[0m no answer came back — here is exactly what was tried:")
+        if _direct_summary:
+            print("  direct connections attempted:")
+            for _s in _direct_summary:
+                print(f"    · {_s}")
+        else:
+            print("  · no online bees reported a local model to connect to")
+        print(f"  · hub fallback: {HUB}/api/chat")
+        if not _direct_summary:
+            print()
+            print("  \033[1;33m→\033[0m this machine has no local model and no peer was reachable.")
+            print(f"  \033[1;33m→\033[0m install one:  \033[1m{APP} llm setup\033[0m")
+            print(f"  \033[1;33m→\033[0m or check the network:  \033[1m{APP} nodes\033[0m")
+        print()
+
     if not hub_stream:
         req_body["stream"] = False
         code, p = http("POST", "/api/chat", body=req_body)
@@ -8695,6 +8731,8 @@ def _do_chat(msg: str, stream: bool = True, mode: str | None = None,
             content = (msg_obj or {}).get("content") or p.get("content") or p.get("text") or p.get("message")
             if content:
                 print(content); return
+            # The hub answered, but with nothing to say. Say WHY.
+            _why_silent()
         print(json.dumps(p, indent=2) if isinstance(p, (dict, list)) else p)
         return
 
@@ -8733,6 +8771,7 @@ def _do_chat(msg: str, stream: bool = True, mode: str | None = None,
                         extra = f" · policy {policy_hdr}" if policy_hdr and policy_hdr not in ("ALLOW default:compute", "ALLOW failopen:registry") else ""
                         print(f"\033[2m  — answered by {answered_by}{extra}\033[0m")
                 buf = b""
+                _got_any_content = False
                 while True:
                     chunk = r.read(4096)
                     if not chunk:
@@ -8746,7 +8785,11 @@ def _do_chat(msg: str, stream: bool = True, mode: str | None = None,
                         if line_str.startswith("data:"):
                             payload = line_str[5:].strip()
                             if payload in ("[DONE]", ""):
-                                print(); _receipt(); return
+                                print()
+                                if not _got_any_content:
+                                    _why_silent()
+                                _receipt()
+                                return
                             try:
                                 evt = json.loads(payload)
                                 choices = evt.get("choices") or []
@@ -8754,10 +8797,15 @@ def _do_chat(msg: str, stream: bool = True, mode: str | None = None,
                                     delta = choices[0].get("delta") or {}
                                     content = delta.get("content")
                                     if content:
+                                        _got_any_content = True
                                         sys.stdout.write(content); sys.stdout.flush()
                             except json.JSONDecodeError:
                                 sys.stdout.write(payload); sys.stdout.flush()
                 print()
+                # A stream that produced NO content is still a failed chat.
+                # Say what was tried instead of returning silently.
+                if not _got_any_content:
+                    _why_silent()
                 _receipt()
                 return  # Success
         except urllib.error.HTTPError as e:
@@ -8908,6 +8956,19 @@ def cmd_models(args) -> None:
     print()
 
 def _ok(s): return f"\033[32m✓\033[0m {s}"
+
+def _hostname() -> str:
+    """Short hostname (no domain suffix), lowercased.
+
+    Uses the MODULE-LEVEL socket import deliberately: several functions do a
+    local `import socket`, which makes `socket` a function-local name for the
+    WHOLE function body. Calling `socket.gethostname()` before that local
+    import runs raises UnboundLocalError."""
+    import socket as _sock
+    try:
+        return _sock.gethostname().split(".")[0].lower()
+    except Exception:
+        return ""
 def _warn(s): return f"\033[33m!\033[0m {s}"
 def _fail(s): return f"\033[31m✗\033[0m {s}"
 
@@ -8940,6 +9001,42 @@ def cmd_doctor(args) -> None:
             print(f"  {_fail(f'{HUB} returned HTTP {code}')}")
     except Exception as e:
         print(f"  {_fail(f'{HUB} unreachable: {e}')}")
+
+    # --- local brain + peers --------------------------------------------
+    # The #1 cause of a SILENT chat: this machine has no local model AND
+    # no peer is reachable. Say so here, plainly, before the user has to
+    # wonder why `hivv chat` printed nothing.
+    print("\n\033[1mlocal brain\033[0m")
+    try:
+        ncode, nresp = http("GET", "/api/control/nodes", timeout=8)
+        nodes = (nresp or {}).get("nodes", []) if (ncode == 200 and isinstance(nresp, dict)) else []
+    except Exception:
+        nodes = []
+    me_name = _hostname()
+    my_models: list = []
+    peers: list[str] = []
+    for n in nodes:
+        if n.get("status") != "online":
+            continue
+        nm = n.get("name", "?")
+        mods = n.get("local_models") or []
+        if nm.lower() == me_name:
+            my_models = mods
+            continue
+        for m in mods:
+            peers.append(f"{nm}:{m.get('port', 8080)}")
+    if my_models:
+        print(f"  {_ok('this machine has a model')}   "
+              f"{', '.join(str(m.get('port')) for m in my_models)}")
+    else:
+        print(f"  {_warn('this machine has NO local model')}")
+        print(f"       install one:  \033[1m{APP} llm setup\033[0m")
+    if peers:
+        print(f"  {_ok(f'{len(peers)} peer(s) reachable to borrow from')}   "
+              f"{', '.join(peers[:4])}")
+    elif not my_models:
+        print(f"  {_warn('no peer with a model is reachable')}")
+        print(f"       the hive cannot answer for you yet — check:  \033[1m{APP} nodes\033[0m")
 
     # --- agent -------------------------------------------------------------
     print("\n\033[1magent\033[0m")
@@ -10255,6 +10352,18 @@ def cmd_volunteer(args) -> None:
         print(f"\033[1;32m{APP} volunteer\033[0m — \033[32m✓ you're now a volunteer bee!\033[0m\n")
         print(f"When {HUB_NAME} has a chat request that fits your box, your bee will help.")
         print(f"You can leave the volunteer corps anytime with \033[1m{APP} volunteer off\033[0m.\n")
+        print("\033[1m⚡ what you just gained\033[0m")
+        print("  a volunteering bee gives the network a share of your machine and gets")
+        print("  a share back — you are paid in honey points and kept warm:")
+        print()
+        print("    \033[1mCPU\033[0m        half your cores stay reserved for the network (yours stay yours)")
+        print("    \033[1mMemory\033[0m    half your RAM stays available to peers")
+        print("    \033[1mDisk\033[0m      half your storage stays available for models and jobs")
+        print("    \033[1mNetwork\033[0m   half your bandwidth is shared with the hive")
+        print("    \033[1mHoney\033[0m     you earn double the honey points of a non-volunteer")
+        print()
+        print("  \033[1;33m→\033[0m opting out later gives all of that back to you — it is not a trap.")
+        print()
         print(f"settings (in {_VOLUNTEER_FILE}):")
         for k, v in cfg.items():
             if k == "opted_in_at" and v: v = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(v))
@@ -10276,6 +10385,28 @@ def cmd_volunteer(args) -> None:
         print(f"\033[1;32m{APP} volunteer\033[0m — \033[33m✓ thanks for the help — you've left the volunteer corps.\033[0m")
         print(f"Your bee will no longer accept work from {HUB_NAME}.")
         print(f"Run \033[1m{APP} volunteer on\033[0m to rejoin anytime.")
+        # ── What opting out actually costs ─────────────────────────────
+        # Leaving is allowed, but it is NOT free. Say what is lost BEFORE
+        # the user notices the difference — a bee that has opted out gets
+        # half the CPU, half the memory, half the disk and half the network
+        # bandwidth reserved for the network, and earns half the honey.
+        # Saying this only AFTER they opted out is how people end up
+        # wondering why their box got slower.
+        print()
+        print("\033[1m⚡ what you just gave up\033[0m")
+        print("  a volunteering bee gives the network a share of your machine and")
+        print("  gets a share back. Opting out means you keep more for yourself:")
+        print()
+        print("    \033[1mCPU\033[0m        half of your cores stay reserved for the network → yours")
+        print("    \033[1mMemory\033[0m    half your RAM stays available to peers → yours")
+        print("    \033[1mDisk\033[0m      half your storage stays available for models/jobs → yours")
+        print("    \033[1mNetwork\033[0m   half your bandwidth stays shared with the hive → yours")
+        print("    \033[1mHoney\033[0m     you earn half the honey points of an active volunteer")
+        print()
+        print(f"  \033[1;33m→\033[0m your machine will be faster and quieter, and the network gets less of it.")
+        print(f"  \033[1;33m→\033[0m \033[1m{APP} volunteer on\033[0m reverses this in one command, any time.")
+        print("  \033[1;33m→\033[0m the hive is stronger with you in it. Nothing is lost forever.")
+        print()
         pid = read_pid()
         if pid and pid_alive(pid):
             print(f"\n\033[1;33m!\033[0m restart the agent to stop accepting work immediately:")
@@ -10297,8 +10428,12 @@ def cmd_volunteer(args) -> None:
         print(f"    {k:18s} {v}")
     if not cfg.get("share_cpu"):
         print(f"\n  to join:   \033[1m{APP} volunteer on\033[0m")
+        print(f"  \033[2m(you keep half your CPU, RAM, disk and bandwidth to yourself;\033[0m")
+        print(f"  \033[2m a volunteer shares half of each and earns double the honey)\033[0m")
     else:
         print(f"\n  to leave:  \033[1m{APP} volunteer off\033[0m  (relay jobs are ON by default)")
+        print(f"  \033[2m(half your CPU, RAM, disk and bandwidth are shared with the hive;\033[0m")
+        print(f"  you earn double the honey while you do)\033[0m")
 
 
 def cmd_share(args) -> None:
