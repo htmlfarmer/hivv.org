@@ -746,6 +746,9 @@ if [[ "$WITH_SERVICE" -eq 1 ]]; then
 [Unit]
 Description=hivv node agent — the people's distributed AI (runs as $RUN_USER)
 After=network-online.target
+# crash-loop bound: 3 starts / 5 min then failed, not an endless restart storm
+StartLimitIntervalSec=300
+StartLimitBurst=3
 
 [Service]
 Type=simple
@@ -779,6 +782,9 @@ UNIT
 [Unit]
 Description=hivv node agent — the people's distributed AI (user mode)
 After=network-online.target
+# crash-loop bound: 3 starts / 5 min then failed, not an endless restart storm
+StartLimitIntervalSec=300
+StartLimitBurst=3
 
 [Service]
 Type=simple
