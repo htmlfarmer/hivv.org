@@ -4336,8 +4336,14 @@ def _llm_listener_pid(port: int) -> int | None:
     return None
 
 
-def _systemctl(scope: str, action: str, unit: str) -> int:
-    cmd = ["systemctl"] + (["--user"] if scope == "--user" else []) + [action, unit]
+def _systemctl(scope: str, action: str, unit: str = "") -> int:
+    """systemctl for one action. `unit` is optional because some actions
+    are unitless — `daemon-reload` takes none, and `_llm_boot_enable`
+    called `_systemctl("--user", "daemon-reload")` against the 3-arg
+    signature and crashed with TypeError AFTER writing the unit: the unit
+    started (the file existed) but was never ENABLED, so the box looked
+    fixed and silently lost its LLM on reboot (yalla, 2026-11-19)."""
+    cmd = ["systemctl"] + (["--user"] if scope == "--user" else []) +           [action] + ([unit] if unit else [])
     try:
         return subprocess.run(cmd, capture_output=True, text=True, timeout=30).returncode
     except Exception:
@@ -11212,6 +11218,14 @@ def cmd_doctor(args) -> None:
                     print(f"  \033[32m✓\033[0m ollama: configured for network access")
                     break
 
+        # Fix llama BINDING — the doctor's advice line says
+        # "run hivv doctor --fix" for localhost-only binds, so --fix must
+        # actually do it (it only printed suggestions before).
+        for _m in _fix_llm_bind(_r):
+            mark = "✓" if _m.startswith("✓") else "!"
+            colour = "32" if _m.startswith("✓") else "33"
+            print(f"  \033[{colour}m{mark}\033[0m {_m}")
+
         # Start stopped llama services (skip duplicates/crash-loops — see _llama_start_guard)
         r = _r("systemctl list-units --type=service --state=dead --no-pager --plain --no-legend 2>/dev/null | grep -i llama | grep -v ollama")
         if r.stdout.strip():
@@ -12465,6 +12479,19 @@ def cmd_test(args) -> None:
                 print(f"     Same-LAN direct reach for everyone: one tailnet, then")
                 print(f"     `{APP} firewall --apply --mode tailscale` on every bee + this box.\033[0m\n")
 
+            # ── SELF detection ───────────────────────────────────────────
+            # Probing OURSELVES via our own LAN IP measures the BIND, not
+            # the service: a localhost-bound LLM is perfectly up here but
+            # refuses our own LAN address, so the old code printed
+            # "yalla: ✗ chat failed" while run ON yalla — seconds after
+            # llm-core proved 8080 answers 'OK'. Self-probes use loopback;
+            # the LAN probe for self is kept separately because it answers
+            # the REAL question: "can the others borrow my model?"
+            _self_id = (read_state() or {}).get("node_id") or ""
+
+            def _is_self(n: dict) -> bool:
+                return bool(_self_id) and n.get("id") == _self_id
+
             # Test each node
             for n in nodes:
                 name = n.get("name", n.get("id", "?"))
@@ -12476,29 +12503,53 @@ def cmd_test(args) -> None:
                     print(f"  {name}: \033[31m{status}\033[0m — skipping")
                     continue
 
+                self_node = _is_self(n)
+                probe_ip = "127.0.0.1" if self_node else ip
+
                 # Test connectivity to each LLM port
                 ports_ok = 0
                 ports_total = 0
+                lan_ok = 0
                 for m in models:
                     if off_lan:
                         break
                     port = m.get("port", 8080)
                     ports_total += 1
                     try:
-                        r = _r(f"curl -s --connect-timeout 2 --max-time 3 http://{ip}:{port}/v1/models 2>/dev/null")
+                        r = _r(f"curl -s --connect-timeout 2 --max-time 3 http://{probe_ip}:{port}/v1/models 2>/dev/null")
                         if r.stdout and "model" in r.stdout.lower():
                             ports_ok += 1
                     except:
                         pass
+                    # self: also ask the LAN address — that is the "shared?" bit
+                    if self_node and ip and ip not in ("127.0.0.1", probe_ip):
+                        try:
+                            r2 = _r(f"curl -s --connect-timeout 2 --max-time 3 http://{ip}:{port}/v1/models 2>/dev/null")
+                            if r2.stdout and "model" in r2.stdout.lower():
+                                lan_ok += 1
+                        except:
+                            pass
 
                 if off_lan:
                     print(f"  {name}: \033[2m⊘ direct probe skipped (off-LAN — private {ip})\033[0m")
                 elif ports_total == 0:
                     print(f"  {name}: \033[33mno models\033[0m")
+                elif self_node:
+                    if ports_ok == ports_total and lan_ok == ports_total:
+                        print(f"  {name}: \033[32m✓ {ports_ok}/{ports_total} ports reachable\033[0m ({ip})")
+                    elif ports_ok:
+                        print(f"  {name}: \033[33m{ports_ok}/{ports_total} up on localhost — NOT shared "
+                              f"(binds 127.0.0.1)\033[0m ({ip})")
+                        print(f"     \033[2mpeers can't borrow your model — fix: {APP} doctor --fix\033[0m")
+                    else:
+                        print(f"  {name}: \033[31m✗ no answer on localhost either (:{ports_total and models[0].get('port', 8080) or 8080})\033[0m")
                 elif ports_ok == ports_total:
                     print(f"  {name}: \033[32m✓ {ports_ok}/{ports_total} ports reachable\033[0m ({ip})")
                 else:
                     print(f"  {name}: \033[33m{ports_ok}/{ports_total} ports reachable\033[0m ({ip})")
+                    if models:
+                        print(f"     \033[2mnot directly reachable — its LLM likely binds localhost "
+                              f"(or a firewall blocks); on THAT bee: {APP} doctor --fix\033[0m")
 
             # Test chat with each online node
             print(f"\n\033[1mchat test\033[0m")
@@ -12523,28 +12574,58 @@ def cmd_test(args) -> None:
                 name = n.get("name", n.get("id", "?"))
                 ip = n.get("lan_ip") or n.get("ip", "")
                 models = n.get("local_models", [])
-                if not models or not ip:
+                if not models or (not ip and not _is_self(n)):
                     continue
+                self_node = _is_self(n)
+                direct_host = "127.0.0.1" if self_node else ip
 
-                # Find first reachable port
+                # 1. DIRECT — what the router's borrowing path uses.
+                answered = False
                 for m in models:
                     port = m.get("port", 8080)
                     try:
-                        url = f"http://{ip}:{port}/v1/chat/completions"
+                        url = f"http://{direct_host}:{port}/v1/chat/completions"
                         payload = json.dumps({"model": "local", "messages": [{"role": "user", "content": "say hi"}], "max_tokens": 20})
                         import urllib.request
                         req = urllib.request.Request(url, data=payload.encode(), headers={"Content-Type": "application/json"})
                         with urllib.request.urlopen(req, timeout=10) as resp:
                             data = resp.read().decode()
                             if "content" in data:
-                                print(f"  {name}: \033[32m✓ chat works\033[0m (:{port})")
+                                where = " via localhost" if self_node else ""
+                                print(f"  {name}: \033[32m✓ chat works\033[0m (:{port}{where})")
+                                answered = True
+                                break
                             else:
                                 print(f"  {name}: \033[33m!\033[0m responded but no content (:{port})")
-                            break
-                    except Exception as e:
+                                answered = True
+                                break
+                    except Exception:
                         continue
+                if answered:
+                    continue
+
+                # 2. SELF, direct failed → nothing else to try: the relay's
+                #    target IS this box's loopback, so it would fail the same
+                #    way. Report the real problem instead.
+                if self_node:
+                    print(f"  {name}: \033[31m✗ chat failed\033[0m (even on localhost — "
+                          f"is the LLM up? {APP} llm status)")
+                    continue
+
+                # 3. RELAY — reaches a bee whose model binds localhost only:
+                #    hub → bee's inbox → its own agent → 127.0.0.1. This is
+                #    the same path `hivv ask` uses, so "chat failed" here used
+                #    to be a lie for exactly the bees the direct path can
+                #    never reach (ashy:8090, yalla:8080).
+                status_r, text_r = _relay_chat_to_bee(n.get("id", ""),
+                                                       "say hi in two words",
+                                                       timeout=30)
+                if status_r == "ok":
+                    print(f"  {name}: \033[32m✓ chat works\033[0m \033[2m(via relay — its model "
+                          f"binds localhost, so peers can't BORROW it directly)\033[0m")
                 else:
-                    print(f"  {name}: \033[31m✗ chat failed\033[0m")
+                    print(f"  {name}: \033[31m✗ chat failed\033[0m \033[2m(direct + relay: "
+                          f"{str(text_r)[:60]})\033[0m")
 
     print()
     if fails:
@@ -14880,6 +14961,60 @@ def _llm_effective() -> tuple[str, int, str, int]:
     return model, port, host, ctx
 
 
+def _fix_llm_bind(_r=None, unit_dir: Path | None = None) -> list[str]:
+    """Rewrite `--host 127.0.0.1` → `0.0.0.0` in USER llama units, restart.
+
+    WHY THIS EXISTS: the doctor REPORTS localhost-only binds on every box
+    and its advice line says "run `hivv doctor --fix`" — but --fix only
+    ever PRINTED suggestions (it computed the fixed cmdline and never used
+    it), so following the advice changed nothing. Both ashy and yalla were
+    told to run it for exactly this (2026-01-19… 2026-11-19).
+
+    Same contract as `_harden_unit_file`: patch the unit in place,
+    daemon-reload, restart ONLY if it is currently active (a dead unit
+    stays dead — the dead-start block in --fix owns starting). USER scope
+    only: a system-scope llama unit belongs to someone else, and
+    `_llm_boot_enable` refuses those too.
+
+    `_r` and `unit_dir` are injectable for the tests.
+    """
+    if _r is None:
+        _r = lambda c: subprocess.run(c, shell=True, capture_output=True,
+                                      text=True, timeout=30)
+    if unit_dir is None:
+        unit_dir = Path.home() / ".config" / "systemd" / "user"
+    msgs: list[str] = []
+    if not unit_dir.is_dir():
+        return msgs
+    for unit_file in sorted(unit_dir.glob("llama*.service")):
+        try:
+            txt = unit_file.read_text()
+        except OSError:
+            continue
+        if "--host 127.0.0.1" not in txt:
+            continue
+        try:
+            unit_file.write_text(txt.replace("--host 127.0.0.1",
+                                             "--host 0.0.0.0"))
+        except OSError as e:
+            msgs.append(f"! {unit_file.name}: cannot write ({e})")
+            continue
+        unit = unit_file.name
+        _r("systemctl --user daemon-reload")
+        active = ""
+        try:
+            active = _r(f"systemctl --user is-active {unit}").stdout.strip()
+        except Exception:
+            pass
+        if active == "active":
+            _r(f"systemctl --user reset-failed {unit}")
+            _r(f"systemctl --user restart {unit}")
+            msgs.append(f"✓ {unit}: bound 0.0.0.0 (restarted)")
+        else:
+            msgs.append(f"✓ {unit}: bound 0.0.0.0 (applies on next start)")
+    return msgs
+
+
 def _llm_boot_probe() -> tuple[str, str]:
     """(state, unit) of this box's llama boot unit:
 
@@ -14903,6 +15038,30 @@ def _llm_boot_probe() -> tuple[str, str]:
             if "UnitFileState=enabled" in out:
                 return "enabled", unit
             return "disabled", unit
+    # The OLDER per-model scheme (install-llama-service.sh → llama-gemma.service,
+    # llama-qwen.service) is a boot unit too. yalla had BOTH enabled and the
+    # doctor still said "no boot unit — the LLM dies on reboot" — a detection
+    # bug: it only knew the two canonical names, so a box that already boots
+    # its LLM got told to fix what was already fixed.
+    try:
+        r = subprocess.run(["systemctl", "--user", "list-unit-files",
+                            "llama*.service", "--no-pager", "--no-legend"],
+                           capture_output=True, text=True, timeout=8)
+        first_disabled = ""
+        for line in (r.stdout or "").splitlines():
+            parts = line.split()
+            if len(parts) < 2 or not parts[0].endswith(".service"):
+                continue
+            if parts[0] in ("llama.service", "llama-server.service"):
+                continue                      # the loop above owns those
+            if parts[1] in ("enabled", "enabled-runtime"):
+                return "enabled", parts[0]
+            if parts[1] == "disabled" and not first_disabled:
+                first_disabled = parts[0]
+        if first_disabled:
+            return "disabled", first_disabled
+    except Exception:
+        pass
     return "none", ""
 
 
