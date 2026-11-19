@@ -5950,6 +5950,342 @@ def cmd_uninstall(args) -> None:
     ok(f"uninstalled (kept config: {CONFIG_DIR}, logs: {STATE_DIR})")
 
 # ── one-shot commands ──────────────────────────────────────────────────
+# ── sync: the two-way check against GitHub ────────────────────────────────
+# THE PROBLEM THIS SOLVES
+# The hive is developed in two places: the hub host (where the gateway
+# lives) and GitHub. When they drift, someone merges by hand and loses
+# work — which happened on 2026-11-18, when the local tree had crash-loop
+# bounds the hub copy did not, and the CLI the hub served was stale.
+#
+# The rule that makes this safe: THE HUB SERVES WHAT IS ON GITHUB, and the
+# hub host's tree is a CHECKOUT of GitHub. So GitHub is the single source
+# of truth, and "am I in sync?" is answerable from one place.
+#
+# `hivv sync` answers that, and it works on ANY clone — including one that
+# is not the hub host — by talking to GitHub over HTTPS.
+
+GITHUB_REPO = "htmlfarmer/hivv"
+GITHUB_API = "https://api.github.com"
+
+
+def _gh_url(path: str) -> str:
+    return f"{GITHUB_API}/repos/{GITHUB_REPO}{path}"
+
+
+def _gh_get(path: str, timeout: float = 12.0) -> tuple[int, dict | str]:
+    """GET a GitHub API path. No token — the repo is public, and an
+    unauthenticated request is one less secret to leak."""
+    try:
+        req = urllib.request.Request(_gh_url(path), headers={
+            "accept": "application/vnd.github+json",
+            "user-agent": f"{APP}/{VERSION}",
+            "x-github-api-version": "2022-11-28",
+        })
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            body = r.read().decode("utf-8", "replace")
+            try:
+                return r.status, json.loads(body)
+            except json.JSONDecodeError:
+                return r.status, body
+    except urllib.error.HTTPError as e:
+        try:
+            return e.code, json.loads(e.read().decode("utf-8", "replace"))
+        except Exception:
+            return e.code, {}
+    except Exception as e:
+        return 0, {"error": str(e)}
+
+
+def _git(*args, timeout: float = 30.0) -> tuple[int, str]:
+    """Run a git command in the current tree. Returns (rc, output)."""
+    try:
+        r = subprocess.run(["git"] + list(args), capture_output=True,
+                           text=True, timeout=timeout)
+        return r.returncode, (r.stdout or "") + (r.stderr or "")
+    except Exception as e:
+        return 1, str(e)
+
+
+def _local_git_state() -> dict:
+    """What this checkout looks like RIGHT NOW: branch, sha, dirty files,
+    ahead/behind vs origin/main. Never raises — an absent git is a normal
+    state for an installed (non-clone) CLI."""
+    st = {"is_repo": False, "branch": "", "sha": "", "short": "",
+          "dirty": 0, "ahead": 0, "behind": 0, "remote": ""}
+    rc, out = _git("rev-parse", "--is-inside-work-tree")
+    if rc != 0 or out.strip() != "true":
+        return st
+    st["is_repo"] = True
+    _, b = _git("rev-parse", "--abbrev-ref", "HEAD")
+    st["branch"] = b.strip()
+    _, s = _git("rev-parse", "HEAD")
+    st["sha"] = s.strip()
+    st["short"] = st["sha"][:8]
+    _, d = _git("status", "--porcelain")
+    st["dirty"] = len([l for l in d.splitlines() if l.strip()])
+    _, r = _git("remote", "get-url", "origin")
+    st["remote"] = r.strip()
+    _, ab = _git("rev-list", "--left-right", "--count", "origin/main...HEAD")
+    parts = ab.split()
+    if len(parts) == 2:
+        try:
+            st["behind"], st["ahead"] = int(parts[0]), int(parts[1])
+        except ValueError:
+            pass
+    return st
+
+
+# ── review-diff: ask the hive whether a change looks safe ────────────────
+# The hive is a fleet of machines running models. That is a REVIEW BOARD:
+# a change can be looked at by several models at once and their verdicts
+# compared. The upgrade path already uses this (the LLM-reviewed upgrade
+# gate), but it only ever saw CLI updates.
+#
+# This generalises it: give it ANY diff and it returns a safety verdict.
+# It is a SECOND opinion, never an authority — a model is a reader, not a
+# gatekeeper — so the verdict is reported with its reasoning and the
+# human still decides.
+
+REVIEW_PROMPT = """You are reviewing a code change for SAFETY.
+
+Read the diff below and answer these questions, in order, briefly:
+
+1. RISK: does this change do anything dangerous — delete or overwrite user
+   data, send data to a third party, weaken a security check, run a shell
+   command from untrusted input, exfiltrate a secret, or change what a
+   permission/approval gate allows?
+2. WHAT: in one sentence, what does this change actually do?
+3. VERDICT: on the last line output exactly one of
+   SAFE / REVIEW / RISKY
+   Use SAFE when the change is ordinary and self-contained.
+   Use REVIEW when it is fine but touches something worth a human glance
+   (config, network, permissions, a dependency).
+   Use RISKY when it does something destructive or exfiltrates anything.
+
+DIFF:
+{diff}
+"""
+
+
+def _collect_diff(staged: bool = False, files: list[str] | None = None,
+                   max_bytes: int = 24000) -> str:
+    """The diff to review. Refuses to build an enormous prompt — a 5 MB
+    diff would blow the context window and get truncated into a verdict
+    about the wrong half of the change."""
+    args = ["diff"]
+    if staged:
+        args.append("--staged")
+    if files:
+        args += ["--"] + list(files)
+    rc, out = _git(*args)
+    if rc != 0 or not out.strip():
+        rc2, out2 = _git("diff", "HEAD")
+        if rc2 == 0 and out2.strip():
+            out = out2
+    if len(out) > max_bytes:
+        out = (out[:max_bytes] +
+               f"\n… [diff truncated at {max_bytes} bytes — "
+               f"showing the first part only]\n")
+    return out
+
+
+def cmd_review_diff(args) -> None:
+    """Ask the hive: does this change look safe?
+
+    `hivv review-diff`            → review the unstaged working-tree diff
+    `hivv review-diff --staged`   → review what is about to be committed
+    `hivv review-diff --file F`   → review one file's diff
+    `hivv review-diff --votes 3`  → ask 3 bees and show every verdict
+
+    The diff is sent to models that are ALREADY part of this hive — the
+    same peers that answer your chats. Nothing is sent anywhere new.
+
+    A model verdict is a REVIEW, not an approval. Read it.
+    """
+    staged = bool(getattr(args, "staged", False))
+    files = []
+    f = getattr(args, "file", None)
+    if f:
+        files = [f] if isinstance(f, str) else list(f)
+    votes = int(getattr(args, "votes", 1) or 1)
+
+    diff = _collect_diff(staged=staged, files=files)
+    if not diff.strip():
+        what = "staged changes" if staged else "unstaged changes"
+        print(f"  no {what} to review")
+        if not files:
+            print(f"  (nothing modified — try {APP} review-diff --staged "
+                  f"after staging, or --file <path>)")
+        return
+
+    n_lines = diff.count("\n")
+    print(f"\n\033[1m{APP} review-diff\033[0m — {n_lines} diff lines, "
+          f"asking {votes} model(s) for a verdict\n")
+
+    prompt = REVIEW_PROMPT.format(diff=diff[:20000])
+
+    verdicts = []
+    for i in range(max(1, votes)):
+        label = f"model {i + 1}" if votes > 1 else "hive"
+        try:
+            reply, _port = _local_ask(prompt, max_tokens=400, timeout=90)
+            if not reply.strip():
+                # no local model — fall back to the hub (the fleet)
+                code, p = http("POST", "/api/chat",
+                               body={"message": prompt, "stream": False},
+                               timeout=90, sign=False)
+                if code == 200 and isinstance(p, dict):
+                    reply = (p.get("reply") or p.get("content")
+                             or p.get("text") or "")
+        except Exception:
+            reply = ""
+        reply = (reply or "").strip()
+        if not reply:
+            print(f"  \033[33m○\033[0m {label}: no answer (no local model, hub unreachable)")
+            continue
+        verdicts.append((label, reply))
+        v = _verdict_from_reply(reply)
+        colour = {"SAFE": "\033[32m", "REVIEW": "\033[33m", "RISKY": "\033[31m"}.get(v, "")
+        print(f"  \033[1m{label}\033[0m → {colour}{v}\033[0m" if colour
+              else f"  \033[1m{label}\033[0m → (no verdict)")
+        for line in reply.splitlines():
+            if line.strip():
+                print(f"      {line.strip()}")
+        print()
+
+    if not verdicts:
+        print("  \033[33m◐\033[0m no model answered — start one with "
+              f"`{APP} llm setup` or check the hub\n")
+        return
+
+    tally = {}
+    for _label, reply in verdicts:
+        v = _verdict_from_reply(reply)
+        tally[v] = tally.get(v, 0) + 1
+    print(f"  \033[1mtally\033[0m: " +
+          "  ".join(f"{k} ×{n}" for k, n in sorted(tally.items())))
+    print("  \033[2ma model verdict is a REVIEW, not an approval — read it, "
+          "then decide\033[0m\n")
+
+
+def _verdict_from_reply(reply: str) -> str:
+    """Pull SAFE / REVIEW / RISKY out of a model's answer.
+
+    Looked at the LAST line first (that is where the prompt asked for it),
+    then the whole reply — models like to add a summary after the verdict,
+    and a model that answers in prose still gave an opinion.
+    """
+    text = (reply or "").strip()
+    if not text:
+        return "UNKNOWN"
+    lines = [l.strip() for l in text.splitlines() if l.strip()]
+    for line in reversed(lines):
+        up = line.upper()
+        for v in ("RISKY", "REVIEW", "SAFE"):
+            if v in up and len(up) < 40:
+                return v
+    up = text.upper()
+    for v in ("RISKY", "REVIEW", "SAFE"):
+        if v in up:
+            return v
+    return "UNKNOWN"
+
+
+def cmd_sync(args) -> None:
+    """Two-way check against GitHub: what is here, what is there, what differs.
+
+    `hivv sync`        → report the drift (never changes anything)
+    `hivv sync --fetch`→ also fetch origin so the comparison is fresh
+    `hivv sync --check`→ exit non-zero when out of sync (for CI)
+
+    Read-only by default. It NEVER merges, never pushes and never resets —
+    a sync command that can lose work is a sync command nobody runs.
+    """
+    fetch = bool(getattr(args, "fetch", False))
+    check = bool(getattr(args, "check", False))
+    quiet = bool(getattr(args, "quiet", False))
+
+    print(f"\n\033[1m{APP} sync\033[0m — local ⇄ github.com/{GITHUB_REPO}\n")
+
+    # ── the local side ────────────────────────────────────────────────────
+    loc = _local_git_state()
+    if not loc["is_repo"]:
+        print("  \033[33m○\033[0m local: not a git checkout")
+        print("    (an installed CLI has no tree — that is normal)")
+        print("    the hub serves the GitHub copy, so the CLI you run is")
+        print(f"    whatever GitHub says it is. Check it with: {APP} version")
+    else:
+        dirty = f" \033[33m· {loc['dirty']} uncommitted\033[0m" if loc["dirty"] else ""
+        print(f"  local   branch {loc['branch']}  @ {loc['short']}{dirty}")
+        if loc["remote"]:
+            print(f"          origin {loc['remote']}")
+        if loc["ahead"] or loc["behind"]:
+            print(f"          vs origin/main: \033[33m{loc['ahead']} ahead\033[0m, "
+                  f"\033[33m{loc['behind']} behind\033[0m")
+        else:
+            print(f"          vs origin/main: \033[32min sync\033[0m")
+
+    # ── the GitHub side ───────────────────────────────────────────────────
+    if fetch and loc["is_repo"]:
+        if not quiet:
+            print("\n  fetching origin …")
+        _git("fetch", "--quiet", "origin")
+
+    code, gh = _gh_get("/commits/main")
+    if code != 200 or not isinstance(gh, dict) or "sha" not in gh:
+        msg = gh.get("message") if isinstance(gh, dict) else gh
+        print(f"\n  \033[31m✗\033[0m GitHub unreachable: {msg or 'unknown error'}")
+        print("    (offline? the sync check needs the network. "
+              "Everything else works offline.)")
+        if check:
+            sys.exit(2)
+        return
+    gh_sha = gh["sha"]
+    gh_short = gh_sha[:8]
+    gh_msg = (gh.get("commit", {}).get("message") or "").splitlines()[0][:70]
+    gh_when = (gh.get("commit", {}).get("author", {}) or {}).get("date", "")
+    print(f"\n  github  main      @ {gh_short}")
+    print(f"          {gh_msg}")
+    if gh_when:
+        print(f"          {gh_when}")
+
+    # ── the verdict ───────────────────────────────────────────────────────
+    same = loc["sha"] == gh_sha
+    print()
+    if not loc["is_repo"]:
+        print("  \033[33m◐\033[0m no local tree to compare — "
+              "the hub's copy is the GitHub copy")
+        if check:
+            sys.exit(0)
+        return
+    if same and not loc["dirty"]:
+        print("  \033[32m✓\033[0m \033[1mIN SYNC\033[0m — local == GitHub, nothing to merge")
+        if check:
+            sys.exit(0)
+        return
+    if same and loc["dirty"]:
+        print(f"  \033[33m◐\033[0m same commit, but \033[1m{loc['dirty']} uncommitted "
+              f"change(s)\033[0m here")
+        print("    commit them, or they are lost on the next pull")
+        if check:
+            sys.exit(1)
+        return
+    if loc["ahead"]:
+        print(f"  \033[33m◐\033[0m local is \033[1m{loc['ahead']} commit(s) AHEAD\033[0m "
+              f"of GitHub — push them:")
+        print(f"    git push origin {loc['branch']}")
+    if loc["behind"]:
+        print(f"  \033[33m◐\033[0m local is \033[1m{loc['behind']} commit(s) BEHIND\033[0m "
+              f"GitHub — pull them:")
+        print(f"    git pull --rebase origin {loc['branch']}")
+    if loc["ahead"] and loc["behind"]:
+        print("  \033[33m⚠\033[0m diverged both ways — rebase, then resolve:")
+        print(f"    git pull --rebase origin {loc['branch']}")
+    print("\n  \033[2mnever merge blind: read the diff first (hivv review-diff)\033[0m")
+    if check:
+        sys.exit(1)
+
+
 def cmd_health(args) -> None:
     code, p = http("GET", "/api/health")
     print(json.dumps(p, indent=2) if isinstance(p, (dict, list)) else p)
@@ -14981,6 +15317,14 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("boot",     help="auto-start the agent at login (yes|no|on|off)")
     sp.add_argument("state", nargs="?", default=None,
                     help="yes|no (on|off work too). Omit to just REPORT the setting.")
+    sp = sub.add_parser("sync",     help="two-way check against GitHub (never merges)")
+    sp.add_argument("--fetch", action="store_true", help="fetch origin first")
+    sp.add_argument("--check", action="store_true", help="exit non-zero when out of sync (CI)")
+    sp.add_argument("--quiet", action="store_true", help="less noise")
+    sp = sub.add_parser("review-diff", help="ask the hive: does this change look safe?")
+    sp.add_argument("--staged", action="store_true", help="review the staged diff")
+    sp.add_argument("--file", action="append", help="review only this file (repeatable)")
+    sp.add_argument("--votes", type=int, default=1, help="how many models to ask (default 1)")
     sp = sub.add_parser("info",     help="hub URL, version, install paths, hub_health")
     sp = sub.add_parser("uninstall",help="stop + remove install (keep config + logs)")
 
@@ -15437,6 +15781,8 @@ COMMANDS = _resolve_cmds({
     "restart":         "cmd_restart",
     "status":          "cmd_status",
     "boot":            "cmd_boot",
+    "sync":            "cmd_sync",
+    "review-diff":     "cmd_review_diff",
     "logs":            "cmd_logs",
     "free":            "cmd_free",
     "pct":             "cmd_pct",
@@ -15924,6 +16270,8 @@ def _print_sub_help(cmd: str) -> None:
         "metrics":   "GET /api/control/metrics/global\n  flag: --local   print this bee's local CPU/GPU/MEM/DISK snapshot",
         "nodes":     "table view of all registered nodes (fits your terminal) + hive TOTALS\n  flag: --json   output raw JSON",
         "boot":      "auto-start the agent at login (survive reboot)\n  usage: hivv boot yes | hivv boot no   (on/off work too)\n  bare:   hivv boot          → report the current setting",
+        "sync":      "two-way check against GitHub (read-only — never merges)\n  flag: --fetch  fetch origin first\n  flag: --check  exit non-zero when out of sync (for CI)",
+        "review-diff": "ask the hive whether a change looks safe\n  usage: hivv review-diff [--staged] [--file F] [--votes N]",
         "node":      "show details about a specific node\n  usage: hivv node <name> [--json]",
         "node-chat": "chat directly with a node's LLM\n  usage: hivv node-chat <node> <message>",
         "reach":     "test connectivity to another node\n  usage: hivv reach <name>",
