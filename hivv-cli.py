@@ -11875,6 +11875,183 @@ def cmd_speed(args) -> None:
         print(f"        \033[31mFAIL\033[0m ({e})")
 
 
+def _load_testmap() -> dict:
+    """The committed source→tests map, building it once if absent.
+
+    A missing map must not brick the command — the first run generates it
+    (static analysis, well under a second) and prints a note.
+    """
+    repo = _find_repo_root()
+    if repo is None:
+        return {}
+    mp = repo / "tests" / "TESTMAP.json"
+    if not mp.exists():
+        print(f"  \033[2mbuilding the test map (first run)…\033[0m")
+        subprocess.run([sys.executable, str(repo / "tests" / "gen_testmap.py")],
+                       capture_output=True, timeout=120)
+    try:
+        return json.loads(mp.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _tests_for_paths(paths: list[str]) -> tuple[dict, list[str]]:
+    """(per-path test lists, unmapped paths) for repo-relative inputs.
+
+    Exact match first. On a miss, walk UP the directory tree: some tests
+    reference a DIRECTORY (`REPO / "public_html"` — they glob it), so a
+    file inside that directory is covered by them even though it has no
+    entry of its own. Marked `via <dir>` so the answer is never
+    misleading about WHY those tests apply.
+    """
+    mapping = _load_testmap()
+    srcs = mapping.get("sources") or {}
+    per: dict[str, list[str]] = {}
+    missing: list[str] = []
+    for raw in paths:
+        rel = _repo_relative(raw)
+        if rel is None:
+            missing.append(raw)
+            continue
+        hits = srcs.get(rel)
+        if hits:
+            per[rel] = list(hits)
+            continue
+        # ancestor-directory fallback
+        parts = rel.split("/")
+        found = None
+        for i in range(len(parts) - 1, 0, -1):
+            ancestor = "/".join(parts[:i])
+            if ancestor in srcs:
+                found = (ancestor, srcs[ancestor])
+                break
+        if found:
+            per[rel] = sorted({f"{t} (via {found[0]}/)" for t in found[1]})
+        else:
+            missing.append(rel)
+    return per, missing
+
+
+def _repo_relative(raw: str) -> str | None:
+    """Turn whatever the user typed into a repo-relative path (or None)."""
+    repo = _find_repo_root()
+    if repo is None:
+        return None
+    p = Path(str(raw)).expanduser()
+    try:
+        if not p.is_absolute():
+            p = (Path.cwd() / p)
+        p = p.resolve()
+        rel = str(p.relative_to(repo.resolve()))
+    except (ValueError, OSError):
+        # not under the repo — maybe they typed the repo-relative form
+        cand = str(raw).lstrip("./")
+        if (repo / cand).exists():
+            return cand
+        return None
+    return rel
+
+
+def cmd_tests_for(args) -> None:
+    """I edited <file> — which tests must I run?
+
+    `hivv tests-for <file>...`  → the test files that exercise it + the
+                                   exact command to run them
+    `hivv tests-for --diff`     → same, for everything YOU changed
+                                   (working tree vs HEAD)
+    `hivv tests-for --refresh`  → rebuild the map first (after adding tests)
+
+    The map lives in tests/TESTMAP.json (built by static analysis — no test
+    is run to produce it) and is pinned fresh by tests/test_testmap.py, so
+    it cannot silently rot: add a test file and the suite tells you to
+    regenerate.
+
+    Honest limits, stated out loud: the map UNDER-claims (a test reaching a
+    file through a runtime-computed path is invisible to static analysis),
+    so when a file has no entry the advice is always "run the full suite"
+    — never "you're fine".
+    """
+    refresh = bool(getattr(args, "refresh", False))
+    strict = bool(getattr(args, "strict", False))
+    diff_ref = getattr(args, "diff", None)      # None | "" (HEAD) | <ref>
+    paths = list(getattr(args, "paths", None) or [])
+
+    repo = _find_repo_root()
+    if repo is None:
+        die("no repo found — `hivv tests-for` needs a clone of the project")
+
+    if refresh:
+        print("  rebuilding tests/TESTMAP.json …")
+        r = subprocess.run([sys.executable, str(repo / "tests" / "gen_testmap.py")],
+                           capture_output=True, text=True, timeout=120)
+        if r.returncode != 0:
+            die(f"map rebuild failed: {(r.stderr or r.stdout)[-400:]}")
+        print(f"  {r.stdout.strip()}")
+
+    if diff_ref is not None:
+        ref = diff_ref or "HEAD"
+        rc, out = _git("diff", "--name-only", ref, timeout=30)
+        if rc != 0:
+            die(f"git diff {ref} failed — pass a ref (e.g. --diff origin/main)")
+        paths += [l.strip() for l in out.splitlines() if l.strip()]
+
+    # de-dup, keep order
+    seen, uniq = set(), []
+    for pth in paths:
+        if pth not in seen:
+            seen.add(pth)
+            uniq.append(pth)
+    paths = uniq
+
+    if not paths:
+        die(f"nothing to look up\n"
+            f"  usage: {APP} tests-for <file>...\n"
+            f"         {APP} tests-for --diff            # everything you changed\n"
+            f"         {APP} tests-for --diff origin/main # everything vs GitHub\n"
+            f"  full suite: {APP} verify")
+
+    per, missing = _tests_for_paths(paths)
+
+    print(f"\n\033[1m{APP} tests-for\033[0m — {len(paths)} file(s)\n")
+    py_tests: list[str] = []
+    js_tests: list[str] = []
+    for src, tsts in per.items():
+        print(f"  \033[1m{src}\033[0m")
+        for tst in tsts:
+            print(f"    → {tst}")
+        for tst in tsts:
+            # strip the " (via <dir>/)" display annotation — it must never
+            # reach the run command, or the pytest invocation is invalid
+            clean = re.sub(r"\s*\(via [^)]+\)$", "", tst)
+            (js_tests if clean.endswith(".test.js") else py_tests).append(clean)
+        print()
+
+    if missing:
+        print("  \033[33m○ no dedicated test references\033[0m "
+              + ", ".join(f"`{m}`" for m in missing))
+        print("    (the map under-claims by design — the full suite is your gate)")
+        print()
+
+    if not py_tests and not js_tests:
+        print(f"  run everything:  {APP} verify")
+        print(f"                   python3 -m pytest tests/ -q   +   cd api && node --test\n")
+        sys.exit(1 if strict else 0)
+
+    if py_tests:
+        uniq_py = sorted(set(py_tests))
+        print(f"  \033[1mrun (python)\033[0m:")
+        print(f"    python3 -m pytest {' '.join(uniq_py)} -q")
+    if js_tests:
+        uniq_js = sorted(set(js_tests))
+        rel_js = [j.replace("api/", "", 1) for j in uniq_js]
+        print(f"  \033[1mrun (node)\033[0m:")
+        print(f"    cd api && node --test {' '.join(rel_js)}")
+    print(f"\n  \033[2mfull suite (always safe): {APP} verify\033[0m\n")
+
+    if strict and missing:
+        sys.exit(1)
+
+
 def cmd_verify(args) -> None:
     """Verify YOUR changes still work — run the shipped test suite.
 
@@ -11991,16 +12168,33 @@ def cmd_verify(args) -> None:
 
 
 def _find_repo_root() -> Path | None:
-    """The repo this CLI was cloned from — or None.
+    """The hivv repo this CLI belongs to — or None.
 
-    Walks up from THIS file looking for both `tests/` and a `.git` entry.
-    A bare `tests/` without git is not enough: an installed prefix could
-    coincidentally have a tests directory, and running the wrong suite
-    would report a false verdict.
+    Probes TWO starts, because there are two legitimate ways to ask:
+      1. from THIS file — running the CLI inside a clone
+         (`python3 public_html/hivv-cli.py tests-for …`);
+      2. from the CWD — running the INSTALLED CLI while cd'd into the
+         clone, which is the normal developer flow: edit in the clone,
+         ask `hivv` from anywhere. Without this the installed copy
+         walked up from ~/.local/lib/hivv, found no repo, and refused.
+
+    The marker is hivv-specific on purpose (`.git` + `tests/` +
+    `public_html/hivv-cli.py`): a random unrelated repo the user happens
+    to be standing in must never be mistaken for ours — running the wrong
+    suite would report a false verdict.
     """
+    def _is_hivv_repo(cand: Path) -> bool:
+        return ((cand / ".git").exists()
+                and (cand / "tests").is_dir()
+                and (cand / "public_html" / f"{APP}-cli.py").exists())
+
     start = Path(__file__).resolve().parent
     for cand in [start, *start.parents]:
-        if (cand / ".git").exists() and (cand / "tests").is_dir():
+        if _is_hivv_repo(cand):
+            return cand
+    cur = Path.cwd()
+    for cand in [cur, *cur.parents]:
+        if _is_hivv_repo(cand):
             return cand
     return None
 
@@ -16462,6 +16656,12 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("path", nargs="?", default=None,
                     help="path to a hivv-cli.py (default: this clone's public_html/)")
     sp = sub.add_parser("unlink",    help="freeze the link into a standalone copy")
+    sp = sub.add_parser("tests-for", help="I edited <file> — which tests must I run?")
+    sp.add_argument("paths", nargs="*", help="file(s) you edited")
+    sp.add_argument("--diff", nargs="?", const="", default=None, metavar="REF",
+                    help="look up everything changed vs REF (default: HEAD)")
+    sp.add_argument("--refresh", action="store_true", help="rebuild the map first")
+    sp.add_argument("--strict", action="store_true", help="exit 1 if any file has no mapped test")
     sp = sub.add_parser("verify",    help="run the shipped test suite against YOUR changes")
     sp.add_argument("--diff", action="store_true", help="also show what changed vs GitHub")
     sp.add_argument("--review", action="store_true", help="ask the hive whether the diff looks safe")
@@ -16961,6 +17161,7 @@ COMMANDS = _resolve_cmds({
     "update":          "cmd_update",
     "rollback":        "cmd_rollback",
     "verify":          "cmd_verify",
+    "tests-for":       "cmd_tests_for",
     "link":            "cmd_link",
     "unlink":          "cmd_unlink",
     "repair":          "cmd_repair",
@@ -17448,6 +17649,7 @@ def _print_sub_help(cmd: str) -> None:
         "boot":      "auto-start the agent at login (survive reboot)\n  usage: hivv boot yes | hivv boot no   (on/off work too)\n  bare:   hivv boot          → report the current setting",
         "link":      "make YOUR CLONE the copy `hivv` runs (git pull = live updates)\n  usage: hivv link [path/to/hivv-cli.py]\n  alias: none — unlink to go back",
         "unlink":    "freeze the link into a standalone copy (snapshot; hivv update then moves it to the hub)",
+        "tests-for": "I edited <file> — which tests must I run?\n  usage: hivv tests-for <file>... | --diff [REF] | --refresh\n  reads tests/TESTMAP.json (pinned fresh by the suite itself)",
         "verify":    "run the shipped test suite against YOUR changes\n  flag: --diff    also show what changed vs GitHub\n  flag: --review  ask the hive whether the diff looks safe",
         "rollback":  "restore the last known-good CLI\n  flag: --list   show current/pinned/.bak/.bad\n  (healthchecked before restore; the replaced copy is kept as .bad)",
         "contributors": "who is helping — contributors by commit count\n  flag: --github  read straight from the GitHub API",
