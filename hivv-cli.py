@@ -12325,13 +12325,34 @@ def cmd_speeds(args) -> None:
     days = max(1, min(365, int(getattr(args, "days", 1) or 1)))
     limit = max(1, min(1000, int(getattr(args, "limit", 300) or 300)))
     since = datetime.fromtimestamp(time.time() - days * 86400).astimezone().isoformat(timespec="seconds")
-    code, p = http("GET", f"/api/provenance/requests?limit={limit}&since={urllib.parse.quote(since)}",
-                   timeout=20)
+
+    def _fetch(view: str | None = None):
+        path = (f"/api/provenance/requests?limit={limit}"
+                f"&since={urllib.parse.quote(since)}")
+        if view:
+            path += f"&view={view}"
+        return http("GET", path, timeout=20)
+
+    # The provenance API DEFAULTS to view=operator (correctly — the ledger
+    # holds who asked and from where), so any non-hub machine got a flat
+    # 403 and the command was hub-only in practice (yalla, 2026-11-20).
+    # Fix: operator first (full detail where we're allowed), then the API's
+    # own hinted fallback — the `partner` projection carries EVERY timing
+    # field these tables need (duration, ttfb, tok/s, model, node) and no
+    # identity unless a row's privacy policy allows it. "How fast is my
+    # AI" works from anywhere; only the per-user breakdown stays operator.
+    restricted = False
+    code, p = _fetch()
     if code in (401, 403):
-        die("operator view needs the hub host or a control token —\n"
-            "    export HIVV_CONTROL_TOKEN=<hub token> and retry")
+        code, p = _fetch("partner")
+        restricted = True
+    if code in (401, 403):
+        die("the speed ledger refused both views (operator AND partner) —\n"
+            "    run it on the hub host, or export HIVV_CONTROL_TOKEN=<hub token>")
     if code != 200 or not isinstance(p, dict):
         die(f"failed to read the speed ledger: {p}")
+    view_used = str(((p.get("data") or {}).get("view"))
+                    or ("partner" if restricted else "operator"))
     rows = [r for r in ((p.get("data") or {}).get("rows") or []) if isinstance(r, dict)]
 
     def _f(v):
@@ -12387,12 +12408,17 @@ def cmd_speeds(args) -> None:
     by_node: dict = {}
     transports: dict = {}
     for r in rows:
+        ident = (r.get("principal") or r.get("anonymous_visitor_id")
+                 or r.get("user_id"))
         who = str(r.get("principal") or r.get("anonymous_visitor_id")
                   or (f"user:{r.get('user_id')}" if r.get("user_id") else "?"))
         node = str(r.get("answered_by_node") or r.get("transport") or "?")
         tr = str(r.get("transport") or "?")
         transports[tr] = transports.get(tr, 0) + 1
-        for bucket, key in ((by_who, who), (by_node, node)):
+        # per-user ONLY for rows that carry identity — in the partner view
+        # they don't, and a table of one "?" bucket would be a lie
+        buckets = ((by_node, node),) if not ident else ((by_who, who), (by_node, node))
+        for bucket, key in buckets:
             g = bucket.setdefault(key, {"n": 0, "d": [], "t": []})
             g["n"] += 1
             if r.get("duration_ms") is not None:
@@ -12414,10 +12440,16 @@ def cmd_speeds(args) -> None:
     summary["by_transport"] = transports
 
     if getattr(args, "json_output", False):
-        print(json.dumps({"summary": summary, "rows": rows}, indent=2))
+        print(json.dumps({"summary": summary, "rows": rows,
+                          "view": view_used, "restricted": restricted},
+                         indent=2))
         return
 
-    print(f"\n\033[1m{APP} speeds\033[0m — request speed log (last {days}d, {len(rows)} request(s))\n")
+    print(f"\n\033[1m{APP} speeds\033[0m — request speed log (last {days}d, {len(rows)} request(s))")
+    if restricted:
+        print(f"  \033[2mview: {view_used} (timings only — per-user detail is "
+              f"operator-only: run on the hub or export HIVV_CONTROL_TOKEN)\033[0m")
+    print()
     if not rows:
         print("  no requests recorded in this window")
         print(f"  chat something first, then re-run: {APP} speeds")
@@ -12439,13 +12471,18 @@ def cmd_speeds(args) -> None:
             tps = "—" if g["avg_tokens_per_sec"] is None else str(g["avg_tokens_per_sec"])
             print(f"  {g['key'][:24]:<24} {g['requests']:>4}  {_ms(g['avg_duration_ms']):>9}  {tps:>9}")
 
-    _group_table("per user", summary["by_user"])
+    if summary["by_user"]:
+        _group_table("per user", summary["by_user"])
+    elif restricted:
+        print(f"\n  per user")
+        print(f"  \033[2m— operator-only in this view (timings above are complete)\033[0m")
     _group_table("per answering bee", summary["by_node"])
 
     print(f"\n  {'TIME':<9} {'WHO':<18} {'MODEL':<22} {'NODE':<14} {'TTFB':>7} {'REPLY':>8} {'TOK/S':>6}")
     for r in rows[:12]:
         created = str(r.get("created_at") or "")[11:19] or "?"
-        who = str(r.get("principal") or r.get("anonymous_visitor_id") or "?")[:18]
+        who = str(r.get("principal") or r.get("anonymous_visitor_id")
+                  or ("—" if restricted else "?"))[:18]
         mdl = str(r.get("model") or "?").split("/")[-1].replace(".gguf", "")[:22]
         node = str(r.get("answered_by_node") or "—")[:14]
         ttfb = r.get("ttfb_ms")
