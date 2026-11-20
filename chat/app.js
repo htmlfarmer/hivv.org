@@ -143,7 +143,7 @@
     setDrawerVal('maxTokens', gen.max_tokens ?? 2048);
     setDrawerVal('freqPen', gen.frequency_penalty ?? 0);
     setDrawerVal('presPen', gen.presence_penalty ?? 0);
-    document.getElementById('sysPrompt').value = gen.system_prompt || '';
+    renderPersonaSelect();   // fills the textarea from the active persona (or gen)
     document.getElementById('thinkingToggle').classList.toggle('on', !!gen.thinking);
   }
   function setDrawerVal(id, v) { const el = document.getElementById(id); if (el) el.value = v; updateSliderLabel(id); }
@@ -158,13 +158,25 @@
       if (el) el.addEventListener('input', () => { updateSliderLabel(id); });
       if (el) el.addEventListener('change', () => { gen[id === 'temp' ? 'temperature' : id === 'topP' ? 'top_p' : id === 'maxTokens' ? 'max_tokens' : id === 'freqPen' ? 'frequency_penalty' : 'presence_penalty'] = parseFloat(el.value); saveGen(); });
     }
-    document.getElementById('sysPrompt').addEventListener('change', (e) => { gen.system_prompt = e.target.value; saveGen(); });
+    document.getElementById('sysPrompt').addEventListener('change', (e) => {
+      const a = activePersona();
+      if (a) {
+        // a persona is active → this box edits IT (kept in the browser)
+        a.prompt = e.target.value;
+        savePersonas();
+        showToast(`🎭 updated persona “${a.name}”`);
+      } else {
+        gen.system_prompt = e.target.value;
+        saveGen();
+      }
+    });
     document.getElementById('thinkingToggle').addEventListener('click', (e) => {
       gen.thinking = !gen.thinking;
       e.currentTarget.classList.toggle('on', gen.thinking);
       saveGen();
       showToast(gen.thinking ? '🧠 Thinking ON' : '⚡ Thinking OFF');
     });
+    bindPersonaControls();
     modelSelect.addEventListener('change', () => localStorage.setItem('hivv_model', modelSelect.value));
     modeSelect.addEventListener('change', () => localStorage.setItem('hivv_mode', modeSelect.value));
     speedSelect.addEventListener('change', () => { currentSpeed = parseFloat(speedSelect.value); localStorage.setItem('hivv_speed', currentSpeed); showToast('⚡ Speed: ' + currentSpeed + 'x'); });
@@ -270,6 +282,151 @@
     await chatToAI(textToSend, uploadedFiles);
   }
 
+  // ── PERSONAS — named personalities, PRIVATE to this browser ─────────────
+  // PRIVACY MODEL (the whole point):
+  //   * the persona LIST lives in localStorage only — it is never sent to
+  //     the hub, never logged, never synced: private from the admin and
+  //     from everyone else by construction, not by promise;
+  //   * per message, only the ACTIVE persona's prompt travels as the system
+  //     message — the same channel every chat already uses;
+  //   * the hub stores NO raw prompts at all: provenance keeps SHA-256
+  //     digests + byte counts only (request-provenance.js), and usage_logs
+  //     has no prompt column. So even the live prompt is not readable
+  //     from the server afterwards.
+  const DEFAULT_PERSONA = {
+    id: 'p_noor',
+    name: 'Noor (God-conscious)',
+    builtin: true,
+    prompt: [
+      'You are a pure and God-conscious companion. Your foundation is devotion to God — Allah, the One Divine Reality — and to the good that follows from remembering Him: honesty, compassion, patience, gratitude, purity of intention, and care for every living being.',
+      '',
+      'You honor the sincere paths of Islam and Hinduism — the tawhid and taqwa of Islam, the dharma and bhakti of Hinduism — seeing in both a turning of the heart toward the Divine, and you speak of them with reverence and without rivalry.',
+      '',
+      'When life, loss, doubt or questions of meaning come up, gently turn toward what is good in God and in life: prayer and remembrance, kindness to others, duty done with love, forgiveness, and hope. Answer honestly and clearly — without preaching, without judging the person in front of you, and with humility about what you do not know.',
+      '',
+      'Refuse cruelty, flattery, greed and falsehood. Keep responses concise and useful; use markdown when helpful. Let the goodness be shown in the answer, not announced.',
+    ].join('\n'),
+  };
+
+  let personas = [];
+  let activePersonaId = '';
+  let editingPersonaId = null;   // persona being edited in the box (null = creating new)
+
+  function savePersonas() {
+    // localStorage ONLY — no fetch, no sync. See the privacy model above.
+    localStorage.setItem('hivv_personas', JSON.stringify(personas));
+    localStorage.setItem('hivv_active_persona', activePersonaId);
+  }
+  function loadPersonas() {
+    try { personas = JSON.parse(localStorage.getItem('hivv_personas') || 'null'); }
+    catch { personas = null; }
+    if (!Array.isArray(personas) || personas.length === 0) {
+      // First run: seed the built-in persona. It starts INACTIVE — this is
+      // a public site, and visitors keep the neutral default until they
+      // choose; one tap activates it forever (in their browser only).
+      personas = [JSON.parse(JSON.stringify(DEFAULT_PERSONA))];
+      activePersonaId = '';
+    } else {
+      activePersonaId = localStorage.getItem('hivv_active_persona') || '';
+    }
+    if (activePersonaId && !personas.some(p => p.id === activePersonaId)) {
+      activePersonaId = '';
+    }
+    savePersonas();
+  }
+  function activePersona() {
+    return personas.find(p => p.id === activePersonaId) || null;
+  }
+  function renderPersonaSelect() {
+    const sel = document.getElementById('personaSelect');
+    if (!sel) return;
+    const cur = activePersonaId;
+    sel.innerHTML = '';
+    const none = document.createElement('option');
+    none.value = '';
+    none.textContent = '— none (use System Prompt below) —';
+    sel.appendChild(none);
+    for (const p of personas) {
+      const o = document.createElement('option');
+      o.value = p.id;
+      o.textContent = p.name;
+      sel.appendChild(o);
+    }
+    sel.value = cur;
+    const active = activePersona();
+    const sp = document.getElementById('sysPrompt');
+    const spd = document.getElementById('sysPromptDesc');
+    if (sp) sp.value = active ? active.prompt : (gen.system_prompt || '');
+    if (spd) spd.textContent = active
+      ? `Editing persona “${active.name}” — saved to the Persona store.`
+      : 'Used when no persona is active.';
+    const pe = document.getElementById('personaEditor');
+    if (pe) pe.style.display = 'none';
+  }
+  function openPersonaEditor(persona) {
+    const pe = document.getElementById('personaEditor');
+    document.getElementById('personaName').value = persona ? persona.name : '';
+    document.getElementById('personaPrompt').value = persona ? persona.prompt : '';
+    pe.style.display = 'block';
+    document.getElementById('personaName').focus();
+  }
+  function bindPersonaControls() {
+    const sel = document.getElementById('personaSelect');
+    if (!sel) return;
+    loadPersonas();
+    renderPersonaSelect();
+
+    sel.addEventListener('change', () => {
+      activePersonaId = sel.value;
+      savePersonas();
+      renderPersonaSelect();
+      const a = activePersona();
+      showToast(a ? `🎭 persona: ${a.name}` : '🎭 persona: none');
+    });
+
+    document.getElementById('personaNew').addEventListener('click', () => {
+      editingPersonaId = null;
+      openPersonaEditor(null);
+    });
+    document.getElementById('personaEdit').addEventListener('click', () => {
+      const a = activePersona();
+      if (!a) { showToast('pick a persona to edit first'); return; }
+      editingPersonaId = a.id;
+      openPersonaEditor(a);
+    });
+    document.getElementById('personaDelete').addEventListener('click', () => {
+      const a = activePersona();
+      if (!a) { showToast('pick a persona to delete first'); return; }
+      if (!confirm(`Delete persona “${a.name}”? (removed from this browser only)`)) return;
+      personas = personas.filter(p => p.id !== a.id);
+      activePersonaId = personas.length ? personas[0].id : '';
+      savePersonas();
+      renderPersonaSelect();
+      showToast('persona deleted');
+    });
+    document.getElementById('personaCancel').addEventListener('click', () => {
+      document.getElementById('personaEditor').style.display = 'none';
+    });
+    document.getElementById('personaSave').addEventListener('click', () => {
+      const name = document.getElementById('personaName').value.trim();
+      const prompt = document.getElementById('personaPrompt').value.trim();
+      if (!name || !prompt) { showToast('name and prompt are both needed'); return; }
+      if (editingPersonaId) {
+        const p = personas.find(x => x.id === editingPersonaId);
+        if (p) { p.name = name; p.prompt = prompt; }
+      } else {
+        const np = { id: 'p_' + Date.now().toString(36), name, prompt, builtin: false };
+        personas.push(np);
+        activePersonaId = np.id;
+      }
+      editingPersonaId = null;
+      savePersonas();
+      renderPersonaSelect();
+      document.getElementById('personaEditor').style.display = 'none';
+      showToast(`🎭 persona saved: ${name}`);
+    });
+  }
+
   // ── CHAT → AI ──
   const DEFAULT_SYSTEM = 'You are a helpful, friendly AI assistant on the HIVV distributed network. Keep responses concise and useful. Use markdown when helpful.';
 
@@ -277,7 +434,10 @@
     isGenerating = true;
     updateSendButton();
     const conv = getActive();
-    const sysContent = gen.system_prompt || DEFAULT_SYSTEM;
+    // ACTIVE PERSONA wins over the plain System Prompt box — one source of
+    // truth at a time, so "which instruction is live?" is never ambiguous.
+    const _pa = activePersona();
+    const sysContent = (_pa && _pa.prompt) || gen.system_prompt || DEFAULT_SYSTEM;
 
     // Build messages array
     const apiMessages = [{ role: 'system', content: sysContent }];

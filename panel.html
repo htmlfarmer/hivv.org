@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="theme-color" content="#0d1117">
+<title>Panel — HIVV.org</title>
+<meta name="description" content="Pocket control for your HIVV network: status, update all bees, answer approvals. Private admin actions, admin-session authed.">
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<style>
+  :root { --bg:#0d1117; --card:#161b22; --line:#30363d; --text:#e6edf3; --dim:#8b949e;
+          --green:#3fb950; --blue:#58a6ff; --orange:#d29922; --red:#f85149; }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  body { margin:0; background:var(--bg); color:var(--text);
+         font:16px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+         padding-bottom:calc(24px + env(safe-area-inset-bottom)); }
+  header { position:sticky; top:0; z-index:5; background:rgba(13,17,23,.96);
+           backdrop-filter:blur(8px); border-bottom:1px solid var(--line);
+           padding:12px 16px; display:flex; align-items:center; gap:10px; }
+  header .brand { font-weight:700; font-size:1.05rem; }
+  .pill { margin-left:auto; font-size:.78rem; padding:3px 10px; border-radius:999px;
+          background:var(--card); border:1px solid var(--line); }
+  .pill.ok { color:var(--green); border-color:#238636; }
+  .pill.bad { color:var(--red); }
+  main { padding:14px; max-width:560px; margin:0 auto; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px;
+          padding:14px; margin-bottom:14px; }
+  .card h2 { margin:0 0 10px; font-size:.85rem; text-transform:uppercase;
+             letter-spacing:.06em; color:var(--dim); font-weight:600; }
+  .btn { display:block; width:100%; padding:15px; border-radius:10px; border:0;
+         font-size:1.02rem; font-weight:700; cursor:pointer; margin-top:8px; }
+  .btn.primary { background:#238636; color:#fff; }
+  .btn.primary:active { background:#2ea043; }
+  .btn.ghost { background:transparent; color:var(--text); border:1px solid var(--line); }
+  .btn.danger { background:transparent; color:var(--red); border:1px solid #6e2220; }
+  .btn:disabled { opacity:.5; }
+  input, select, textarea { width:100%; padding:12px; margin-top:8px; border-radius:9px;
+    border:1px solid var(--line); background:#0d1117; color:var(--text); font-size:16px; }
+  .row { display:flex; gap:8px; } .row .btn { margin-top:0; }
+  .bee { display:flex; align-items:center; gap:10px; padding:11px 0;
+         border-top:1px solid var(--line); }
+  .bee:first-of-type { border-top:0; }
+  .dot { width:9px; height:9px; border-radius:50%; flex:none; background:var(--red); }
+  .dot.on { background:var(--green); } .dot.warn { background:var(--orange); }
+  .bee .name { font-weight:600; } .bee .meta { color:var(--dim); font-size:.8rem; }
+  .bee .acts { margin-left:auto; display:flex; gap:6px; }
+  .bee .acts button { padding:8px 11px; font-size:.8rem; border-radius:8px;
+    border:1px solid var(--line); background:#21262d; color:var(--text); cursor:pointer; }
+  .grant { border-top:1px solid var(--line); padding:11px 0; }
+  .grant:first-of-type { border-top:0; }
+  .grant .cap { font-weight:700; color:var(--blue); }
+  .grant .why { color:var(--dim); font-size:.85rem; margin:3px 0 8px;
+                word-break:break-word; }
+  #toast { position:fixed; left:50%; transform:translateX(-50%);
+           bottom:calc(20px + env(safe-area-inset-bottom)); background:#1f6feb;
+           color:#fff; padding:11px 18px; border-radius:10px; font-weight:600;
+           opacity:0; transition:opacity .25s; z-index:9; max-width:92vw; }
+  #toast.show { opacity:1; }
+  .dim { color:var(--dim); font-size:.85rem; }
+  .empty { color:var(--dim); font-size:.9rem; padding:6px 0; }
+  a { color:var(--blue); }
+</style>
+</head>
+<body>
+<header>
+  <span class="brand">🐝 HIVV Panel</span>
+  <span class="pill" id="hivePill">…</span>
+</header>
+
+<main>
+  <!-- LOGIN (session cookie — admin/owner role unlocks control writes) -->
+  <div class="card" id="loginCard" style="display:none">
+    <h2>🔐 Admin login</h2>
+    <input id="user" autocomplete="username" placeholder="username" autocapitalize="none">
+    <input id="pass" type="password" autocomplete="current-password" placeholder="password">
+    <button class="btn primary" id="loginBtn">Sign in</button>
+    <p class="dim">Your session cookie authorizes actions on this device.
+       Personas and chat stay in their own pages — this panel only moves the network.</p>
+  </div>
+
+  <!-- ACTIONS -->
+  <div class="card" id="actionsCard" style="display:none">
+    <h2>⚡ Fleet</h2>
+    <div id="updateSummary" class="dim">—</div>
+    <button class="btn primary" id="updateAllBtn">🔄 Update all bees</button>
+    <button class="btn ghost" id="refreshBtn">↻ Refresh status</button>
+    <p class="dim" id="updateNote">Preview first — nothing is pushed until you confirm.
+       Every bee re-runs its own AI review gate on the update.</p>
+  </div>
+
+  <!-- BEES -->
+  <div class="card" id="beesCard" style="display:none">
+    <h2>🐝 Bees</h2>
+    <div id="bees"><div class="empty">loading…</div></div>
+  </div>
+
+  <!-- APPROVALS -->
+  <div class="card" id="grantsCard" style="display:none">
+    <h2>⚖️ Pending approvals</h2>
+    <div id="grants"><div class="empty">loading…</div></div>
+  </div>
+
+  <p class="dim" style="text-align:center">HIVV · <a href="/command-center.html">command center</a>
+     · <a href="/chat/">chat</a> · <a href="/nodes.html">nodes</a></p>
+</main>
+
+<div id="toast"></div>
+
+<script>
+(function () {
+  const $ = (id) => document.getElementById(id);
+  let isAdmin = false;
+
+  function toast(msg) {
+    const t = $('toast'); t.textContent = msg; t.classList.add('show');
+    clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove('show'), 2600);
+  }
+  async function api(path, opts) {
+    const r = await fetch(path, Object.assign({ credentials: 'same-origin' }, opts || {}));
+    let data = null;
+    try { data = await r.json(); } catch (_e) {}
+    if (r.status === 401) { isAdmin = false; showLogin(); throw new Error('admin required'); }
+    if (!r.ok) throw new Error((data && data.error) || ('HTTP ' + r.status));
+    return data;
+  }
+  function showLogin() {
+    $('loginCard').style.display = 'block';
+    $('actionsCard').style.display = 'none';
+    $('beesCard').style.display = 'none';
+    $('grantsCard').style.display = 'none';
+  }
+  function showApp() {
+    $('loginCard').style.display = 'none';
+    $('actionsCard').style.display = 'block';
+    $('beesCard').style.display = 'block';
+    $('grantsCard').style.display = 'block';
+  }
+
+  // ── LOGIN ─────────────────────────────────────────────────────────────
+  $('loginBtn').addEventListener('click', async () => {
+    try {
+      await api('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: $('user').value.trim(), password: $('pass').value }),
+      });
+      isAdmin = true; toast('signed in'); showApp(); refresh();
+    } catch (e) { toast(e.message); }
+  });
+
+  // ── STATUS ────────────────────────────────────────────────────────────
+  async function refresh() {
+    try {
+      const h = await fetch('/api/health').then(r => r.json());
+      $('hivePill').textContent = (h.status === 'healthy' ? '● ' : '▲ ') + (h.nodes_online || '?') + ' online';
+      $('hivePill').className = 'pill ' + (h.status === 'healthy' ? 'ok' : 'bad');
+    } catch (_e) { $('hivePill').textContent = 'hub unreachable'; $('hivePill').className = 'pill bad'; }
+
+    try {
+      const d = await fetch('/api/control/nodes').then(r => r.json());
+      const nodes = d.nodes || [];
+      const live = nodes.filter(n => n.status !== 'offline');
+      $('updateSummary').textContent =
+        `${live.length} live bee(s) · hub ${d.total - live.length} offline`;
+      $('bees').innerHTML = nodes.map(n => {
+        const cls = n.status === 'online' ? 'on' : (n.status === 'stale' ? 'warn' : '');
+        const age = n.heartbeat_age_s != null
+          ? (n.heartbeat_age_s < 120 ? n.heartbeat_age_s + 's ago'
+             : Math.round(n.heartbeat_age_s / 60) + 'm ago') : '—';
+        const models = (n.local_models || []).length;
+        return `<div class="bee" data-id="${n.id}">
+          <span class="dot ${cls}"></span>
+          <div><div class="name">${n.name}</div>
+               <div class="meta">${n.status} · hb ${age} · ${models} model(s) · ${n.version || '?'}</div></div>
+          <div class="acts">
+            <button data-act="update" ${n.status === 'offline' ? 'disabled' : ''}>update</button>
+            <button data-act="restart" ${n.status !== 'online' ? 'disabled' : ''}>restart</button>
+            <button data-act="selftest" ${n.status !== 'online' ? 'disabled' : ''}>test</button>
+          </div></div>`;
+      }).join('');
+    } catch (_e) { $('bees').innerHTML = '<div class="empty">could not load bees</div>'; }
+
+    if (isAdmin) loadGrants();
+  }
+
+  $('bees').addEventListener('click', async (ev) => {
+    const btn = ev.target.closest('button[data-act]');
+    if (!btn || btn.disabled) return;
+    const id = btn.closest('.bee').dataset.id;
+    const act = btn.dataset.act;
+    btn.disabled = true;
+    try {
+      if (act === 'update') {
+        const r = await api('/api/control/agents/' + encodeURIComponent(id) + '/push-update',
+          { method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ version: '0.2.panel' }) });
+        toast(`${id}: update queued (${(r.message && r.message.payload && r.message.payload.version) || 'ok'})`);
+      } else if (act === 'restart') {
+        await api('/api/control/agents/' + encodeURIComponent(id) + '/repair',
+          { method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ops: [{ op: 'agent_restart' }], reason: 'panel' }) });
+        toast(`${id}: restart queued`);
+      } else if (act === 'selftest') {
+        await api('/api/control/agents/' + encodeURIComponent(id) + '/repair',
+          { method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ops: [{ op: 'selftest' }], reason: 'panel' }) });
+        toast(`${id}: selftest queued`);
+      }
+    } catch (e) { toast(e.message); }
+    btn.disabled = false;
+  });
+
+  // ── UPDATE ALL (preview → confirm → push) ─────────────────────────────
+  let armed = false;
+  $('updateAllBtn').addEventListener('click', async () => {
+    const btn = $('updateAllBtn');
+    try {
+      if (!armed) {
+        btn.disabled = true;
+        const plan = await api('/api/control/update-all',
+          { method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ dry_run: true }) });
+        btn.textContent = `⚠ push ${plan.version} to ${plan.pushed.length} bee(s) — TAP TO CONFIRM`;
+        btn.classList.remove('primary'); btn.classList.add('danger');
+        armed = true; btn.disabled = false;
+        setTimeout(() => {   // disarm after 8s — a stale confirm button is a hazard
+          if (armed) { armed = false; resetBtn(); }
+        }, 8000);
+        return;
+      }
+      armed = false; btn.disabled = true;
+      const r = await api('/api/control/update-all',
+        { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({}) });
+      toast(`queued for ${r.pushed.length} bee(s)` +
+            (r.skipped.length ? `, skipped ${r.skipped.length}` : ''));
+      resetBtn(); refresh();
+    } catch (e) { toast(e.message); armed = false; resetBtn(); }
+    function resetBtn() {
+      btn.textContent = '🔄 Update all bees';
+      btn.classList.add('primary'); btn.classList.remove('danger'); btn.disabled = false;
+    }
+  });
+  $('refreshBtn').addEventListener('click', () => { refresh(); toast('refreshed'); });
+
+  // ── APPROVALS (policy MAYBEs waiting on a human) ──────────────────────
+  async function loadGrants() {
+    try {
+      const d = await api('/api/policy/grants?status=pending');
+      const gs = d.grants || [];
+      if (!gs.length) { $('grants').innerHTML = '<div class="empty">nothing waiting ✓</div>'; return; }
+      $('grants').innerHTML = gs.map(g => `
+        <div class="grant" data-id="${g.id}">
+          <span class="cap">${g.capability || '?'}</span>
+          <div class="why">${(g.reason || g.principal || '').toString().slice(0, 160)}</div>
+          <div class="row">
+            <button class="btn primary" data-v="approve" style="padding:11px">✓ allow</button>
+            <button class="btn danger" data-v="deny" style="padding:11px">✗ deny</button>
+          </div></div>`).join('');
+    } catch (_e) { $('grants').innerHTML = '<div class="empty">approvals need admin login</div>'; }
+  }
+  $('grants').addEventListener('click', async (ev) => {
+    const btn = ev.target.closest('button[data-v]');
+    if (!btn) return;
+    const id = btn.closest('.grant').dataset.id;
+    try {
+      await api('/api/policy/grants/' + encodeURIComponent(id) + '/decide',
+        { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ verdict: btn.dataset.v }) });
+      toast(btn.dataset.v === 'approve' ? 'approved ✓' : 'denied');
+      loadGrants();
+    } catch (e) { toast(e.message); }
+  });
+
+  // ── BOOT: are we already admin? (a real write is the only honest test —
+  //     control GETs are public by design, so probe with dry_run) ────────
+  (async function boot() {
+    refresh();
+    try {
+      await api('/api/control/update-all',
+        { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ dry_run: true }) });
+      isAdmin = true; showApp(); refresh();
+    } catch (_e) { showLogin(); }
+    setInterval(refresh, 20000);   // stay fresh while the phone is in a pocket
+  })();
+})();
+</script>
+</body>
+</html>

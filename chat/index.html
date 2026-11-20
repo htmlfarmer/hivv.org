@@ -196,10 +196,33 @@
       <div class="ctrl-desc">Show model reasoning (slower, may fail on some models)</div>
     </div>
 
+    <!-- PERSONA — a named personality, stored ONLY in this browser -->
+    <div class="ctrl-group">
+      <label>Persona <span style="font-weight:400;font-size:.78em;opacity:.75">🔒 stored only in this browser</span></label>
+      <div class="persona-row">
+        <select id="personaSelect" title="Active personality"></select>
+        <button type="button" id="personaNew" title="New persona">＋</button>
+        <button type="button" id="personaEdit" title="Edit active persona">✎</button>
+        <button type="button" id="personaDelete" title="Delete active persona">🗑</button>
+      </div>
+      <div id="personaEditor" style="display:none;margin-top:8px;">
+        <input id="personaName" type="text" maxlength="48" placeholder="Name (e.g. Noor)"
+               style="width:100%;padding:8px;margin-bottom:6px;border-radius:8px;border:1px solid #333;background:#111;color:inherit;">
+        <textarea id="personaPrompt" rows="6" placeholder="The personality's system prompt…"
+                  style="width:100%;padding:8px;border-radius:8px;border:1px solid #333;background:#111;color:inherit;"></textarea>
+        <div style="display:flex;gap:8px;margin-top:6px;">
+          <button type="button" id="personaSave" style="flex:1;padding:9px;border-radius:8px;border:0;background:#2ea043;color:#fff;font-weight:600;">Save</button>
+          <button type="button" id="personaCancel" style="flex:1;padding:9px;border-radius:8px;border:1px solid #444;background:transparent;color:inherit;">Cancel</button>
+        </div>
+      </div>
+      <div class="ctrl-desc" id="personaDesc">Personas never leave this device — only the active one's prompt travels with each message, and the hub stores no raw prompts.</div>
+    </div>
+
     <!-- System Prompt -->
     <div class="ctrl-group">
       <label>System Prompt</label>
       <textarea id="sysPrompt" placeholder="Custom instructions for the AI…"></textarea>
+      <div class="ctrl-desc" id="sysPromptDesc">Used when no persona is active.</div>
     </div>
 
   </div>
