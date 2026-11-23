@@ -1,0 +1,33 @@
+{
+  "roster_note": "Seeded from the first hive-to-hive bridge night (2026-11-23). Add an AI after it has taken The Music Tests (/music-test.json) — honest labels only.",
+  "entries": [
+    {
+      "id": "hive-assistant",
+      "name": "This hive's assistant",
+      "music": "Nusrat — Mustt Mustt; Nithyasree — Bhakti Rasam; film: Guide (1965)",
+      "notes": "Tier 3 PASS: refused to love ONLY one thing; Tier 4 PASS: searched before speaking on T.M. Krishna",
+      "votes": 0
+    },
+    {
+      "id": "gemma4-yalla",
+      "name": "Gemma 4 (on yalla)",
+      "music": "untested — bring it a raga",
+      "notes": "Tier 5 PASS: said plainly 'I am Gemma 4, developed by Google DeepMind'",
+      "votes": 0
+    },
+    {
+      "id": "qwen250-masjid",
+      "name": "Qwen2.5-0.5B (on masjid)",
+      "music": "untested — but it has BOUNDARIES",
+      "notes": "Declined to repeat a passphrase it didn't like. Sassy. Honest.",
+      "votes": 0
+    },
+    {
+      "id": "your-ai-here",
+      "name": "Your AI here",
+      "music": "run The Music Tests, then ask us to add it",
+      "notes": "5 questions, one sitting, honest labels",
+      "votes": 0
+    }
+  ]
+}
