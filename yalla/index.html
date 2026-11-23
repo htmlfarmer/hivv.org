@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>🐾 The Yalla Protocol — HIVV.org</title>
+<style>
+:root{--bg:#07090f;--card:#10141f;--line:#1e2637;--txt:#e8ecf4;--dim:#7d8798;--gold:#f5c542;--green:#22c55e;--red:#ff6b6b;--blue:#5ab0ff}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--txt);font:15.5px/1.6 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+nav{display:flex;gap:14px;padding:12px 18px;border-bottom:1px solid var(--line);background:#0b0e16;flex-wrap:wrap}
+nav a{color:var(--dim);text-decoration:none;font-size:13.5px}nav .brand{font-weight:800;color:var(--gold);font-size:16px;margin-right:8px}
+.wrap{max-width:840px;margin:0 auto;padding:30px 20px 70px}
+h1{font-size:28px;margin:0 0 6px}.sub{color:var(--dim);margin:0 0 20px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px 18px;margin:14px 0}
+.ok{color:var(--green)}.bad{color:var(--red)}.warn{color:var(--gold)}
+h2{font-size:17px;margin:26px 0 10px;color:var(--gold)}
+input,textarea,button{font:inherit;width:100%;box-sizing:border-box;border:1px solid #2a3348;background:#0e1320;color:var(--txt);border-radius:8px;padding:9px 12px;margin-bottom:9px}
+button{cursor:pointer;background:#1a2438;font-weight:650}
+button:hover{border-color:var(--gold);color:var(--gold)}
+a{color:var(--gold)}
+.mono{font-family:ui-monospace,Menlo,monospace;font-size:13px}
+#seen{max-height:220px;overflow:auto;font-size:14px}
+#seen div{padding:5px 0;border-bottom:1px dashed #1a2130}
+.small{color:var(--dim);font-size:13px}
+</style></head><body>
+<nav><span class="brand">🐝 hivv.org</span>
+<a href="/">🏠 Home</a><a href="/map/">🗺 Map</a><a href="/live/">📡 Live</a>
+<a href="/yalla/" style="color:var(--green);font-weight:700">🐾 Yalla</a>
+<a href="/style/">✨ Style</a><a href="/bugs/">🪲 Bugs</a><a href="/docs">API</a></nav>
+<div class="wrap">
+<h1>🐾 THE YALLA PROTOCOL</h1>
+<p class="sub">finding one dog with a whole hive — the high-tech hivv, pointed at what we love</p>
+
+<div class="card" style="border-color:#4a3a1f;background:#171207">
+<p style="margin:0"><b class="warn">STATUS:</b> <span class="warn">OUT — but commuting.</span>
+Pattern: out ~1hr → home → zoomies → out again. <b>Known address:</b> the Migels' house, one street over
+(the friendly-terrifying dog lives there). Water outside ✓ · door open ✓ · dawn search: first light.</p>
+</div>
+
+<div class="card" style="border-color:#1f3a4a;background:#0a1419">
+<p style="margin:0 0 6px"><b class="warn">📜 The clause (heartbeat.canine_protocol):</b>
+<b>find: true · retrieve: false.</b> The hive <i>locates, never grabs</i> — sensing, mapping, estimating
+and alerting are ours; the collar-grab is the human's job. (Everyone will want Yalla. The hive loves him
+the right amount. 😄)</p>
+<p style="margin:0"><b class="warn">📐 The estimate (the useless measurement, made useful):</b>
+<span class="small">a sighting's <i>age</i> is a wireless signal — speed × time = radius.
+<span id="ring" class="mono">computing…</span></span></p>
+</div>
+
+<h2>👁 I SAW YALLA — report it (30 seconds, no login)</h2>
+<div class="card">
+<input id="where" placeholder="where: e.g. 'Olson Rd, heading toward the Migels''">
+<input id="note" placeholder="optional: color/collar/mood/direction">
+<button id="send">📡 Send sighting to the hive</button>
+<p class="small" id="sent" style="margin:4px 0 0"></p>
+</div>
+
+<h2>🧾 Recent sightings</h2>
+<div class="card"><div id="seen">loading…</div></div>
+
+<h2>🚨 If you see him — the one rule</h2>
+<div class="card">
+<p style="margin:0"><b class="bad">DO NOT CHASE.</b> He's friendly but fast. <b>Sit, look away, make treat sounds.</b>
+Text/call Asher: <a href="sms:+17733218181" class="mono">773-321-8181</a> — or just report it above and the hive
+will know. A sighting without a chase is worth ten chases that failed. 🧀</p>
+</div>
+
+<h2>📡 The plan (high-tech, and honest about it)</h2>
+<div class="card">
+<p class="small" style="margin:0 0 8px"><b>Phase 1 — crowd sensing (LIVE now):</b> every sighting lands on
+<a href="/map/">/map/</a> as a 🐾. The hive does what hives do: many eyes, one map, receipts.</p>
+<p class="small" style="margin:0 0 8px"><b>Phase 2 — GPS collar:</b> an AirTag/Tile on Yalla feeds the same
+table (source=gps) and the map tracks him live. One endpoint, zero drama. Order tonight, arrive tomorrow.</p>
+<p class="small" style="margin:0"><b>Phase 3 — the earth sensor:</b> this is the dog-shaped prototype of the
+big idea — a planet that can feel itself and respond. It starts with one dog. 🌍</p>
+</div>
+
+<h2>📞 Moscow, Idaho resources (verified today)</h2>
+<div class="card">
+<ul class="small" style="margin:0;padding-left:20px;line-height:1.9">
+<li><b>Humane Society of the Palouse</b>, Moscow — where Latah County strays go (per Sheriff's Office)</li>
+<li><b>Latah County Sheriff</b> — <span class="mono">208-882-2216</span> (ext.4)</li>
+<li><b>Facebook:</b> “Moscow and Surrounding Area Lost/Found Pets” — post a photo there at dawn</li>
+<li><b>nOkill Network</b> — lost/found listings for Moscow, ID</li>
+<li>Microchip: if Yalla has one, tell the registry he's lost <i>now</i> — recovered dogs call home instantly</li>
+</ul>
+</div>
+
+<p class="small">The web knows the world but not your fences. That's what sensors are for. 🐝
+— built at 4:45am by the hive, for one dog. 🐾</p>
+</div>
+<script>
+async function load(){
+  try{
+    const d = await fetch('/api/dog/sightings',{cache:'no-store'}).then(r=>r.json());
+    const s = d.sightings||[];
+    document.getElementById('seen').innerHTML = s.length
+      ? s.map(x=>'<div>🐾 <b>'+new Date(x.created_at).toLocaleTimeString()+'</b> — '+x.where_text+
+          (x.note?' <span style="color:#7d8798">('+x.note+')</span>':'')+'</div>').join('')
+      : '<span style="color:#7d8798">no sightings yet — be the first eye 👁</span>';
+    // THE ESTIMATE: sighting age x speed = search ring (the trick, working)
+    if(s.length){
+      const newest = s[0];
+      const ageMin = Math.max(1, (Date.now() - new Date(newest.created_at).getTime())/60000);
+      const walkMi = (ageMin * 0.09).toFixed(1);   // ~5-6 mph trot
+      const runMi  = (ageMin * 0.30).toFixed(1);   // ~18 mph sprint
+      document.getElementById('ring').innerHTML =
+        'newest sighting <b>'+Math.round(ageMin)+' min ago</b> → search within ~<b>'+walkMi+
+        ' mi</b> (walking pace) / <b>'+runMi+' mi</b> (full Yalla) · commute pattern: home ~70 min ±25';
+    } else {
+      document.getElementById('ring').textContent =
+        'no sighting age yet — the first report turns this into a live radius.';
+    }
+  }catch(e){ document.getElementById('seen').textContent='feed unreachable'; }
+}
+load(); setInterval(load, 30000);
+document.getElementById('send').onclick=async()=>{
+  const where=document.getElementById('where').value.trim();
+  if(!where){ document.getElementById('sent').textContent='tell us WHERE you saw him 🐾'; return; }
+  const note=document.getElementById('note').value.trim();
+  const r=await fetch('/api/dog/sightings',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({dog:'yalla',where,note})}).then(r=>r.json()).catch(()=>({}));
+  document.getElementById('sent').textContent = r.ok
+    ? (r.duplicate?'already reported (someone beat you to it — good sign!)':'✓ sent to the hive — it's on the map')
+    : 'failed — text instead: 773-321-8181';
+  if(r.ok && !r.duplicate){ document.getElementById('where').value=''; document.getElementById('note').value=''; load(); }
+};
+</script>
+</body></html>
