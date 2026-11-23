@@ -41,7 +41,7 @@ h1{font-size:23px;margin:0 0 2px}.sub{color:var(--dim);font-size:13.5px;margin:0
 
 <div class="layout">
 <div>
-+<div class="tabs" style="display:flex;gap:8px;margin-bottom:10px">
+<div class="tabs" style="display:flex;gap:8px;margin-bottom:10px">
   <button class="tab on" data-pane="hive" style="cursor:pointer;font:inherit;font-size:13px;padding:6px 14px;border-radius:8px;border:1px solid #232b3d;background:#141926;color:#e8ecf4">🌐 Hive</button>
   <button class="tab" data-pane="world" style="cursor:pointer;font:inherit;font-size:13px;padding:6px 14px;border-radius:8px;border:1px solid #232b3d;background:#10141f;color:#8b94a7">🌍 World · xyzo.org</button>
 </div>
@@ -119,7 +119,7 @@ async function tick(){
   }catch(e){}
 }
 tick(); setInterval(tick, 10000);
-+<script>
+<script>
 // tabs: the World pane lazy-loads xyzo.org on FIRST click — visitors who
 // never click cost xyzo nothing (low-cost by construction).
 document.querySelectorAll('.tab').forEach(b => b.addEventListener('click', () => {
