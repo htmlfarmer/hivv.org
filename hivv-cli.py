@@ -99,90 +99,85 @@ NO_THINK = False
 # OpenAI-format tool schemas for function-calling via the hive's LLM.
 # These are sent to the hub when chatting, enabling the LLM to decide when
 # to call tools (search, fetch, calculate, time, sysinfo).
-TOOL_SCHEMAS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "news",
-            "description": "Search Google News for current news articles. Best for 'what's happening in [city]?', current events, today's headlines. Returns top stories with titles, sources, dates, and snippets.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "The news query (e.g. 'San Francisco', 'technology')"},
-                    "location": {"type": "string", "description": "Optional location for local news (e.g. 'San Francisco', 'London')"}
-                },
-                "required": ["query"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "search",
-            "description": "Search Wikipedia for information. Returns article titles, snippets, and URLs. Best for factual queries, definitions, and general knowledge.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "The search query (e.g. 'quantum computing', 'World War II history')"}
-                },
-                "required": ["query"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "fetch",
-            "description": "Retrieve the content of a URL. Returns status, content type, and readable text (HTML stripped, max 1500 chars).",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "url": {"type": "string", "description": "The URL to fetch (must be http or https)"}
-                },
-                "required": ["url"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "calculate",
-            "description": "Evaluate a mathematical expression. Supports +, -, *, /, %, **, parentheses, and Python builtins (abs, round, min, max, pow).",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "expression": {"type": "string", "description": "Math expression to evaluate (e.g. '2+2*10' or '(1024 * 768) / 300'"}
-                },
-                "required": ["expression"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_time",
-            "description": "Get the current time. Returns human-readable local time, Unix timestamp, ISO format, and optionally converts to a specific timezone.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "timezone": {"type": "string", "description": "IANA timezone (e.g. 'America/New_York', 'Asia/Dhaka', 'Europe/London')"}
-                },
-                "required": []
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "sysinfo",
-            "description": "Get local system information: CPU, memory, disk, load, and uptime.",
-            "parameters": {
-                "type": "object",
-                "properties": {}
-            }
-        }
-    }
+# The OFFLINE fallback for _tool_schemas(): the HUB's catalog in compact
+# form. When the hub is reachable the authoritative version is fetched from
+# GET /api/tools/catalog instead — this list only exists so a bee with no
+# uplink is still offered the tools that run on its own box (the clock, the
+# calculator, the timezone converter, the text parser).
+#
+# (name, description, {param: (type, description)}, required-params)
+_FALLBACK_TOOL_DEFS = [
+    ("current_time",
+     "Today's date and time: unix, ISO-8601, day of week, UTC offset. Pass an IANA timezone (e.g. Asia/Karachi).",
+     {"timezone": ("string", "IANA timezone name (e.g. Europe/Paris)")}, []),
+    ("calculator",
+     "Accurate arithmetic: + - * / % ^, parentheses, pi, e, and functions (sqrt, log, sin, abs, min, max, factorial…). Never compute by hand.",
+     {"expression": ("string", "The expression to evaluate, e.g. (12 + 8) * 3 / 7")}, ["expression"]),
+    ("timezone_convert",
+     "Convert a moment between IANA timezones (DST-correct), or ask for the time in a zone.",
+     {"timezone": ("string", "Target IANA timezone, e.g. America/New_York"),
+      "from_timezone": ("string", "Source IANA timezone, when converting between two zones"),
+      "datetime": ("string", "The moment to convert (ISO-8601). Omit for now")}, ["timezone"]),
+    ("text_parser",
+     "Parse JSON, CSV, XML or YAML into structure. operation: parse, pretty, validate, extract (urls/emails/dates).",
+     {"input": ("string", "The text to parse"),
+      "format": ("string", "auto|json|csv|xml|yaml|text"),
+      "operation": ("string", "parse|pretty|validate|extract")}, ["input"]),
+    ("sysinfo",
+     "CPU, memory, disk, load and uptime of the machine doing the work.", {}, []),
+    ("web_fetch",
+     "Read a web page and return readable text (HTML stripped, JSON pretty-printed).",
+     {"url": ("string", "The absolute http(s) URL to read")}, ["url"]),
+    ("http_request",
+     "Call an HTTP API: any method, headers, JSON or form body, query params. Returns status, headers, body.",
+     {"url": ("string", "The absolute http(s) URL to call"),
+      "method": ("string", "GET|POST|PUT|PATCH|DELETE|HEAD"),
+      "headers": ("object", "Request headers as key/value pairs"),
+      "json": ("object", "A JSON body"),
+      "query": ("object", "Query-string parameters")}, ["url"]),
+    ("code_interpreter",
+     "Run code in an isolated sandbox (no network, capped memory/CPU, read-only). python, bash or node.",
+     {"code": ("string", "The source code to run"),
+      "language": ("string", "python|bash|node")}, ["code"]),
+    ("file_read",
+     "Read a document: PDF, DOCX, TXT, CSV, JSON, YAML, Markdown. Pass an uploaded file id, or a URL.",
+     {"id": ("string", "The id of an uploaded document"),
+      "url": ("string", "A URL to fetch and read instead")}, []),
+    ("file_search",
+     "Search uploaded documents for text or a regex; returns matching lines with line numbers and context.",
+     {"query": ("string", "The text (or regular expression) to look for"),
+      "regex": ("boolean", "Treat the query as a regular expression")}, ["query"]),
+    ("memory",
+     "Remember something for later. action: remember (key+value), recall, forget, list. Private to this conversation.",
+     {"action": ("string", "remember|recall|forget|list"),
+      "key": ("string", "The key to store under or delete"),
+      "value": ("string", "The value to remember"),
+      "query": ("string", "Filter recalled memories by this text")}, []),
+    ("translate",
+     "Translate text between languages — the hive does the translating.",
+     {"text": ("string", "The text to translate"),
+      "to": ("string", "Target language code (e.g. ur, es, fr, zh)"),
+      "from": ("string", "Source language code. Omit to auto-detect")}, ["text", "to"]),
+    ("web_search",
+     "Search the internet (Wikipedia + news). Use for facts, history, people, places, current events. NOT granted by default — returns MAYBE for a human to approve.",
+     {"query": ("string", "What to look up")}, ["query"]),
 ]
+
+
+def _fallback_tool_schemas() -> list:
+    out = []
+    for name, desc, props, required in _FALLBACK_TOOL_DEFS:
+        out.append({"type": "function", "function": {
+            "name": name,
+            "description": desc,
+            "parameters": {"type": "object",
+                           "properties": {k: {"type": t, "description": d}
+                                          for k, (t, d) in props.items()},
+                           "required": list(required)}}})
+    return out
+
+
+TOOL_SCHEMAS = _fallback_tool_schemas()
 
 # XDG-ish paths (with fallback to ~/.hivv for legacy)
 CONFIG_DIR    = Path(os.environ.get("HIVV_CONFIG_DIR")  or (Path.home() / ".config" / APP))
@@ -9182,6 +9177,12 @@ def cmd_node_chat(args) -> None:
         }
         if think_off:
             payload_dict["chat_template_kwargs"] = {"enable_thinking": False}
+        # Offer the toolkit. Without it the model cannot answer a question
+        # about the date, the maths or a timezone at all — it just says it
+        # has no access to real-time information.
+        _ask_tools = _tool_schemas()
+        if _ask_tools:
+            payload_dict["tools"] = _ask_tools
         payload = json.dumps(payload_dict)
 
         if show_ui:
@@ -9194,6 +9195,7 @@ def cmd_node_chat(args) -> None:
             start_time = time.time()
             ttft = None
             tokens = 0
+            tool_deltas: list = []
             req = urllib.request.Request(url, data=payload.encode(),
                                          headers={"Content-Type": "application/json"})
             with urllib.request.urlopen(req, timeout=30) as resp:
@@ -9204,6 +9206,8 @@ def cmd_node_chat(args) -> None:
                     try:
                         evt = json.loads(line[6:])
                         delta = evt.get("choices", [{}])[0].get("delta", {})
+                        if delta.get("tool_calls"):
+                            tool_deltas.extend(delta.get("tool_calls") or [])
                         content = delta.get("content", "")
                         if content:
                             if ttft is None:
@@ -9215,6 +9219,20 @@ def cmd_node_chat(args) -> None:
                             tokens += 1
                     except (json.JSONDecodeError, IndexError, KeyError):
                         pass
+            # The model asked for a tool — run it on this machine and ask the
+            # bee again. The direct path runs its OWN tool loop, because the
+            # hub's is not on this path.
+            if tool_deltas:
+                calls = _merge_tool_call_deltas(tool_deltas)
+                follow = [{"role": "user", "content": msg},
+                          {"role": "assistant", "content": "".join(buf) or None,
+                           "tool_calls": calls}]
+                answer = _bee_chat_with_tools(url, follow + _run_tool_calls(calls),
+                                              _ask_tools, 500, think_off)
+                if answer:
+                    if not (as_json or quiet):
+                        print(answer)
+                    buf.append(answer)
             elapsed = time.time() - start_time
             tps = tokens / elapsed if elapsed > 0 else 0
             tx.update(ok=True, endpoint=url, reply="".join(buf), tokens=tokens,
@@ -10201,22 +10219,150 @@ def _exec_tool_locally(tool_name: str, args: dict) -> dict:
         with urllib.request.urlopen(req, timeout=30) as r:
             data = json.loads(r.read())
     except Exception as e:
-        return {"role": "tool", "tool_call_id": call_id, "content": f"error: {e}"}
+        # The local server is down (or not reachable). The HUB is
+        # authoritative for every tool, so ask it — a dead local server must
+        # not cost the model its tool.
+        return _exec_tool_via_hub(tool_name, payload, call_id, str(e))
 
     if not isinstance(data, dict):
         return {"role": "tool", "tool_call_id": call_id, "content": json.dumps(data)}
     if data.get("ok") is False:
         return {"role": "tool", "tool_call_id": call_id,
                 "content": f"error: {data.get('error', 'the tool failed')}"}
-    payload_out = data.get("data", data)
+    return {"role": "tool", "tool_call_id": call_id,
+            "content": _format_tool_content(tool_name, data.get("data", data))}
+
+
+def _format_tool_content(tool_name: str, payload_out) -> str:
+    """Turn a tool's JSON into the line a model should read back.
+
+    Shared by the local and the hub path — two copies of this formatting is
+    exactly how the two implementations drifted in the first place.
+    """
     if tool_name in ("calculator", "calc", "calculate") and isinstance(payload_out, dict):
-        content = str(payload_out.get("result", payload_out))
-    elif tool_name in ("current_time", "time", "get_time") and isinstance(payload_out, dict):
-        content = (f"Current time: {payload_out.get('local', payload_out.get('human'))} "
-                   f"({payload_out.get('timezone')}, UTC{payload_out.get('utc_offset')})")
-    else:
-        content = json.dumps(payload_out, indent=2) if isinstance(payload_out, (dict, list)) else str(payload_out)
-    return {"role": "tool", "tool_call_id": call_id, "content": content}
+        return str(payload_out.get("result", payload_out))
+    if tool_name in ("current_time", "time", "get_time") and isinstance(payload_out, dict):
+        # The bee's local clock returns {unix, iso, utc, human} and only adds
+        # `timezone`/`utc_offset` when one was asked for — print what is
+        # actually there instead of "(None, UTCNone)".
+        _when = (payload_out.get("local") or payload_out.get("human")
+                 or payload_out.get("utc") or payload_out.get("iso") or "")
+        _where = payload_out.get("timezone")
+        _off = payload_out.get("utc_offset")
+        _tail = ""
+        if _where:
+            _tail = f" ({_where}{' UTC' + _off if _off else ''})"
+        return f"Current time: {_when}{_tail}"
+    if isinstance(payload_out, (dict, list)):
+        return json.dumps(payload_out, indent=2)
+    return str(payload_out)
+
+
+def _exec_tool_via_hub(tool_name: str, args: dict, call_id: str, why: str) -> dict:
+    """Run a tool through the HUB (the authoritative implementation)."""
+    import urllib.parse
+    try:
+        code, resp = http("POST", f"/api/tools/{urllib.parse.quote(str(tool_name))}/invoke",
+                          body=dict(args or {}), timeout=45)
+    except Exception as e:
+        return {"role": "tool", "tool_call_id": call_id,
+                "content": f"error: local tool server unavailable ({why}) and the hub could not be reached: {e}"}
+    if code == 202 and isinstance(resp, dict) and resp.get("verdict") == "MAYBE":
+        return {"role": "tool", "tool_call_id": call_id,
+                "content": f"MAYBE — human approval required: {resp.get('message', '')}"}
+    if code != 200 or not isinstance(resp, dict) or not resp.get("ok"):
+        err = (resp.get("error") if isinstance(resp, dict) else None) or f"HTTP {code}"
+        return {"role": "tool", "tool_call_id": call_id, "content": f"error: {err}"}
+    return {"role": "tool", "tool_call_id": call_id,
+            "content": _format_tool_content(tool_name, resp.get("data") or {})}
+
+
+def _merge_tool_call_deltas(deltas: list) -> list:
+    """Streamed tool calls arrive as FRAGMENTS keyed by index.
+
+    {"index":0,"id":"c1","function":{"name":"current_","arguments":"{\"a\"}}
+    {"index":0,"function":{"name":"time","arguments":":1}"}}
+
+    → one call: current_time with arguments {"a":1}.
+    """
+    by_index: dict = {}
+    for d in (deltas or []):
+        if not isinstance(d, dict):
+            continue
+        idx = d.get("index")
+        if not isinstance(idx, int):
+            idx = len(by_index)
+        cur = by_index.setdefault(idx, {"index": idx, "id": None, "type": "function",
+                                        "function": {"name": "", "arguments": ""}})
+        if d.get("id"):
+            cur["id"] = d["id"]
+        if d.get("type"):
+            cur["type"] = d["type"]
+        fn = d.get("function") or {}
+        if fn.get("name"):
+            cur["function"]["name"] += fn["name"]
+        if fn.get("arguments"):
+            cur["function"]["arguments"] += fn["arguments"]
+    return [by_index[k] for k in sorted(by_index)]
+
+
+def _run_tool_calls(calls: list) -> list:
+    """Execute tool calls on THIS machine and return the tool messages."""
+    out = []
+    for c in (calls or []):
+        fn = (c or {}).get("function") or {}
+        try:
+            args = json.loads(fn.get("arguments") or "{}")
+        except Exception:
+            args = {}
+        if not isinstance(args, dict):
+            args = {}
+        res = _exec_tool_locally(fn.get("name", ""), dict(args, id=(c or {}).get("id")))
+        out.append({"role": "tool", "tool_call_id": (c or {}).get("id"),
+                    "content": res.get("content", "")})
+    return out
+
+
+def _bee_tool_round(url: str, messages: list, tools: list | None,
+                    max_tok: int, think_off: bool, timeout: float = 30.0):
+    """One round-trip to a bee, with the tool schemas attached."""
+    import urllib.request
+    payload = {"model": "local", "messages": messages, "stream": False,
+               "max_tokens": max_tok, "repeat_penalty": 1.1}
+    if tools:
+        payload["tools"] = tools
+    if think_off:
+        payload["chat_template_kwargs"] = {"enable_thinking": False}
+    req = urllib.request.Request(url, data=json.dumps(payload).encode(),
+                                headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        data = json.loads(resp.read().decode())
+    msg = (data.get("choices") or [{}])[0].get("message") or {}
+    return (msg.get("content") or ""), (msg.get("tool_calls") or [])
+
+
+def _bee_chat_with_tools(url: str, messages: list, tools: list | None, max_tok: int,
+                         think_off: bool, max_rounds: int = 3) -> str:
+    """Chat with a bee and RUN any tools it asks for.
+
+    The direct path bypasses the hub, so the hub's tool loop is not there to
+    run the tool — the CLI runs it here, on this machine. Without this the
+    model was offered NO tools on the direct path at all, so it answered
+    "I do not have access to real-time information" about today's date while
+    the hive had a clock tool it had never heard of.
+    """
+    answer = ""
+    for _round in range(max_rounds):
+        try:
+            content, calls = _bee_tool_round(url, messages, tools, max_tok, think_off)
+        except Exception:
+            break
+        if not calls:
+            answer = content
+            break
+        assistant = {"role": "assistant", "content": content or None, "tool_calls": calls}
+        messages = messages + [assistant] + _run_tool_calls(calls)
+    return answer
 
 
 def _tool_schemas() -> list:
@@ -10359,6 +10505,13 @@ def _chat_local_only(msg: str, *, stream: bool = True, think_off: bool = True) -
                       "repeat_penalty": 1.1}
         if think_off:
             body["chat_template_kwargs"] = {"enable_thinking": False}
+        # Offer the toolkit. The light tools (clock, calculator, timezones,
+        # parser) run on THIS box; the rest are proxied to the hub when one
+        # is reachable. Offline, the static fallback list keeps the model
+        # useful for maths and the date.
+        _local_tools = _tool_schemas()
+        if _local_tools:
+            body["tools"] = _local_tools
         try:
             req = urllib.request.Request(
                 f"http://127.0.0.1:{port}/v1/chat/completions",
@@ -10367,14 +10520,29 @@ def _chat_local_only(msg: str, *, stream: bool = True, think_off: bool = True) -
             with urllib.request.urlopen(req, timeout=60) as r:
                 if not stream:
                     data = json.loads(r.read().decode("utf-8", errors="replace"))
-                    content = ((data.get("choices") or [{}])[0]
-                               .get("message", {}).get("content") or "")
+                    _m = (data.get("choices") or [{}])[0].get("message") or {}
+                    content = _m.get("content") or ""
+                    if _m.get("tool_calls"):
+                        calls = _m.get("tool_calls") or []
+                        follow = [{"role": "user", "content": msg},
+                                  {"role": "assistant", "content": content or None,
+                                   "tool_calls": calls}]
+                        answer = _bee_chat_with_tools(
+                            f"http://127.0.0.1:{port}/v1/chat/completions",
+                            follow + _run_tool_calls(calls), _local_tools,
+                            int(os.environ.get("HIVV_LOCAL_MAX_TOKENS", "512")),
+                            think_off)
+                        if answer:
+                            print(answer)
+                            return
+                        continue
                     if content:
                         print(content)
                         return
                     continue
                 got = False
                 accum = ""
+                _tool_deltas: list = []
                 for raw in r:
                     line = raw.decode("utf-8", errors="replace").strip()
                     if not line.startswith("data: ") or "[DONE]" in line:
@@ -10382,6 +10550,8 @@ def _chat_local_only(msg: str, *, stream: bool = True, think_off: bool = True) -
                     try:
                         evt = json.loads(line[6:])
                         delta = (evt.get("choices") or [{}])[0].get("delta") or {}
+                        if delta.get("tool_calls"):
+                            _tool_deltas.extend(delta.get("tool_calls") or [])
                         c = delta.get("content")
                         if c:
                             accum = (accum + c)[:8000]
@@ -10390,6 +10560,20 @@ def _chat_local_only(msg: str, *, stream: bool = True, think_off: bool = True) -
                             got = True
                     except json.JSONDecodeError:
                         pass
+                if _tool_deltas:
+                    # The model asked for a tool — run it and ask again.
+                    calls = _merge_tool_call_deltas(_tool_deltas)
+                    follow = [{"role": "user", "content": msg},
+                              {"role": "assistant", "content": accum or None,
+                               "tool_calls": calls}]
+                    answer = _bee_chat_with_tools(
+                        f"http://127.0.0.1:{port}/v1/chat/completions",
+                        follow + _run_tool_calls(calls), _local_tools,
+                        int(os.environ.get("HIVV_LOCAL_MAX_TOKENS", "512")),
+                        think_off)
+                    if answer:
+                        print(answer)
+                        return
                 if got:
                     print()
                     _eh = _stream_error_hint(accum)
@@ -11458,6 +11642,14 @@ def _do_chat(msg: str, stream: bool = True, mode: str | None = None,
                     pass
                 return 8192  # safe default when server doesn't expose ctx size
 
+            # The toolkit the model is offered. Fetched ONCE: it comes from
+            # the HUB's catalog, so the CLI can never offer a tool the hive
+            # does not have. Without it the direct path offered the model
+            # NOTHING, and it answered "I do not have access to real-time
+            # information" about today's date while the hive had a clock
+            # tool it had never heard of.
+            _tool_schemas_list = _tool_schemas() if tools_running else None
+
             for node in online_nodes:
                 ip = node.get("lan_ip") or node.get("ip", "")
                 name = node.get("name", node.get("id", "?"))
@@ -11498,6 +11690,8 @@ def _do_chat(msg: str, stream: bool = True, mode: str | None = None,
                         }
                         if think_off:
                             payload_dict["chat_template_kwargs"] = {"enable_thinking": False}
+                        if _tool_schemas_list:
+                            payload_dict["tools"] = _tool_schemas_list
                         payload = json.dumps(payload_dict)
                         # NO `import urllib.request` here: the module already
                         # imports it, and a function-level import made
@@ -11515,6 +11709,7 @@ def _do_chat(msg: str, stream: bool = True, mode: str | None = None,
                                 _seen_model = None
                                 _t0 = time.time()
                                 accum = ""
+                                tool_deltas: list = []
                                 def _banner():
                                     nonlocal banner_shown
                                     if not banner_shown and not PLAIN_OUTPUT:
@@ -11527,6 +11722,11 @@ def _do_chat(msg: str, stream: bool = True, mode: str | None = None,
                                     try:
                                         evt = json.loads(line[6:])
                                         delta = evt.get("choices", [{}])[0].get("delta", {})
+                                        if delta.get("tool_calls"):
+                                            # The model is asking for a tool.
+                                            # Collect the fragments; the loop
+                                            # below runs them.
+                                            tool_deltas.extend(delta.get("tool_calls") or [])
                                         content = delta.get("content", "")
                                         if content:
                                             _banner()
@@ -11537,6 +11737,34 @@ def _do_chat(msg: str, stream: bool = True, mode: str | None = None,
                                             print(content, end="", flush=True)
                                     except (json.JSONDecodeError, IndexError, KeyError):
                                         pass
+                                if tool_deltas:
+                                    # The model asked for a tool. Its content
+                                    # is normally empty — a tool call REPLACES
+                                    # the answer — so run the tool and ask the
+                                    # bee again. The direct path runs its OWN
+                                    # tool loop, because the hub's is not here.
+                                    calls = _merge_tool_call_deltas(tool_deltas)
+                                    follow = [{"role": "user", "content": msg},
+                                              {"role": "assistant",
+                                               "content": accum or None,
+                                               "tool_calls": calls}]
+                                    answer = _bee_chat_with_tools(
+                                        url, follow + _run_tool_calls(calls),
+                                        _tool_schemas_list, max_tok, think_off)
+                                    if not answer:
+                                        # this bee could not finish — next one
+                                        continue
+                                    if not PLAIN_OUTPUT:
+                                        print(f"\033[2m(direct → {name}:{port})\033[0m")
+                                    print(answer)
+                                    direct_fails.pop(name.lower(), None)
+                                    _save_fails()
+                                    _mm = str(_seen_model or "local").split("/")[-1].replace(".gguf", "")[:60]
+                                    _report_perf(node.get("id"), name, _mm,
+                                                 max(1, len(answer) // 4) / max(0.3, time.time() - _t0),
+                                                 (time.time() - _t0) * 1000)
+                                    return
+
                                 if got_content:
                                     print()
                                     _el = max(0.3, time.time() - _t0)
@@ -11575,7 +11803,31 @@ def _do_chat(msg: str, stream: bool = True, mode: str | None = None,
                                 continue
                             else:
                                 data = json.loads(resp.read().decode())
-                                content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+                                _msg = data.get("choices", [{}])[0].get("message", {}) or {}
+                                content = _msg.get("content", "")
+                                if _msg.get("tool_calls"):
+                                    # The model asked for a tool — run it and
+                                    # ask the bee again. The direct path runs
+                                    # its OWN tool loop (the hub's is not here).
+                                    calls = _msg.get("tool_calls") or []
+                                    follow = [{"role": "user", "content": msg},
+                                              {"role": "assistant",
+                                               "content": content or None,
+                                               "tool_calls": calls}]
+                                    answer = _bee_chat_with_tools(
+                                        url, follow + _run_tool_calls(calls),
+                                        _tool_schemas_list, max_tok, think_off)
+                                    if not answer:
+                                        continue   # this bee could not finish
+                                    if not PLAIN_OUTPUT:
+                                        print(f"\033[2m(direct → {name}:{port})\033[0m")
+                                    print(answer)
+                                    direct_fails.pop(name.lower(), None)
+                                    _save_fails()
+                                    _mm = str(data.get("model") or m.get("model") or "local").split("/")[-1].replace(".gguf", "")[:60]
+                                    _tps = max(1, len(answer) // 4) / max(0.3, time.time() - _t0_ns)
+                                    _report_perf(node.get("id"), name, _mm, _tps, (time.time() - _t0_ns) * 1000)
+                                    return
                                 if content:
                                     if not PLAIN_OUTPUT:
                                         print(f"\033[2m(direct → {name}:{port})\033[0m")
@@ -19232,4 +19484,3 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         print()
         sys.exit(130)
-
