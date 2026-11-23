@@ -63,5 +63,5 @@
     }
   ],
   "vote": "POST /api/music/vote {ai, factor} \u2014 factors: music, adab, hikmat, ruhaniyat, mazaq, haqeeqat",
-  "goal": "help ALL LIFE"
+  "goal": "help all Li!FE"
 }
