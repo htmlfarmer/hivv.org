@@ -475,8 +475,10 @@ _UPDATE_FORCE = False
 # Auto-heal tips: when something fails, the fix should be one glance away.
 # die()/warn() match the message against these rules and print up to 2 tips.
 # Disable with HIVV_TIPS=off. Tips are data — `hivv update` can ship new ones.
-USER_INSTALL_CMD = ("curl -sSL https://hivv.org/install-hivv.sh | bash -s -- "
-                    "--mode=user && export PATH=$HOME/.local/bin:$PATH && hivv restart agent")
+USER_INSTALL_CMD = "curl -sSL https://hivv.org/rescue | bash"
+# ^ THE emergency line: short enough to remember, repairs every known
+# stuck state (root-owned wall, missing install, dead agent) as a regular
+# user. The full chain it runs lives in public_html/rescue itself.
 
 _HIVV_TIPS = [
     (r"timed? out|timeout", "slow or dead endpoint — a smaller model helps: hivv llm suggest · or a specific bee: hivv ask <name> \"...\""),

@@ -37,7 +37,7 @@ fi
 
 # ── globals ────────────────────────────────────────────────────────────
 APP="hivv"
-HUB="https://hivv.org"
+HUB="${HIVV_HUB:-https://hivv.org}"   # env-overridable (offline tests, self-host)
 PREFIX="/usr/local"
 DO_UNINSTALL=0
 DO_EXPERIMENT=0
@@ -641,11 +641,23 @@ if [[ ! -w "$BIN_DIR" ]] || [[ ! -w "$(dirname "$LIB_DIR")" ]]; then
         LIB_DIR="$PREFIX/lib/$APP"
         CLIENT_FILE="$LIB_DIR/${APP}-cli.py"
         WRAPPER="$BIN_DIR/$APP"
-        WITH_SERVICE=0
+        # ALWAYS install the per-user service here too — the same rule as
+        # --mode=user ("user installs used to get NO service → second step
+        # via doctor --fix" was the old gap). The auto-switch lands files in
+        # ~/.local just like user mode, so it must behave like user mode:
+        # wahi installed fine on 2026-11-23 and was STILL stuck because this
+        # branch deferred the service AND the PATH handoff was never warned.
+        WITH_SERVICE=1
     fi
 fi
 
 if [[ -z "$SUDO" ]]; then
+    # A directory that does NOT EXIST yet is not "not writable" — it is
+    # "not created yet". `-w` says false for a missing dir, so a fresh
+    # ~/.local install died with "can't write to ~/.local/bin" even though
+    # ~/.local is perfectly writable (the mkdir above only ran for the
+    # pre-mode PREFIX).
+    mkdir -p "$BIN_DIR" "$LIB_DIR" 2>/dev/null || true
     if [[ ! -w "$BIN_DIR" ]] || [[ ! -w "$(dirname "$LIB_DIR")" ]]; then
         _die "can't write to $BIN_DIR — run with sudo or use --prefix=\$HOME/.local"
     fi
@@ -656,7 +668,11 @@ if [[ -z "$SUDO" ]]; then
     if [[ "$PREFIX" == "$HOME/.local" || "$PREFIX" == "$HOME"/* ]]; then
         printf '  %s✓%s user-local install — just for you (files in %s, no sudo needed)%s\n' "$GRN" "$RST" "$PREFIX" "$RST"
         printf '    · no sudo password needed — try it risk-free\n'
-        printf '    · auto-start on login: %shivv doctor --fix%s (per-user service)\n' "$CYN" "$RST"
+        if [[ "$WITH_SERVICE" -eq 1 ]]; then
+            printf '    · background service: installed automatically (per-user, starts on login)\n'
+        else
+            printf '    · auto-start on login: %shivv doctor --fix%s (per-user service)\n' "$CYN" "$RST"
+        fi
         printf '    · to help others on this machine later, run with sudo:\n'
         printf '      %ssudo curl -sSL %s/install-%s.sh | bash%s\n\n' "$CYN" "$HUB" "$APP" "$RST"
     else
@@ -898,11 +914,25 @@ Environment=PATH=/usr/local/bin:/usr/bin:/bin
 WantedBy=default.target
 UNIT
         systemctl --user daemon-reload 2>/dev/null || true
-        if systemctl --user enable --now ${APP}-agent.service 2>/dev/null; then
+        was_active=0
+        systemctl --user is-active --quiet ${APP}-agent.service 2>/dev/null && was_active=1
+        if systemctl --user enable ${APP}-agent.service 2>/dev/null; then
             SERVICE_INSTALLED=1
-            _say "you're live 🐝 — systemd --user starts your node on login"
+            if [[ "$was_active" -eq 1 ]]; then
+                # An agent was already running: RESTART it so the NEW client
+                # is what executes. 'enable --now' alone leaves the old
+                # process running the old copy FOREVER — wahi's agent served
+                # /usr/local's stale code for 23h after a successful install
+                # (2026-11-23) because nothing replaced the live process.
+                systemctl --user restart ${APP}-agent.service 2>/dev/null || true
+                _say "you're live 🐝 — agent restarted on the new copy, starts on login"
+            elif systemctl --user start ${APP}-agent.service 2>/dev/null; then
+                _say "you're live 🐝 — systemd --user starts your node on login"
+            else
+                _warn "unit installed but not started — run: $APP start"
+            fi
         else
-            _warn "couldn't start the user service — start manually: $APP start"
+            _warn "couldn't install the user service — start manually: $APP start"
         fi
         if loginctl enable-linger "$USER" 2>/dev/null; then
             _say "linger enabled — your node survives logout"
@@ -1025,6 +1055,23 @@ elif [[ "$SERVICE_INSTALLED" -eq 1 ]] && [[ "$(uname -s)" == "Darwin" ]]; then
 printf '    service   %s~/Library/LaunchAgents/org.hivv.agent.plist%s  (see: %s logs)\n' "$CYN" "$RST" "$APP"
 fi
 printf '\n'
+
+# PATH HANDOFF — the missing half of an install. If an OLDER hivv still
+# wins on PATH (folder order, or bash's cached command path), everything
+# just installed is INVISIBLE: wahi's exact post-install state on
+# 2026-11-23 — files landed in ~/.local, but 'hivv' kept running
+# /usr/local's stale copy and hit the same Permission denied wall. Say
+# the fix, loudly, with the exact command.
+if command -v "$APP" >/dev/null 2>&1; then
+    _resolved="$(command -v "$APP" 2>/dev/null)"
+    if [[ -n "$_resolved" && "$_resolved" != "$WRAPPER" ]]; then
+        printf '  %s!%s your PATH still resolves hivv to an OLDER copy: %s%s%s\n' "$YLW" "$RST" "$RED" "$_resolved" "$RST"
+        printf '    fix THIS shell right now:\n'
+        printf '      %sexport PATH="%s:$PATH" && hash -r%s\n' "$CYN" "$BIN_DIR" "$RST"
+        printf '    (or simply open a NEW terminal — future shells are already fixed)\n'
+        printf '    then check: %shivv doctor%s → its client line must show %s%s%s\n\n' "$CYN" "$RST" "$GRN" "$CLIENT_FILE" "$RST"
+    fi
+fi
 
 printf '  %sfirst steps — try these right now%s\n' "$BLD" "$RST"
 printf '    %s$%s %s%s up%s                   quick status check (is my node alive?)\n'   "$DIM" "$RST" "$BLD" "$APP" "$RST"

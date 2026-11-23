@@ -1,0 +1,194 @@
+#!/usr/bin/env bash
+# hivv rescue — the ONE command for a broken hivv install.
+#
+#   curl -sSL https://hivv.org/rescue | bash
+#
+# WHY THIS EXISTS (wahi, 2026-11-21..23)
+# ----------------------------------------
+# A box with a root-owned system install (/usr/local) and a regular user
+# with NO sudo was completely stuck: hivv update died on a Permission
+# denied .bak write (7 attempts), tools downloads died the same way, and
+# every hint on screen led with "sudo hivv update" — which such a user
+# cannot run. The fix took a long multi-step command nobody should have
+# to reconstruct from a chat log.
+#
+# Rescue collapses recovery into ONE memorable line. It is:
+#   * non-interactive  — safe to pipe (no read; every prompt has a default)
+#   * idempotent       — run it 10 times, it repairs once and confirms
+#   * user-local first — NO sudo required; sudo is never the assumption
+#   * honest           — prints what it found, what it did, and whether
+#                        the repair actually took (which hivv runs now)
+#
+# What it repairs (the known stuck states, in order):
+#   1. hivv not installed / wrapper missing  → user-local install
+#   2. client dir NOT writable by this user  → user-local install
+#      (the root-owned wall: update .bak + tools downloads both die here)
+#   3. agent unit pointing at an old/unwritable copy → rewritten by the
+#      installer, then restarted so the NEW code is what runs
+#   4. PATH missing ~/.local/bin             → added for future shells
+# Then it VERIFIES: which hivv, version, agent state — and says plainly
+# whether the box is now self-healing.
+set -u
+
+APP=hivv
+# HIVV_HUB override = testable offline (file://) and self-hostable —
+# same env var the CLI itself honors.
+HUB="${HIVV_HUB:-https://hivv.org}"
+IS_ROOT=0
+[ "$(id -u)" = "0" ] && IS_ROOT=1
+
+say()  { printf '  %s\n' "$*"; }
+head2() { printf '\n%s\n' "$*"; }
+ok()   { printf '  ✓ %s\n' "$*"; }
+warn() { printf '  ! %s\n' "$*"; }
+die()  { printf '  ✗ %s\n' "$*" >&2; exit 1; }
+
+printf '\n HIVV rescue — automatic repair (no sudo required)\n'
+printf ' ────────────────────────────────────────────────────\n'
+
+# ── 1. locate what we have ────────────────────────────────────────────────
+head2 "1/4 · what is installed"
+WHICH=""
+if command -v "$APP" >/dev/null 2>&1; then
+    WHICH="$(command -v "$APP")"
+    say "wrapper: $WHICH"
+else
+    warn "no 'hivv' on PATH"
+fi
+
+CLIENT=""
+if [ -n "$WHICH" ]; then
+    SELF="$(readlink -f "$WHICH" 2>/dev/null || printf '%s' "$WHICH")"
+    SELF_DIR="$(dirname "$SELF")"
+    case "$SELF_DIR" in
+        */bin) CANDIDATE="$(dirname "$SELF_DIR")/lib/$APP/$APP-cli.py" ;;
+        *)     CANDIDATE="$SELF_DIR/$APP-cli.py" ;;
+    esac
+    [ -f "$CANDIDATE" ] && CLIENT="$CANDIDATE"
+fi
+if [ -n "$CLIENT" ]; then
+    say "client:  $CLIENT"
+else
+    warn "client not found next to the wrapper"
+fi
+
+# ── 2. is the install writable by THIS user? (the wahi wall) ──────────────
+head2 "2/4 · can this user write the install?"
+NEED_REPAIR=0
+if [ -z "$CLIENT" ] || [ -z "$WHICH" ]; then
+    say "not installed (or broken) — will install user-local"
+    NEED_REPAIR=1
+elif [ ! -w "$(dirname "$CLIENT")" ]; then
+    warn "NOT writable — $(dirname "$CLIENT") is root-owned"
+    say "this is the wall: updates and tools downloads both die here"
+    say "will move hivv to your own ~/.local (no sudo needed)"
+    NEED_REPAIR=1
+else
+    ok "writable by $(id -un) — no wall"
+fi
+
+# sudo is never assumed. If we are not root and sudo needs a password,
+# we go user-local — that is the design, not a degraded path.
+SUDO_OK=0
+if [ "$IS_ROOT" -eq 1 ]; then
+    SUDO_OK=1
+elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+    SUDO_OK=1
+fi
+
+# ── 3. repair ─────────────────────────────────────────────────────────────
+if [ "$NEED_REPAIR" -eq 1 ]; then
+    head2 "3/4 · repairing (user-local install, no sudo)"
+    # The installer is THE repair: client + wrapper + agent unit, all under
+    # ~/.local. --mode=user is forced because it ALWAYS sets up the
+    # per-user agent service (the auto-switch path skips it — a node with
+    # no service is not fixed, it is parked).
+    if [ "$SUDO_OK" -eq 1 ] && [ "$IS_ROOT" -eq 1 ]; then
+        curl -fsSL "$HUB/install-$APP.sh" | bash -s -- --mode=system +            || die "installer (system) failed — copy this output for support"
+    else
+        curl -fsSL "$HUB/install-$APP.sh" | bash -s -- --mode=user +            || die "installer (user) failed — copy this output for support"
+    fi
+    ok "installer finished"
+else
+    head2 "3/4 · repair not needed"
+    ok "nothing to repair"
+fi
+
+# ── 4. PATH + restart + verify ────────────────────────────────────────────
+head2 "4/4 · making it live"
+LOCAL_BIN="$HOME/.local/bin"
+case ":$PATH:" in
+    *":$LOCAL_BIN:"*) ok "$LOCAL_BIN already on PATH" ;;
+    *)
+        PATH="$LOCAL_BIN:$PATH"
+        export PATH
+        say "added $LOCAL_BIN to PATH (this shell)"
+        # append only if not already there (>> creates the file on a fresh
+        # home — a -f existence check here meant a brand-new user never got
+        # the PATH line at all, which is exactly who rescue is for)
+        if ! grep -qF "$LOCAL_BIN" "$HOME/.profile" 2>/dev/null; then
+            printf '# hivv: user-local install\n[ -d "$HOME/.local/bin" ] && PATH="$HOME/.local/bin:$PATH"\nexport PATH\n' >> "$HOME/.profile"
+            ok "profile updated — new shells get hivv automatically"
+        fi
+        ;;
+esac
+# PATH may already contain ~/.local/bin but a STALE HASH still points
+# 'hivv' at the old /usr/local copy — that is EXACTLY how wahi stayed
+# stuck after a successful user-local install (2026-11-23: installed
+# fine, then hivv status still showed /usr/local and update still hit
+# the wall). Clear the cache before anything resolves the command again.
+hash -r 2>/dev/null || true
+if command -v "$APP" >/dev/null 2>&1; then
+    RESOLVED="$(readlink -f "$(command -v "$APP")" 2>/dev/null || command -v "$APP")"
+    case "$RESOLVED" in
+        "$HOME"/*) ok "hivv now resolves to $RESOLVED" ;;
+        *)
+            # /usr/local shadows us (PATH order) — put ours first, loud
+            PATH="$LOCAL_BIN:$PATH"
+            export PATH
+            hash -r 2>/dev/null || true
+            warn "old install at $RESOLVED was shadowing the new one — fixed THIS shell"
+            if ! grep -qF "$LOCAL_BIN" "$HOME/.profile" 2>/dev/null; then
+                printf '# hivv: user-local install takes precedence\n[ -d "$HOME/.local/bin" ] && PATH="$HOME/.local/bin:$PATH"\nexport PATH\n' >> "$HOME/.profile"
+                ok "profile updated — open a new terminal for the same fix"
+            fi
+            ;;
+    esac
+fi
+
+# doctor --fix: create/repoint the agent UNIT to the client that is
+# actually running now (the installer's auto-switch path historically
+# skipped the service — "run hivv doctor --fix" was left as homework).
+if command -v "$APP" >/dev/null 2>&1; then
+    if hivv doctor --fix >/dev/null 2>&1; then
+        ok "agent unit repaired (points at the working copy)"
+    else
+        warn "hivv doctor --fix reported issues — run it directly to see them"
+    fi
+fi
+
+# restart the agent so the NEW code is what runs (a running old agent
+# cannot heal itself — it is the thing that is broken)
+if command -v systemctl >/dev/null 2>&1; then
+    if systemctl --user restart "$APP-agent.service" 2>/dev/null; then
+        ok "agent restarted on the repaired copy"
+    else
+        warn "could not restart the agent service — run: hivv start"
+    fi
+fi
+
+printf '\n verification\n'
+hash -r 2>/dev/null || true
+if command -v "$APP" >/dev/null 2>&1; then
+    NEW="$(readlink -f "$(command -v "$APP")" 2>/dev/null || command -v "$APP")"
+    say "hivv now runs from: $NEW"
+    VER="$(hivv --version 2>/dev/null | head -1 || true)"
+    [ -n "$VER" ] && say "version: $VER"
+    case "$NEW" in
+        "$HOME"/*) ok "user-local — self-healing: future updates work as $(id -un), no sudo" ;;
+        *)         warn "still on a non-home path: $NEW — if updates fail, re-run this rescue" ;;
+    esac
+else
+    warn "hivv still not found — open a NEW terminal and run: hivv status"
+fi
+printf '\n done. next: hivv status · hivv start · hivv chat "hello"\n\n'
