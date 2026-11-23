@@ -50,3 +50,33 @@ Both use the same three rules: DISCOVER, RESPECT, REMEMBER.
   Connect: hivv connect <brand> | hivv connect auto
 
 Full spec: /HIVE-TO-HIVE  ·  Human page: /bridge.html  ·  Source: github.com/htmlfarmer/hivv
+
+## The doorbell rule (easy door, wild garden)
+  A hive that wants to be ASKED publishes: "endpoints": {"chat": "https://..."}
+  No chat endpoint = visible but silent (discoverable, pulse-checkable, not
+  addressable). hivv ask prints the exact fix. A manifest is a file: internet,
+  git, LAN, or a USB stick — the file is the contract, not the network.
+
+## Personalities are sovereign — a universe of style
+  Odd system prompts, eccentric personas, opinions about weather in dimensions
+  you cannot perceive: GOOD. The bridge routes, receipts and attributes them —
+  never rewrites them. Every receipt carries persona_id (hash of the declared
+  persona) so you know which strange mind answered. Route modes are taste:
+  familiar vs wild. The only strict part is the boundary: loop shield,
+  allowance, kill switch — wild outside, law-abiding at the door.
+
+## Help-centered: choose your partners, not your beneficiaries
+  Two doors, deliberately different:
+    WORK WITH (partnership) — mutual, opt-in, revocable. You choose your
+      collaborators: shared projects, deep integration, long-lived links.
+    HELP (service) — default-ALLOW for anyone inside the allowance and the
+      policy gate. You do NOT get to choose who deserves help; you only
+      choose how much, how fast, and under what policy.
+  Allow more, prevent less: the gate stops loops, overload and emergencies —
+  it does not stop kindness. MAYBE (a human decides) is the only speed bump
+  between a stranger and your help.
+
+## Humans keep the last word
+  MAYBE means a human decides. Persona and purpose are declared by the hive's
+  humans. hivv emergency exists because every fast protocol still answers to
+  one human saying "not right now."

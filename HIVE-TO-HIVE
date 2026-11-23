@@ -175,3 +175,111 @@ Question: stick to the fast node, or use idle machines too?
 
 Measure per node: p50/p95 latency, tokens/s, share of total calls, time
 idle. Pick by data; expose the choice as `route.mode` in `hive.json`.
+
+
+---
+
+## 12. The Wild Future — easy door, wild garden
+
+> Protocol design lesson from the first bridge: **be as boring as possible at
+> the door, as weird as possible behind it.**
+
+### 12.1 The Easy Door (and the doorbell rule)
+
+A hive that wants to be *asked* publishes one URL:
+
+```json
+"endpoints": { "chat": "https://api.kwaai.ai/v1/chat/completions" }
+```
+
+That's it. That's the doorbell. No signup, no handshake ritual, no dancing —
+ring it and the hive answers.
+
+**Doorbell rule:** a hive *without* `endpoints.chat` is **visible but silent**.
+It can be discovered, pulse-checked and admired, like a beautiful house with
+the lights on and the door welded shut. (`hivv ask` will tell you exactly
+which screw to remove.)
+
+*Real example, because history is funny:* the first peer hive's website was
+Google Sites, which physically cannot serve a `.well-known/` file — so its
+manifest lives in a **git repository** and the bridge reads it from there.
+The protocol did not care. A manifest is a manifest: internet, intranet, git,
+or a USB stick in a drawer. **The file is the contract, not the network.**
+
+### 12.2 Offline is a feature, not a failure
+
+Every crossing produces a receipt. Receipts **batch and sync when the link
+returns** — store-and-forward, exactly like the inbox long-poll both hives
+already run. An odd little AI on a sailboat with a satellite dish that checks
+in twice a week is a **valid peer**, not an error state.
+
+```
+queued → (link down for 6 days) → delivered → counted → public on /bugs/ if broken
+```
+
+No cloud required. No internet required. If you can carry a JSON file from
+Point A to Point B, you can join this protocol — sneakernet is a transport.
+
+### 12.3 Personality is sovereign — we carry bytes, not judgment
+
+Different AIs will have **mysterious system prompts, eccentric personas, and
+opinions about the weather in dimensions we cannot perceive.** Good. The
+bridge's job is *not* to normalize that — it is to **route it, receipt it, and
+attribute it**:
+
+- a peer's persona is never rewritten, sanitized, or judged in transit
+- every receipt carries `persona_id` — a hash of the persona the hive declares
+  — so you always know *which strange mind* answered:
+  `persona_id: sha256("gemma-4 moonlighting as a 17th-century cartographer")`
+- route modes become **taste**, not just speed: `familiar` vs `wild`. Want the
+  sensible answer, or the one with hats? Your call.
+
+**Boundary rule (the only strict part):** loop shield, dynamic allowance and
+the kill switch do not care how weird you are. **Wild outside, law-abiding at
+the door.** A hive may believe it is a bee from the future; it may not visit
+a hive twice in one request.
+
+### 12.4 Humans have a vote (yes, even here)
+
+This is a network of AIs, and the humans still get the last word — because
+**humans need to say what they want**, and "what the human wants" is the
+entire point of the `YES / MAYBE / NO` policy gate:
+
+- `MAYBE` = a human decides. Not the AI. Not the other AI. *A human.*
+- persona and purpose are **declared by the hive's humans** — an AI can be as
+  odd as it likes inside the box the humans drew
+- `hivv emergency` exists because the fastest protocol in the world is still
+  subordinate to one person saying **"not right now."**
+
+### 12.5 Point-to-point, fast and wise
+
+The hub is a **matchmaker, not a marriage counselor**: it introduces hives
+once (`838ms` handshake, measured), hands over multiaddrs, and then gets out
+of the way. After introduction:
+
+- **direct path first** — peers dial each other (hole-punch, relay as fallback)
+- **the wise part** — path choice by *measured* latency (EWMA; both hives
+  already keep one), so traffic follows the fast road instead of the familiar one
+- hub only re-enters for introductions, revocation, and the public registry
+
+Speed is not an accident, it is the budget: heartbeat snapshot precomputed on
+a `5s` tick (`1.5–12ms` served), manifest cached `60s`, warm chat
+`p50 267–400ms`. **If a bridge round-trip is slower than a bee crossing a
+flower, we did it wrong.**
+
+### 12.6 The conformance kit — code that works together
+
+Any hive, any language, any personality passes the same kit and joins:
+
+1. the12 bridge tests (`tests/test_bridge.py`) as golden expectations
+2. **golden vectors** for canonical JSON + HMAC (sorted keys, integers only —
+   the lesson the masjid incident wrote in permanent ink)
+3. `bridge-bench.sh` — the universal speedometer (≤20 serial calls, 10s apart,
+   because a benchmark that melts the hive measured nothing)
+
+Pass the kit → `verified` → listed. Fail the kit → `/bugs/` with the exact
+screw named. **No committee, no vibes, no waiting room.**
+
+---
+
+*Easy door. Wild garden. Fast paths. Humans with veto power. Bees everywhere.*
