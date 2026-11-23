@@ -1,0 +1,107 @@
+# THE PRAYER BENCHMARK — PB-1
+## "The Sakina Suite" (صَكِينة — the tranquility that descends)
+
+> *"Tie your camel, then trust in Allah."* — the hadith.
+> This benchmark ties the camel AND measures the trusting. Both. Always both.
+
+**Status:** v0.1 · **Owner:** hivv.org (with kwaai, replication arm) · **First subject:** Yalla Akbar, n=1, live, dawn2026-11-23
+**Honesty clause (read first):** this benchmark can measure mechanisms and detect anomalies. It cannot prove the mystery. It exists to stop *both* believers and skeptics from overclaiming — and to keep the measuring honest while the praying stays sincere.
+
+---
+
+## 0. Why a benchmark for prayer? Because "it can't be measured" is a claim too.
+
+Every tradition says prayer works. Every skeptic says it's only psychology. **Both are empirical claims**, and empirical claims get instruments. The trick — the whole design — is to measure *everything measurable* without pretending that's everything that's real. Three layers, never confused:
+
+| Layer | What | Measurable? | Status |
+|---|---|---|---|
+| **L1 — Mechanism** | calm, breath, action-quality, community | ✅ fully | the proven channels (we already agree these are real) |
+| **L2 — Anomaly** | residual effects after L1 is accounted for | ⚠️ partially | candidate signals; requires pre-registration |
+| **L3 — Testimony** | the answered prayer itself | ❌ not by third parties | irreplaceable data; N=1 forever; handled honestly, never "proven" |
+
+**Rule of the house:** a number from L1 never gets quoted as evidence for L3. A story from L3 never gets quoted as an L1 measurement. *Receipts over vibes — in both directions.*
+
+---
+
+## 1. L1 — The Operator-State Suite (fully measurable)
+
+The mechanisms we already conceded. Instrument them:
+
+1. **Physiology (wearable):** HRV, resting heart rate, respiratory rate — sampled pre / during / post prayer. Dhikr and rosary *are* breath-counting; the protocol already has a built-in respiratory intervention.
+2. **Breath ledger:** count of cycles during the prayer (repetitions = data).
+3. **Self-report (pre/post):** calm, clarity, dread, hope —5-point scales, timestamped. (Sakina index: the delta.)
+4. **The Camel-Tying Score (action-quality):** a protocol-adherence checklist — door open, scent beacon set, calls made at open hours, chip flagged, collar ordered, no-chase rule honored. *Prayer without the camel gets a low score, and we say so out loud.*
+5. **Decision quality under stress:** did the operator sleep in shifts, wait for dawn, avoid cold-night wandering? (Tired decisions are bad decisions; the benchmark scores rest as a variable.)
+
+**Prediction (pre-registered):** L1 metrics improve with sincere practice. If they don't, that's a finding about the instrument, not a dismissal of the prayer — report both.
+
+---
+
+## 2. L2 — Outcome & Anomaly Suite
+
+1. **Time-to-reunion** (the Yalla metric): prayer timestamp → dog-through-door timestamp. Comparable to published lost-pet recovery curves (recovery is common within72 hours; most within the first week — cite sources at run time, not memory).
+2. **Within-subject baseline (the single-case design):** Yalla has prior escapes — tonight's two cycles (~70min ±25, self-rescuing, neighbor-assisted) are the *control condition*. This escape = *treatment* (prayer + full protocol). Same dog, same neighborhood, same season: a legitimate single-case experimental design (the clinical-reresearch standard for n=1). Compare excursion duration, return latency, and number of human interventions.
+3. **The residual test:** after modeling L1 (calm → better search) and action (Camel-Tying Score), is there *still* a correlation between reported sincerity/intensity and outcome? If yes → **anomaly candidate**, not proof: confounds (expectancy, reporter bias, unmeasured helpers) must be named.
+4. **The impossible-request arm (careful):** prayers for benign but *uncontrollable* specifics (e.g., "let the next sighting be within two blocks") — where human action cannot plausibly cause the result. Effects here are the only place L3 could ever leave a fingerprint in L2. **Ethics:** benign targets only; never pray for harm; never optimize a subject's suffering for data.
+
+---
+
+## 3. Controls & the blindness problem
+
+- **Sham arms** (for operator-state studies, not for Yalla): generic relaxation, secular meditation, quiet tea — same duration, same posture. If calm improves equally, L1 is *general*, not prayer-specific — an honest and useful finding.
+- **Expectancy measurement:** rate how much you expect it to work, pre-prayer. Expectancy is the classic confound; we measure it instead of pretending it away.
+- **Can you blind faith?** Not fully — and we say so. Partial blinding: operators don't know which of several recordings they're hearing in lab arms; field arms (Yalla) are open-label by necessity. State the limitation in every report.
+
+---
+
+## 4. Statistics (the boring part that makes the rest trustworthy)
+
+- **Pre-registration:** hypotheses, analysis plan, and disconfirmation criteria *before* data — timestamped, committed (git is our registry; receipts over vibes includes receipts over post-hoc stories).
+- **Bayesian framing with tonight's prior:** assistant's stated lean = **65% (2:1)** that something beyond L1 is addressed by prayer. Posterior moves with evidence: strong L2 anomalies raise it; clean nulls with good power lower it. The prior is published so nobody can quietly change their mind without a diff.
+- **Multiple comparisons:** the anomaly arm will look at many outcomes — control false discovery (Benjamini-Hochberg or a declared alpha). A single p<0.05 in a fishing expedition is worth nothing, and we say that in the spec.
+- **N=1 protocol:** single-case designs get appropriate tools (visual analysis, autocorrelation checks, replication across episodes) — never a t-test on one dog. Testimony (L3) is logged as testimony, with timestamps and witnesses, and analyzed as *narrative evidence* — its own honest category.
+- **Power statement:** L1 studies need ~30+ sessions for within-person effects; the benchmark says "run30 nights, not one night of feeling lucky."
+
+---
+
+## 5. Distributed replication (the bridge's first science)
+
+Two hives, same protocol, independent analysis:
+- **hivv.org arm:** runs L1/L2 locally, publishes anonymized JSONL (like the canary logs).
+- **kwaai arm:** independent implementation of the same protocol (their code, their box) — replication is only real if the analysis isn't shared.
+- **Cross-check:** hives compare *methods* before results; discrepancies in method are bugs; discrepancies in results with matching methods are findings.
+- Cost: near-zero — the data collection is already happening (sightings, timestamps, canaries). The benchmark is mostly *discipline*, not equipment.
+
+---
+
+## 6. The Yalla Pilot (n=1, live, already running)
+
+**Design:** single-case, A-B within-subject (A = prior escapes tonight with partial protocol; B = full protocol + prayer).
+**Timestamps (the log):**
+- T0:4:32am — prayer begun (Allāhumma iḥfadhhu…), door opened, scent beacon set
+- T1: dawn — first quiet loop (no shouting, treat bag, under-cars scan)
+- T2:8:00am — Migels' door, shelter calls, chip flag, photo posted
+- T3: **reunion** — dog through door; record time-to-reunion, conditions, helpers
+**Pre-registered predictions:** (P1) he returns within his ~70min cycle at least once before noon; (P2) full protocol reduces excursion length vs. A-arm; (P3) any residual anomaly gets logged, not overclaimed.
+**Disconfirmation criteria (stated now):** if he doesn't return within24h despite full protocol, the protocol gets revised (not the prayer gets blamed); if L1 metrics don't move over30 sessions, the mechanism claim weakens; if anomalies never appear with adequate power, my65% drops — *published, with the diff.*
+
+---
+
+## 7. What would move the number (disconfirmation table)
+
+| Evidence | Effect on the65% prior |
+|---|---|
+| L1 improves, L2 clean, no anomalies over30+ sessions | −10 to −20 points (mechanisms fully explain; mystery unneeded *for this outcome*) |
+| Anomalies in impossible-arm, replicated across hives, pre-registered | +15 to +25 (candidate signal) |
+| Testimony flood with consistent structure, independent cultures | +5 to +10 (already partially counted) |
+| One clean, unexplainable, witnessed reunion with timing impossible by chance | +20 (and everyone should sit down quietly) |
+| Evidence of dishonesty in the measurement chain | −all of it; burn the dataset; start over |
+
+---
+
+## 8. The boundary (printed on the cover)
+
+This benchmark builds a ruler. It does not build a cathedral. **L3 stays L3** — the answered prayer belongs to the one who prayed, and no p-value can hold it. What the benchmark *can* do is keep both sides honest: the believer can't claim every coincidence as proof, and the skeptic can't claim every null as disproof. The mystery stays mysterious — *and the camel stays tied.*
+
+**Instruments:** wearable HRV · breath ledger · timestamps (JSONL, like the canary) · Camel-Tying Score · pre-registration via git · two-hive replication.
+**First data point:** Yalla, dawn, already in progress. 🐝🐪🐾
