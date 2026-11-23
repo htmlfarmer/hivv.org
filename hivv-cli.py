@@ -3816,8 +3816,25 @@ def cmd_agent(stop_event) -> None:
     # inbox access FOREVER (403 on every poll → repair/policy/update pushes
     # all silently dead). masjid+ashy were bricked this way 2026-11-14.
     st = read_state() or {}
+    # KEEP the known node_id across a restart.
+    #
+    # THE BUG (yalla, 2026-11-22): this used to null `node_id` on every start,
+    # so the loop's first iteration always took the REGISTER branch instead of
+    # the HEARTBEAT branch — every agent restart re-registered the bee. yalla
+    # restarted every ~100s and re-registered every time, and the hub's
+    # crash-loop detector quarantined it (5 re-registers / 10 min).
+    #
+    # The node_id is the bee's IDENTITY, not a per-run value: it was issued by
+    # the hub and lives in the state file. Nulling it throws away knowledge
+    # the agent already has and forces a re-register that can only ever
+    # return the SAME id (the hub keys it by hostname + hw_id).
+    #
+    # The state file IS the authority: if it was wiped, `node_id` is absent
+    # and the agent registers (the recovery path the hub supports via hw_id).
+    _known_node_id = st.get("node_id") or None
     st.update({"started_at": int(time.time()), "pid": os.getpid(),
-               "node_id": None, "last_heartbeat": None, "last_error": None,
+               "node_id": _known_node_id,
+               "last_heartbeat": None, "last_error": None,
                "transport": "heartbeat-only"})
     write_state(st)
 
@@ -3836,7 +3853,18 @@ def cmd_agent(stop_event) -> None:
         auth_token = None
         print(f"[{time.strftime('%H:%M:%S')}] WARN could not create auth token: {e}", file=log_path)
 
-    # 1. register once on startup
+    # 1. register ONCE on startup — but only if we don't already know who we
+    # are. A bee that restarts (crash, deploy, `hivv restart`) already has
+    # its node_id in the state file; re-registering on every restart is what
+    # made yalla look like a crash-loop to the hub (yalla 2026-11-22: 5
+    # re-registrations in 10 minutes → quarantined, and the quarantine had
+    # no exit because it froze the heartbeat that would have cleared the
+    # crash-loop accusation).
+    #
+    # The heartbeat path below RE-ANNOUNCES everything the register does
+    # (tools, tools_port, models, volunteer, hw_id) — so nothing is lost by
+    # skipping the register. And the hub's register path is still there for
+    # a bee whose state was wiped (the hw_id recovery path).
     hostname = socket.gethostname()
     if not hostname or hostname in ("localhost", "localhost.localdomain"):
         hostname = os.environ.get("USER", os.environ.get("USERNAME", "unknown"))
@@ -3868,23 +3896,30 @@ def cmd_agent(stop_event) -> None:
             "volunteer": _vol_on_reg,
             "tools": _tools_reg, "tools_port": TOOLS_PORT if _tools_reg else 0,
             "local_models": local_models}
-    code, payload = http("POST", "/api/nodes/register", body=body)
-    st = read_state()
-    if code == 200 and isinstance(payload, dict):
-        nid = payload.get("node_id") or stable_id
-        st["node_id"] = nid
-        st["hw_id"] = hw_id
-        # Adopt the (possibly RE-ISSUED) inbox secret here too — this is the
-        # path a freshly restarted agent takes, and without it a bee that lost
-        # its secret receives the hub's recovery issuance and discards it
-        # (inbox stays 403 forever). The in-loop path adopts as well.
-        if payload.get("node_secret"):
-            st["node_secret"] = payload["node_secret"]
-        print(f"[{time.strftime('%H:%M:%S')}] registered as {nid} (hw={hw_id or 'soft'})", file=log_path)
+    if _known_node_id:
+        # We already know who we are — skip the register. The heartbeat
+        # below re-announces our full presence every cycle.
+        print(f"[{time.strftime('%H:%M:%S')}] resuming as {_known_node_id} "
+              f"(no re-register needed)", file=log_path)
     else:
-        st["last_error"] = f"register failed: http {code}: {str(payload)[:200]}"
-        print(f"[{time.strftime('%H:%M:%S')}] register failed {code}: {str(payload)[:120]}", file=log_path)
-    write_state(st)
+        code, payload = http("POST", "/api/nodes/register", body=body)
+        st = read_state()
+        if code == 200 and isinstance(payload, dict):
+            nid = payload.get("node_id") or stable_id
+            st["node_id"] = nid
+            st["hw_id"] = hw_id
+            # Adopt the (possibly RE-ISSUED) inbox secret here too — this is
+            # the path a freshly restarted agent takes, and without it a bee
+            # that lost its secret receives the hub's recovery issuance and
+            # discards it (inbox stays 403 forever). The in-loop path adopts
+            # as well.
+            if payload.get("node_secret"):
+                st["node_secret"] = payload["node_secret"]
+            print(f"[{time.strftime('%H:%M:%S')}] registered as {nid} (hw={hw_id or 'soft'})", file=log_path)
+        else:
+            st["last_error"] = f"register failed: http {code}: {str(payload)[:200]}"
+            print(f"[{time.strftime('%H:%M:%S')}] register failed {code}: {str(payload)[:120]}", file=log_path)
+        write_state(st)
 
     # 2. heartbeat + inbox-poll loop
     inbox_supported = True   # optimistic; flipped off on 404
@@ -3929,6 +3964,7 @@ def cmd_agent(stop_event) -> None:
             code, payload = http("POST", f"/api/nodes/{node_id}/heartbeat",
                                  body={"hostname": hostname, "version": VERSION,
                                        "ts": int(time.time()),
+                                       "capabilities": capabilities,
                                        "metrics": _collect_metrics(),
                                        "local_models": _detect_local_ai(),
                                        "volunteer": _vol_on,
@@ -4567,6 +4603,15 @@ _RELAY_LOCAL_ENDPOINTS = [
     "http://localhost:8090/v1/chat/completions",   # llama.cpp (second box slot)
 ]
 
+# A relay job's TTL on the hub is 90s. The bee must report a result BEFORE
+# that, or the job expires and the answer lands where nobody is listening —
+# and the node's active-job count stays stuck (maxActivePerNode=2 → every
+# later request to that bee is refused with "node busy").
+#
+# Budget: leave ~20s of headroom for the result POST, so the bee stops trying
+# endpoints at 70s and reports what it has.
+_RELAY_JOB_BUDGET_S = 70
+
 
 def _relay_endpoints() -> list[str]:
     """Endpoints to try for a hub-relayed job: DETECTED/alive ports first (the
@@ -4607,12 +4652,34 @@ def _relay_endpoints() -> list[str]:
         pass
     for u in _RELAY_LOCAL_ENDPOINTS:
         _add(u)
-    return eps
+    # The legacy backstop is NOT alive-checked — so a box with a model on
+    # :8080 and nothing on :11434/:1234/:8081/:8090 would try each dead port
+    # for the FULL 40s timeout inside the job. Four dead ports = 160s, and a
+    # relay job's TTL is 90s — so the job expired BEFORE the agent finished
+    # trying ports, and the answer arrived after nobody was listening any
+    # more. That is why a relay to yalla succeeded ~50% of the time: it
+    # depended on which port happened to answer first.
+    #
+    # Probe every candidate (2s each) and keep only the ones that answer an
+    # OpenAI-shaped /v1/models. A probe is 20x cheaper than a failed chat
+    # attempt, and it makes the relay deterministic.
+    alive: list[str] = []
+    for u in eps:
+        port = 0
+        try:
+            port = urllib.parse.urlsplit(u).port or 0
+        except ValueError:
+            port = 0
+        if port and not _llm_alive_port(int(port)):
+            continue
+        alive.append(u)
+    return alive or eps
 
 def _run_relay_job(payload: dict, log_path) -> None:
     """HIVV_PLAN #5: hub-relayed inference job. Only runs when volunteering is
     on; executes against OUR OWN local model; reports back with the job secret."""
     ts = time.strftime("%H:%M:%S")
+    started_at = time.time()
     job_id = payload.get("job_id")
     secret = payload.get("secret")
     request = payload.get("request") or {}
@@ -4636,8 +4703,31 @@ def _run_relay_job(payload: dict, log_path) -> None:
     tools = request.get("tools") or payload.get("tools")
     if not isinstance(tools, list) or not tools:
         tools = None
-    for ep in _RELAY_LOCAL_ENDPOINTS:
+    # Use the ALIVE-CHECKED list, not the raw legacy one.
+    #
+    # THE BUG (yalla, 2026-11-22): this looped over the raw
+    # `_RELAY_LOCAL_ENDPOINTS` — five hardcoded ports — so on a box with one
+    # model on :8080 the agent burned the FULL 40s timeout on each of the
+    # four dead ports before reaching the live one. Four dead ports = 160s,
+    # and a relay job's TTL is 90s: the job EXPIRED before the agent
+    # finished, so the answer arrived after nobody was listening any more.
+    # That is why a relay to yalla succeeded only ~50% of the time — it
+    # depended on which port happened to answer first.
+    #
+    # `_relay_endpoints()` probes every candidate (2s) and keeps only the
+    # ones that answer an OpenAI-shaped /v1/models.
+    for ep in _relay_endpoints():
         try:
+            # DEADLINE: a relay job's TTL is 90s. If we are about to run past
+            # it, stop and report what we have — a late answer is worth
+            # nothing to the requester, and a job that never reports leaves
+            # the node's active-job count stuck (maxActivePerNode=2 → "node
+            # busy" for the NEXT two requests, forever).
+            if time.time() - started_at > _RELAY_JOB_BUDGET_S:
+                print(f"[{ts}] relay job {job_id}: time budget exhausted "
+                      f"({_RELAY_JOB_BUDGET_S}s) — reporting what we have",
+                      file=log_path)
+                break
             req_body = {"model": "local", "messages": messages[-6:],
                         "max_tokens": min(int(request.get("max_tokens") or 500), 1000),
                         "stream": False,
@@ -6094,6 +6184,15 @@ def cmd_tools(args) -> None:
             print(f"  \033[31mcould not reach hub: HTTP {code}\033[0m")
         print()
         return
+
+    if args.action == "test":
+        # The diagnostic that would have caught "the model says it has no
+        # access to real-time information" in one line: it checks the hub
+        # catalog, the local tool server, real tool calls both ways, the
+        # policy posture, the SSRF guard — and finally asks a MODEL the
+        # question a human would ask.
+        fails = _test_toolkit()
+        sys.exit(1 if fails else 0)
 
     if args.action == "on":
         if _tools_running():
@@ -8801,14 +8900,19 @@ def cmd_nodes(args) -> None:
         else:
             status_str = f"\033[31m{status}\033[0m"
 
-        table_rows.append([name, status_str, ver_str, tps_str, ping_str,
+        # BUILT: when this version was committed — a hash answers "same?",
+        # a datetime answers "old?" (2026-11-23). Mid-table on purpose:
+        # _fit_table drops the TAIL first, so the date survives narrow
+        # terminals while the GPU cell is the first to go.
+        built = str(n.get("version_date") or "—")
+        table_rows.append([name, status_str, ver_str, built, tps_str, ping_str,
                             str(models), hb_str, cpu, cu, qs, ram, gpu_str])
 
     # ── render: fit the terminal, then the totals row ─────────────────────
-    HEADERS = ["NAME", "STATUS", "VERSION", "TPS", "PING", "MODELS",
+    HEADERS = ["NAME", "STATUS", "VERSION", "BUILT", "TPS", "PING", "MODELS",
                "LAST HB", "CPU", "CORES/USE", "Q", "RAM", "GPU"]
     # ideal widths, most important first — the tail is dropped first
-    IDEAL = [16, 9, 12, 8, 8, 7, 10, 22, 13, 5, 14, 25]
+    IDEAL = [16, 9, 12, 16, 8, 8, 7, 10, 22, 13, 5, 14, 25]
 
     heads, rows = _fit_table(HEADERS, table_rows, IDEAL)
 
@@ -11668,7 +11772,15 @@ def _do_chat(msg: str, stream: bool = True, mode: str | None = None,
             # NOTHING, and it answered "I do not have access to real-time
             # information" about today's date while the hive had a clock
             # tool it had never heard of.
-            _tool_schemas_list = _tool_schemas() if tools_running else None
+            #
+            # NOT gated on tools_running: the schemas come from the hub, and
+            # _exec_tool_locally falls back to the hub when the local server
+            # is down. A local tool server we cannot start must not cost the
+            # model its clock — that is exactly the wahi failure
+            # ("Permission denied: /usr/local/lib/hivv/hivv-tools.py" →
+            # no tools attached → "I do not have access to real-time
+            # information").
+            _tool_schemas_list = _tool_schemas()
 
             for node in online_nodes:
                 ip = node.get("lan_ip") or node.get("ip", "")
@@ -11889,11 +12001,15 @@ def _do_chat(msg: str, stream: bool = True, mode: str | None = None,
     req_body = {"message": msg}
     if mode:
         req_body["route"] = {"mode": mode}
+    # The schemas come from the HUB's catalog (one source of truth), so the
+    # CLI can never offer a tool the hive does not have, or miss one it does.
+    # ALWAYS attached — a local tool server we failed to start must not cost
+    # the model its clock (wahi: "Permission denied: …/hivv-tools.py" → no
+    # tools offered → "I do not have access to real-time information").
+    req_body["tools"] = _tool_schemas()
+    # Hand the tool calls back for LOCAL execution only when we can actually
+    # run them here; otherwise the hub runs them itself (one round trip).
     if tools_running:
-        # The schemas come from the HUB's catalog (one source of truth), so
-        # the CLI can never offer a tool the hive does not have, or miss one
-        # it does.
-        req_body["tools"] = _tool_schemas()
         req_body["local_tools"] = True
     if think_off:
         req_body["chat_template_kwargs"] = {"enable_thinking": False}
@@ -13824,12 +13940,215 @@ def _test_ai_contract(_chk) -> None:
         _chk("history --json parses (operator)", False)
 
 
+def _test_toolkit() -> int:
+    """`hivv tools test` — the toolkit end to end, on THIS box.
+
+    Returns the number of failures (0 = everything works).
+
+    WHY THIS EXISTS
+    A user ran `hivv chat "whats the date today"` and got
+    "I do not have access to real-time information". The hive had a clock
+    tool; the model was never offered it, because the local tool server had
+    failed to download (Permission denied in a root-owned install) and the
+    CLI gated the tool SCHEMAS on that server being up. Three separate
+    things had to be true and nothing checked them:
+
+      1. the HUB catalog is reachable — that is where the schemas come from,
+      2. the LOCAL tool server runs — that is where the cheap tools run,
+      3. a tool actually EXECUTES end to end.
+
+    This checks all three, then the policy posture and the SSRF guard, and
+    finishes with the question a human would actually ask.
+    """
+    import urllib.request as _ur
+
+    fails = 0
+    # `from datetime import datetime` at the top of this file means `datetime`
+    # is the CLASS, not the module — datetime.date does not exist on it.
+    today = datetime.now().date()
+
+    def _chk(label, ok, detail=""):
+        nonlocal fails
+        tail = "  \033[2m%s\033[0m" % detail if detail else ""
+        if ok:
+            print("  \033[32m✓\033[0m %s%s" % (label, tail))
+        else:
+            fails += 1
+            print("  \033[31m✗\033[0m %s  %s" % (label, detail))
+
+    def _hub(tool, body):
+        try:
+            code, resp = http("POST", "/api/tools/%s/invoke" % tool, body=body, timeout=45)
+            return code, (resp if isinstance(resp, dict) else {})
+        except Exception as e:
+            return 0, {"error": str(e)}
+
+    # ── 1. the catalog ────────────────────────────────────────────────────
+    print("\033[1m%s tools test — catalog\033[0m\n" % APP)
+    cat = {}
+    try:
+        code, resp = http("GET", "/api/tools/catalog", timeout=10, sign=False)
+        cat = resp if code == 200 and isinstance(resp, dict) else {}
+    except Exception as e:
+        cat = {"error": str(e)}
+    if cat.get("tools"):
+        _chk("hub catalog reachable", True,
+             "%d tools · %d advertised" % (len(cat["tools"]), len(cat.get("advertised", []))))
+        names = {t.get("name") for t in cat["tools"]}
+        for must in ("calculator", "current_time", "timezone_convert", "text_parser"):
+            _chk("catalog has %s" % must, must in names)
+        _chk("web search is NOT advertised by default",
+             not cat.get("web_search_enabled", False),
+             "HIVV_ENABLE_WEB_SEARCH=0 (expected)")
+    else:
+        _chk("hub catalog reachable", False, str(cat.get("error", "no response")))
+    print()
+
+    # ── 2. the local tool server ──────────────────────────────────────────
+    print("\033[1m%s tools test — local tool server\033[0m\n" % APP)
+    local_info = {}
+    try:
+        with _ur.urlopen("http://127.0.0.1:%d/tools" % TOOLS_PORT, timeout=4) as r:
+            local_info = json.loads(r.read())
+        local_ok = True
+    except Exception as e:
+        local_ok = False
+        local_info = {"error": str(e)}
+    _chk("reachable on 127.0.0.1:%d" % TOOLS_PORT, local_ok,
+         ("%d local · %d via the hub" % (len(local_info.get("local_tools", [])),
+                                         len(local_info.get("hub_tools", []))))
+         if local_ok else "%s — run: %s tools on" % (local_info.get("error"), APP))
+    if local_ok:
+        _chk("the server advertises the whole catalog",
+             len(local_info.get("tools", [])) >= 12,
+             "%d tools" % len(local_info.get("tools", [])))
+    print()
+
+    # ── 3. tool calls through the HUB ─────────────────────────────────────
+    print("\033[1m%s tools test — tool calls (hub)\033[0m\n" % APP)
+    code, resp = _hub("calculator", {"expression": "(12+8)*3/7"})
+    _chk("calculator", code == 200 and resp.get("ok") and
+         abs(float(resp.get("data", {}).get("result", 0)) - 60 / 7) < 1e-6,
+         str(resp.get("data", {}).get("result") or resp.get("error", "")))
+
+    code, resp = _hub("current_time", {"timezone": "Asia/Karachi"})
+    d = resp.get("data") or {}
+    _chk("current_time", code == 200 and resp.get("ok") and d.get("human"),
+         ("%s %s %s" % (d.get("human", ""), d.get("timezone", ""), d.get("utc_offset", ""))).strip()
+         or str(resp.get("error", "")))
+
+    code, resp = _hub("timezone_convert",
+                      {"timezone": "Europe/Paris", "from_timezone": "Asia/Karachi"})
+    d = resp.get("data") or {}
+    _chk("timezone_convert", code == 200 and resp.get("ok") and d.get("difference"),
+         "%s vs %s = %s" % (d.get("local", ""), d.get("from_local", ""), d.get("difference", ""))
+         if code == 200 else str(resp.get("error", "")))
+
+    code, resp = _hub("text_parser", {"input": "name,age\nada,36"})
+    d = resp.get("data") or {}
+    _chk("text_parser (csv)", code == 200 and resp.get("ok") and d.get("detected_format") == "csv",
+         "%s -> %s" % (d.get("detected_format"), d.get("parsed"))
+         if code == 200 else str(resp.get("error", "")))
+    print()
+
+    # ── 4. tool calls on THIS box ─────────────────────────────────────────
+    print("\033[1m%s tools test — tool calls (local server)\033[0m\n" % APP)
+    if not local_ok:
+        _chk("local tool calls", False, "the local tool server is not reachable")
+    else:
+        checks = [("calculator", {"expression": "6*7"}, lambda x: x.get("result") == 42),
+                  ("current_time", {}, lambda x: bool(x.get("human") or x.get("iso"))),
+                  ("text_parser", {"input": '{"a":1}'}, lambda x: x.get("detected_format") == "json")]
+        for tool, body, pick in checks:
+            try:
+                req = _ur.Request("http://127.0.0.1:%d/tool/%s" % (TOOLS_PORT, tool),
+                                  data=json.dumps(body).encode(), method="POST",
+                                  headers={"Content-Type": "application/json"})
+                with _ur.urlopen(req, timeout=30) as r:
+                    out = json.loads(r.read())
+                ok = out.get("ok") is True and pick(out.get("data") or {})
+                detail = json.dumps(out.get("data") or out.get("error") or "")[:90]
+            except Exception as e:
+                ok, detail = False, str(e)
+            _chk(tool, ok, detail)
+    print()
+
+    # ── 5. policy posture + the SSRF guard ────────────────────────────────
+    print("\033[1m%s tools test — policy\033[0m\n" % APP)
+    code, resp = _hub("web_fetch", {"url": "https://example.com"})
+    if code == 202:
+        _chk("web.fetch asks before it runs", True, "MAYBE grant %s" % resp.get("grant_id"))
+    elif code == 200:
+        rule = resp.get("policy", {}).get("rule", "?")
+        _chk("web.fetch asks before it runs", True, "already approved (%s)" % rule)
+    else:
+        _chk("web.fetch asks before it runs", False, "HTTP %s %s" % (code, resp.get("error", "")))
+
+    code, resp = _hub("web_fetch", {"url": "http://127.0.0.1:3011/api/health"})
+    if code == 200 and not resp.get("ok"):
+        _chk("SSRF guard refuses an internal address", "private" in str(resp.get("error", "")),
+             str(resp.get("error", ""))[:70])
+    elif code == 202:
+        _chk("SSRF guard refuses an internal address", True, "gated first (MAYBE)")
+    else:
+        _chk("SSRF guard refuses an internal address", False, "HTTP %s" % code)
+    print()
+
+    # ── 6. the question a human would actually ask ────────────────────────
+    print("\033[1m%s tools test — does a MODEL use them?\033[0m\n" % APP)
+    schemas = [s for s in _tool_schemas()
+               if s.get("function", {}).get("name") == "current_time"]
+    if not schemas:
+        _chk("the current_time schema is offerable", False, "not in the catalog?")
+    else:
+        try:
+            code, resp = http("POST", "/api/chat", body={
+                "message": "What is today's date? Use the current_time tool.",
+                "stream": False,
+                "tools": schemas,
+            }, timeout=180)
+            answer = ""
+            if code == 200 and isinstance(resp, dict):
+                answer = ((resp.get("choices") or [{}])[0]
+                          .get("message", {}).get("content") or "")
+            _chk("a model called the tool and answered with a real date",
+                 bool(answer) and str(today.year) in answer,
+                 (answer.strip().replace("\n", " ")[:80] or "HTTP %s" % code))
+        except Exception as e:
+            _chk("a model called the tool and answered with a real date", False, str(e))
+    print()
+
+    if fails:
+        print("  \033[31m%d failed\033[0m" % fails)
+        print("  → local server: %s tools on   ·   catalog: %s tools list" % (APP, APP))
+        print('  → the model itself: %s chat "whats the date today"' % APP)
+    else:
+        print("  \033[32mall green — every tool answered\033[0m")
+    return fails
+
+
 def cmd_test(args) -> None:
     """End-to-end smoke test: doctor + speed + LLM core (real round-trip) +
-    AI/JSON contract + network + chat with all nodes.
+    AI/JSON contract + network + chat with all nodes + the toolkit.
+
+    Scope (hivv test [all|everything|tools]):
+      all / everything -> the whole suite - the default, and what "hivv test"
+                          has always meant
+      tools            -> JUST the toolkit: the hub catalog, the local tool
+                          server, real tool calls both ways, the policy
+                          posture, the SSRF guard - and finally a MODEL
+                          actually using one
 
     Exit code = THIS box's core health (llm + json contract + hub endpoints);
     per-node reach stays advisory (a bee off your LAN is not your failure)."""
+    scope = str(getattr(args, "scope", None) or "all").strip().lower()
+    if scope in ("everything", "all"):
+        scope = "all"
+
+    if scope == "tools":
+        print(f"\033[1m{APP} test tools\033[0m — the toolkit end to end\n")
+        sys.exit(1 if _test_toolkit() else 0)
+
     print(f"\033[1m{APP} test\033[0m — full end-to-end smoke test\n")
     fails: list = []
 
@@ -14041,6 +14360,12 @@ def cmd_test(args) -> None:
                     print(f"  {name}: \033[31m✗ chat failed\033[0m \033[2m(direct + relay: "
                           f"{str(text_r)[:60]})\033[0m")
 
+    # The toolkit — the thing a model reaches for. Its own section: a failing
+    # tool is the most common "the AI said it can't do that" report.
+    print()
+    _tool_fails = _test_toolkit()
+    if _tool_fails:
+        fails.append("toolkit (%d check(s))" % _tool_fails)
     print()
     if fails:
         print(f"\n  \033[31m{len(fails)} core check(s) FAILED:\033[0m")
@@ -18456,8 +18781,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("tools",   help="manage local tool server + list available tools on the hive")
     sp.add_argument("action", nargs="?", default="list",
-                    choices=["on", "off", "status", "share", "list"],
-                    help="on/off/status/share/list (default: list)")
+                    choices=["on", "off", "status", "share", "list", "test"],
+                    help="on/off/status/share/list/test (default: list)")
 
     sp = sub.add_parser("call",    help="invoke a tool through the hive (no local LLM needed)")
     sp.add_argument("tool",
@@ -18694,7 +19019,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp_hy = sub.add_parser("history", help="recent hive activity — requests (who answered, how long, tok/s) + local iq/exam events")
     sp_hy.add_argument("--limit", type=int, default=20, help="how many recent requests (default 20)")
     sp_hy.add_argument("--json", dest="json_output", action="store_true", help="output raw JSON")
-    sub.add_parser("test",       help="doctor + speed end-to-end smoke test")
+    sp_t = sub.add_parser("test", help="end-to-end smoke test: doctor, speed, LLM, contract, network, tools")
+    sp_t.add_argument("scope", nargs="?", default="all",
+                      choices=["all", "everything", "tools"],
+                      help="all/everything = the whole suite · tools = just the toolkit (default: all)")
     sp_v = sub.add_parser("volunteer", help="relay jobs — ON by default; on|off|status (opt out: volunteer off)")
     sp_v.add_argument("action", nargs="?", choices=["on", "off", "status"], default="status")
     sp_sh = sub.add_parser("share", help="broadcast what you're working on to the hive 🐝")
@@ -19474,7 +19802,8 @@ def _print_sub_help(cmd: str) -> None:
         "suggest":   "alias: send a suggestion/idea to the hub (same queue as hivv request)\n  usage: hivv suggest \"<idea>\" [--subject S] [--json]   ·  model picks: hivv llm suggest",
         "selftest":  "full node health battery — local or REMOTELY on a bee\n  usage: hivv selftest [bee] [--wait N] [--json]\n  remote = signed allowlisted op; result rides the heartbeat back",
         "llm setup": "ONE-SHOT local LLM: build llama.cpp → download GGUF → serve in background\n  usage: hivv llm setup [--model KEY] [--port N] [--ctx N] [--yes] [--fg]\n  alias: hivv install llm   · default model: gemma4:e2b",
-        "test":      "doctor + speed end-to-end smoke test",
+        "test":      "end-to-end smoke test: doctor, speed, LLM, contract, network, tools\n  usage: hivv test [all|everything|tools]\n  tools = just the toolkit (catalog · local server · real tool calls · policy · a MODEL using one)",
+        "tools":     "the toolkit: local tool server + the whole hive catalog\n  usage: hivv tools [list|status|on|off|share|test]\n  test = the diagnostic: checks the catalog, the local server, real tool\n         calls both ways, policy posture, SSRF — then asks a MODEL",
         "volunteer": "relay jobs (cross-NAT compute) — ON by default since 2026-11-18\n  usage: hivv volunteer [on|off|status]   ·  opt out: hivv volunteer off",
         "setup":     "configure OpenCode + VS Code + local LLM with hivv\n  flags: --write [PATH]  write/merge ./opencode.jsonc (default)\n         --global        with --write: use ~/.config/opencode/opencode.jsonc\n         --json          detection dict + config as JSON\n         --profile P    local | hybrid | hive | cloud (default hybrid)\n         --backend M    pin one specific local model\n         --tools IDS    only these tool ids, comma-separated\n         --gui          also write the GUI tool configs\n         --dry-run      show what would be written, write nothing",
         "capabilities": "what can this HIVV instance do? (capability discovery)\n  shows the OpenAI surface, route modes, deterministic tools, hive tools, MCP\n  flag: --json   machine-readable",
