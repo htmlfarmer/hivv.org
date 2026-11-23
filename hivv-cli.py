@@ -9192,6 +9192,161 @@ def _relay_chat_to_bee(node_id: str, msg: str, timeout: float = 45.0) -> tuple[s
     return "failed", f"no answer within {int(timeout)}s"
 
 
+def _ask_hive(name: str, msg: str, as_json: bool = False,
+               quiet: bool = False) -> int | None:
+    """open-hives/0.1 doorbell: ask a WHOLE HIVE when the name is not a bee.
+
+    Returns an exit code when it handled the request (0 = answered,
+    4 = hive known but could not answer), or None when the name is not a
+    hive at all — so the caller's bee-not-found path keeps working.
+
+    Order: brand registry -> verified peers -> bare domain; then the three
+    manifest doors; then endpoints.chat (the doorbell). No doorbell yet?
+    Say exactly which screw to remove — the error IS the documentation.
+    """
+    import urllib.request as _rq
+
+    target = (name or "").strip().lower()
+    if not target:
+        return None
+
+    def _get(url: str, timeout: int = 8):
+        req = _rq.Request(url, headers={"User-Agent": f"{APP}/bridge"})
+        with _rq.urlopen(req, timeout=timeout) as r:
+            return r.status, r.read()
+
+    # 1) is it a hive? brand -> domain, else a verified peer, else a bare host
+    host = None
+    if "." in target:
+        host = target
+    else:
+        try:
+            c, b = _get(f"{HUB.rstrip('/')}/brands.json", timeout=6)
+            if c == 200:
+                host = (json.loads(b).get("brands") or {}).get(target)
+        except Exception:
+            pass
+        if not host:
+            try:
+                c, b = _get(f"{HUB.rstrip('/')}/api/bridge/peers", timeout=6)
+                if c == 200:
+                    for p in (json.loads(b).get("peers") or []):
+                        rh = str(p.get("remote_hive") or "")
+                        if rh == target or rh.startswith(target + "."):
+                            host = rh
+                            break
+            except Exception:
+                pass
+    if not host:
+        return None                      # not a hive — caller shows the bee list
+    origin = host if host.startswith("http") else f"https://{host}"
+
+    # 2) the doors: any git-hosted manifest the registry knows (peer #1's
+    # website is Google Sites and cannot serve /.well-known at all), then
+    # branded, IETF, legacy.
+    doors = []
+    try:
+        c, b = _get(f"{HUB.rstrip('/')}/api/bridge/peers", timeout=6)
+        if c == 200:
+            for p in (json.loads(b).get("peers") or []):
+                if str(p.get("remote_hive")) in (host, target) and p.get("manifest_url"):
+                    doors.append(str(p["manifest_url"]))
+    except Exception:
+        pass
+    doors += [origin + "/.bridge/hivv.json",
+              origin + "/.well-known/hivv.json",
+              origin + "/.well-known/hive.json"]
+    manifest = None
+    for path in doors:
+        try:
+            c, b = _get(path)
+            if c == 200:
+                j = json.loads(b)
+                if str(j.get("protocol", "")).startswith("open-hive"):
+                    manifest = j
+                    break
+        except Exception:
+            continue
+
+    def _out(obj: dict, text: str) -> int:
+        if as_json:
+            print(json.dumps(obj))
+        elif quiet:
+            print(text)
+        else:
+            for ln in text.splitlines():
+                print(f"  {ln}")
+        return 0 if obj.get("ok") else 4
+
+    if not manifest:
+        return _out({"ok": False, "hive": host, "error": "no manifest",
+                     "fix": f"publish {origin}/.bridge/hivv.json"},
+                    f"{host} did not answer any of the three doors.\n"
+                    f"Fix: publish {origin}/.bridge/hivv.json (copy ours, "
+                    f"change the name).")
+
+    # 3) the doorbell: endpoints.chat
+    chat = str((manifest.get("endpoints") or {}).get("chat") or "")
+    if not (chat.startswith("http://") or chat.startswith("https://")):
+        pulse = ""
+        try:
+            c, b = _get(f"{HUB.rstrip('/')}/api/bridge/peers", timeout=6)
+            if c == 200:
+                for p in (json.loads(b).get("peers") or []):
+                    if str(p.get("remote_hive")) in (host, target):
+                        pu = p.get("pulse") or {}
+                        if pu.get("ok"):
+                            rows = pu.get("server_rows")
+                            on = pu.get("online_rows")
+                            pulse = (f"  pulse: {on}/{rows} nodes online, "
+                                     f"{pu.get('models', '?')} models\n")
+                        break
+        except Exception:
+            pass
+        return _out({"ok": False, "hive": host,
+                     "protocol": manifest.get("protocol"),
+                     "error": "visible but silent: no endpoints.chat",
+                     "fix": "add endpoints.chat to the manifest — e.g. run "
+                            "one 'kwaainet serve' and publish its URL"},
+                    f"{host} is ALIVE ({manifest.get('protocol')}) but silent:\n"
+                    + pulse +
+                    "  it publishes no endpoints.chat doorbell.\n"
+                    "  Fix (zero code): run one OpenAI-compatible server, add\n"
+                    '  "endpoints": {"chat": "https://..."} to its manifest.\n'
+                    f"  Spec: {HUB}/HIVE-TO-HIVE  (§12.1 the doorbell rule)")
+
+    if not quiet and not as_json:
+        print(f"  \u2192 asking hive {host} ({manifest.get('protocol')}) ...")
+    body = json.dumps({"model": "auto", "max_tokens": 400,
+                       "messages": [{"role": "user", "content": msg}]}).encode()
+    req = _rq.Request(chat, data=body, method="POST",
+                      headers={"Content-Type": "application/json",
+                               "User-Agent": f"{APP}/bridge"})
+    try:
+        with _rq.urlopen(req, timeout=120) as r:
+            raw = r.read().decode("utf-8", "replace")
+            who = r.headers.get("X-Hivv-Answered-By", "")
+    except Exception as e:
+        return _out({"ok": False, "hive": host, "chat": chat,
+                     "error": str(e)},
+                    f"{host} doorbell rang but nobody answered:\n  {e}")
+    try:
+        j = json.loads(raw)
+        answer = j["choices"][0]["message"].get("content") or ""
+    except Exception:
+        return _out({"ok": False, "hive": host, "error": "bad reply"},
+                    f"{host} returned something unexpected:\n{raw[:400]}")
+    if as_json:
+        print(json.dumps({"ok": True, "hive": host, "answer": answer,
+                          "answered_by": who}))
+    else:
+        print(answer)
+        if who and not quiet:
+            print(f"\n  \u2713 answered by {who}")
+    return 0
+
+
+
 def cmd_node_chat(args) -> None:
     """hivv ask|talk <bee> <msg> — chat with ONE bee's own LLM.
 
@@ -9242,6 +9397,13 @@ def cmd_node_chat(args) -> None:
     nodes = p.get("nodes", [])
     match = _find_node(name, nodes)
     if not match:
+        # Not a bee? It might be a whole HIVE — the open-hives/0.1
+        # doorbell (brand -> manifest -> endpoints.chat). Handled here means
+        # "the name was a hive": answer, explain, or refuse — never fall
+        # through to the bee list for a name that was never a bee.
+        _rc = _ask_hive(name, msg, as_json=as_json, quiet=quiet)
+        if _rc is not None:
+            sys.exit(_rc)
         available = [f"{n.get('id', '?')} ({n.get('status', '?')})" for n in nodes]
         if as_json:
             print(json.dumps({"ok": False, "error": f"bee '{name}' not found",
@@ -18894,7 +19056,7 @@ def build_parser() -> argparse.ArgumentParser:
     # `ask` / `talk` are the one-word ways to address a SINGLE bee;
     # `node-chat` stays as a hidden-ish alias so old muscle memory and docs
     # keep working. All three run cmd_node_chat.
-    for _verb, _help in (("ask",  "ask ONE bee a question (pins that bee)"),
+    for _verb, _help in (("ask",  "ask ONE bee — or a whole HIVE when the name is a brand/domain"),
                          ("talk", "chat with ONE bee (alias of ask)"),
                          ("node-chat", "chat directly with a node's LLM")):
         _sp = sub.add_parser(_verb, help=_help)
