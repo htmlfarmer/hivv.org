@@ -46,7 +46,7 @@ another host. All outbound fetches refuse private/internal addresses.
 """
 import json, os, sys, re, socket, datetime, urllib.parse, urllib.request
 
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 import threading
 
@@ -947,7 +947,14 @@ def start_server(port=PORT):
         return False
     try:
         write_pid()
-        server = HTTPServer((HOST, port), ToolHandler)
+        # THREADING, not the single-threaded HTTPServer: a plain
+        # ThreadingHTTPServer would serve one request at a time, so a
+        # proxied call that takes 30 seconds (a code run in the hub's
+        # sandbox) would block every other caller — and even a bare TCP
+        # probe from the CLI would hold the server hostage while the CLI
+        # waited on its own HTTP request.
+        server = ThreadingHTTPServer((HOST, port), ToolHandler)
+        server.daemon_threads = True
         print("[%s] listening on http://%s:%d" % (APP, HOST, port))
         print("[%s] tools: %s" % (APP, ", ".join(t["name"] for t in TOOLS)))
         print("[%s] press Ctrl+C to stop" % APP)

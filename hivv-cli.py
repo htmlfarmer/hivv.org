@@ -5928,7 +5928,7 @@ def _tools_running() -> bool:
             pass
     # Fallback: check if port is open
     try:
-        with socket.create_connection(("localhost", TOOLS_PORT), timeout=1):
+        with socket.create_connection(("127.0.0.1", TOOLS_PORT), timeout=1):
             return True
     except OSError:
         pass
@@ -5965,7 +5965,7 @@ def _shared_tools() -> list:
     if _tools_running():
         try:
             import urllib.request
-            with urllib.request.urlopen(f"http://localhost:{TOOLS_PORT}/tools", timeout=3) as r:
+            with urllib.request.urlopen(f"http://127.0.0.1:{TOOLS_PORT}/tools", timeout=3) as r:
                 data = json.loads(r.read())
                 got = data.get("tools", [])
                 tools = got if isinstance(got, list) else []
@@ -6020,9 +6020,9 @@ def cmd_tools(args) -> None:
             pid = int(pid_file.read_text().strip()) if pid_file.exists() else "?"
             print(f"[{APP}] tools server running on port {TOOLS_PORT} (PID {pid})")
             try:
-                with socket.create_connection(("localhost", TOOLS_PORT), timeout=2) as s:
+                with socket.create_connection(("127.0.0.1", TOOLS_PORT), timeout=2) as s:
                     import urllib.request
-                    with urllib.request.urlopen(f"http://localhost:{TOOLS_PORT}/tools", timeout=3) as r:
+                    with urllib.request.urlopen(f"http://127.0.0.1:{TOOLS_PORT}/tools", timeout=3) as r:
                         data = json.loads(r.read())
                         print(f"[{APP}] available tools: {', '.join(data.get('tools', []))}")
             except Exception as e:
@@ -6035,9 +6035,9 @@ def cmd_tools(args) -> None:
         print(f"\n\033[1m{APP} tools — available on this machine\033[0m")
         if _tools_running():
             try:
-                with socket.create_connection(("localhost", TOOLS_PORT), timeout=2):
+                with socket.create_connection(("127.0.0.1", TOOLS_PORT), timeout=2):
                     import urllib.request
-                    with urllib.request.urlopen(f"http://localhost:{TOOLS_PORT}/tools", timeout=3) as r:
+                    with urllib.request.urlopen(f"http://127.0.0.1:{TOOLS_PORT}/tools", timeout=3) as r:
                         data = json.loads(r.read())
                         tools = data.get("tools", [])
                         print(f"  \033[32mlocal\033[0m  {', '.join(tools)}  (you)")
@@ -6105,7 +6105,7 @@ def cmd_tools(args) -> None:
                 )
             time.sleep(2)
             if _tools_running():
-                ok(f"tools server live on http://localhost:{TOOLS_PORT}")
+                ok(f"tools server live on http://127.0.0.1:{TOOLS_PORT}")
                 print(f"[{APP}] others on the hive can now use your tools!")
             else:
                 die("failed to start tools server — check: python3 hivv-tools.py test")
@@ -6129,7 +6129,7 @@ def cmd_tools(args) -> None:
             die("tools server not running — run: hivv tools on")
         try:
             import urllib.request
-            with urllib.request.urlopen(f"http://localhost:{TOOLS_PORT}/tools", timeout=3) as r:
+            with urllib.request.urlopen(f"http://127.0.0.1:{TOOLS_PORT}/tools", timeout=3) as r:
                 data = json.loads(r.read())
                 tools = data.get("tools", [])
         except Exception as e:
@@ -6230,7 +6230,7 @@ def cmd_call(args) -> None:
             body = json.dumps(params).encode("utf-8")
             import urllib.request as _ur
             req = _ur.Request(
-                f"http://localhost:{TOOLS_PORT}/tool/{urllib.parse.quote(str(tool))}",
+                f"http://127.0.0.1:{TOOLS_PORT}/tool/{urllib.parse.quote(str(tool))}",
                 data=body, method="POST", headers={"Content-Type": "application/json"})
             with _ur.urlopen(req, timeout=30) as r:
                 data = json.loads(r.read())
@@ -10189,7 +10189,7 @@ def _exec_tool_locally(tool_name: str, args: dict) -> dict:
     Returns {role:'tool', tool_call_id, content}.
     """
     import urllib.request, urllib.parse
-    base = f"http://localhost:{TOOLS_PORT}"
+    base = f"http://127.0.0.1:{TOOLS_PORT}"
     call_id = args.get("id", "?")
     payload = {k: v for k, v in (args or {}).items() if k != "id"}
     try:
