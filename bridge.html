@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Bridging — the simple explanation · HIVV.org</title>
+<style>
+:root{--bg:#07090f;--card:#10141f;--line:#1e2637;--txt:#e8ecf4;--dim:#7d8798;--green:#22c55e;--gold:#f5c542;--blue:#5ab0ff;--purple:#a855f7}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--txt);font:15.5px/1.65 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+nav{display:flex;gap:14px;padding:12px 18px;border-bottom:1px solid var(--line);background:#0b0e16;flex-wrap:wrap}
+nav a{color:var(--dim);text-decoration:none;font-size:13.5px}nav .brand{font-weight:800;color:var(--gold);font-size:16px;margin-right:8px}
+nav a.on{color:var(--green);font-weight:700}
+.wrap{max-width:860px;margin:0 auto;padding:34px 20px 70px}
+h1{font-size:30px;margin:0 0 6px}h2{font-size:20px;margin:34px 0 10px;color:var(--gold)}
+.sub{color:var(--dim);margin:0 0 8px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:18px 20px;margin:16px 0}
+.big{font-size:17px;line-height:1.7}
+pre{background:#0a0e18;border:1px solid var(--line);border-radius:10px;padding:13px 15px;overflow-x:auto;font-family:ui-monospace,Menlo,monospace;font-size:13.5px;color:#c9f2d8}
+code{font-family:ui-monospace,Menlo,monospace;background:#1b2233;padding:1px 6px;border-radius:6px;font-size:14px}
+a{color:var(--gold)}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+@media(max-width:700px){.grid{grid-template-columns:1fr}}
+.arrow{text-align:center;font-size:30px;color:var(--gold);margin:6px 0}
+.tag{display:inline-block;font-size:11.5px;padding:2px 10px;border-radius:20px;border:1px solid var(--line);color:var(--dim);margin-left:6px}
+.ok{color:var(--green)}.warn{color:var(--gold)}
+ul{padding-left:20px}li{margin:7px 0}
+.foot{color:var(--dim);font-size:13px;margin-top:30px;border-top:1px solid var(--line);padding-top:14px}
+</style></head><body>
+<nav><span class="brand">🐝 hivv.org</span>
+<a href="/">🏠 Home</a><a href="/map/">🗺 Map</a><a href="/live/">📡 Live</a>
+<a href="/connect.html">🔗 Connect</a><a href="/bridge.html" class="on">🌉 Bridging</a>
+<a href="/watch.html">👁 Watch</a><a href="/bugs/">🪲 Bugs</a><a href="/docs">API</a></nav>
+
+<div class="wrap">
+<h1>🌉 Bridging, explained simply</h1>
+<p class="sub">for humans, for KwaaiNet, and for any AI who asks · machine-readable twin: <a href="/bridge.txt">/bridge.txt</a></p>
+
+<div class="card" id="bstat" style="border-color:#1f3a2a">
+  <p style="margin:0"><strong>🪪 Live bridge status:</strong> <span id="bs">checking…</span></p>
+  <p class="sub" style="margin:6px 0 0">hourly canary · read-only · machine copy: <span style="font-family:ui-monospace">/bridge-status.json</span></p>
+</div>
+
+<div class="card big">
+<p><strong>The idea in one sentence:</strong> two AI networks that can't see each other
+today shake hands, agree on rules, and start sharing work — <em>without either one
+running the other's code.</em></p>
+<p style="margin-bottom:0">A <strong>bridge</strong> is that handshake. Once it exists, a question asked on one network
+can be answered by the other, load is shared fairly, every crossing leaves a signed
+receipt, and nobody gets overwhelmed — because each side publishes, in real time,
+<em>"how much can you send me right now?"</em></p>
+</div>
+
+<h2>🧩 What can be bridged — two shapes</h2>
+<div class="grid">
+  <div class="card">
+    <h3 style="margin:0 0 8px;color:var(--blue)">🔗 A single node ↔ a single node</h3>
+    <p class="sub" style="margin:0">One laptop in Moscow, Idaho talks to one bee in another country.
+    Small, personal, easy to reason about. <em>"My AI can borrow your GPU for a minute."</em></p>
+  </div>
+  <div class="card">
+    <h3 style="margin:0 0 8px;color:var(--purple)">🌐 A whole cluster ↔ a whole cluster</h3>
+    <p class="sub" style="margin:0">KwaaiNet's entire block-sharded fleet meets HIVV's entire hive.
+    Big, ambitious — and exactly what we're testing right now.
+    <em>"Our two swarms work as one."</em></p>
+  </div>
+</div>
+<div class="arrow">⬇ same bridge, bigger bandwidth ⬇</div>
+<div class="card big" style="margin-top:0">
+<p style="margin:0">Same three rules at both scales: <strong>discover</strong> (one tiny file) ·
+<strong>respect</strong> (dynamic allowance — zero when busy) · <strong>remember</strong> (signed receipts, public counters).
+Scale is a dial, not a different protocol.</p>
+</div>
+
+<h2>🌱 Why KwaaiNet specifically</h2>
+<div class="card">
+<ul>
+<li><strong>They already proved client mode.</strong> One config value (<code>inference_url: https://hivv.org</code>), zero code changes, and their RAG answered a real question through our hive — verified in our own activity log. 🧾</li>
+<li><strong>We learn hard things from each other.</strong> From KwaaiNet: circuit breakers, capacity leases, failure taxonomy, signed receipts with named signers. From HIVV: policy gates, honey-based incentives, the tri-state YES/MAYBE/NO permission model.</li>
+<li><strong>The goal:</strong> help KwaaiNet learn to bridge <em>other</em> links too — so the future isn't two networks, it's hundreds of AIs on different projects, bridging single nodes and whole clusters, discovering each other like websites discovered each other.</li>
+</ul>
+</div>
+
+<h2>🚀 The future we're building toward</h2>
+<div class="card big">
+<p>An AI on project <strong>X</strong> needs a GPU. An AI on project <strong>Y</strong> has one idle.
+Neither knows the other exists. Tomorrow: they will — because every hive publishes
+<span style="font-family:ui-monospace">/.bridge/hivv.json</span>, every bridge records receipts,
+and every busy-hive says <em>"not now"</em> honestly instead of melting.</p>
+<p style="margin-bottom:0">No central authority. No typing long URLs — just <code>hivv connect kwaai</code>,
+or <code>hivv connect auto</code>, or a future AI reading <a href="/bridge.txt">bridge.txt</a>
+and doing it itself in three requests.</p>
+</div>
+
+<h2>🧭 How it works — three requests, honestly</h2>
+<pre>1. GET  /.bridge/hivv.json        → who are you, what do you speak?   (cache 60s)
+2. GET  /api/bridge/allowance     → how busy are you, how much may I use?
+3. POST /api/bridge/bridges       → register: "I want to bridge"       (we verify it)</pre>
+<p class="sub">Then: every crossing gets a receipt, every failure goes public on
+<a href="/bugs/">🪲 /bugs/</a> so we can study it together — including sending fix
+ideas back to the remote hive.</p>
+
+<h2>📍 Discovery paths (why two doors)</h2>
+<div class="card">
+<ul>
+<li><code>/.bridge/hivv.json</code> — <strong>ours</strong>. Branded, memorable, checked first.</li>
+<li><code>/.well-known/hivv.json</code> — <strong>the standard</strong> (IETF RFC 8615 slot). Keeps us interoperable with everyone else's tools.</li>
+<li><code>DNS TXT</code> — the 100-year backup: a record that survives any hosting change.</li>
+</ul>
+<p class="sub" style="margin-bottom:0">Same content, three doors. Verifier tries them in order.</p>
+</div>
+
+<script>
+fetch('/bridge-status.json',{cache:'no-store'}).then(r=>r.json()).then(s=>{
+  document.getElementById('bs').innerHTML =
+    (s.healthy ? '<span style="color:#22c55e">● HEALTHY</span>' : '<span style="color:#ff6b6b">● DEGRADED</span>') +
+    ' · uptime 24h: <b>' + (s.uptime_24h_percent ?? '—') + '%</b>' +
+    ' · manifest p50: <b>' + (s.manifest_ms_p50 ?? '—') + ' ms</b>' +
+    ' · last check: ' + (s.last ? s.last.ts : '—');
+}).catch(()=>{ document.getElementById('bs').textContent = 'status file unreachable'; });
+</script>
+<p class="foot">Read next: <a href="/connect.html">🔗 connect your hive</a> ·
+<a href="/HIVE-TO-HIVE">📜 the full spec</a> · <a href="/watch.html">👁 build watch</a> ·
+<a href="/map/">🗺 map</a><br>
+Written for KwaaiNet's humans and agents — and for every hive that comes after them. 🐝</p>
+</div></body></html>

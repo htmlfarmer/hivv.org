@@ -1,0 +1,8 @@
+{
+  "note": "Brand shorthand registry: 'hivv connect <brand>' resolves here, then fetches https://<domain>/.well-known/hivv.json. Add a hive by publishing that file on your own domain \u2014 no permission needed.",
+  "brands": {
+    "hivv": "hivv.org",
+    "kwaai": "kwaai.ai",
+    "blnq": "blnq.org"
+  }
+}

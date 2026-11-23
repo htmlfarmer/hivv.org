@@ -544,6 +544,132 @@ paths:
       responses:
         '200': { description: Acknowledged }
 
+  /api/bridge/load:
+    get:
+      tags: [Bridge]
+      summary: Cheap hive busy-ness glance (open-hives/0.1)
+      description: |
+        Memory-only: cluster/capacity/relay counters plus a single indexed
+        5-minute latency window raced against a 600ms deadline. Peer hives
+        poll this every 60s — it must never hang.
+      responses:
+        '200':
+          description: Load snapshot
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  version: { type: string, example: open-hives/0.1 }
+                  hive: { type: string, example: hivv.org }
+                  mode: { type: string, enum: [steady, supervised] }
+                  latency_5m:
+                    type: object
+                    properties:
+                      requests: { type: integer }
+                      avg_ms: { type: integer }
+                      ok_pct: { type: integer }
+
+  /api/bridge/allowance:
+    get:
+      tags: [Bridge]
+      summary: Dynamic per-peer traffic allowance (0-85%)
+      description: |
+        The authoritative number a guest hive obeys. Tiered on the 5-minute
+        window: >10s or <99% success -> 0% (guests back off); 3-10s -> 25% of
+        ceiling; 1-3s -> 50%; <=1s -> ceiling (20% steady, 85% supervised).
+      parameters:
+        - name: peer
+          in: query
+          required: true
+          schema: { type: string, example: kwaai }
+      responses:
+        '200':
+          description: Allowance
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  percent: { type: integer, minimum: 0, maximum: 85 }
+                  reason: { type: string }
+                  retry_after_s: { type: integer }
+
+  /api/bridge/peers:
+    get:
+      tags: [Bridge]
+      summary: Verified, hive-scoped peer hives (public listing)
+      responses:
+        '200':
+          description: Peers
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  peers:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        remote_hive: { type: string, example: kwaai.ai }
+                        protocol: { type: string, example: open-hives/0.1 }
+                        latency_ms: { type: integer }
+
+  /api/bridge/problems:
+    get:
+      tags: [Bridge]
+      summary: Failed connection attempts — public learning material
+      responses:
+        '200':
+          description: Problems
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  problems:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        remote_hive: { type: string }
+                        why: { type: string }
+                        attempts: { type: integer }
+
+  /api/bridge/bridges:
+    get:
+      tags: [Bridge]
+      summary: Bridge registry (public sees scope=hive; operator sees all with ?scope=all)
+      responses:
+        '200': { description: Registry }
+    post:
+      tags: [Bridge]
+      summary: Propose a bridge — always attempted, always recorded
+      description: |
+        Any node may propose a bridge to any remote hive. The hub verifies the
+        remote manifest (tries /.bridge/hivv.json, /.well-known/*, then the
+        optional explicit manifest_url), records every attempt, and lists
+        verified scope=hive results. scope=local stays private to the requester.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [remote]
+              properties:
+                remote: { type: string, example: kwaai.ai }
+                scope: { type: string, enum: [hive, local], default: hive }
+                requested_by: { type: string, example: asher-test }
+                note: { type: string, description: Reporter's suggestion; relayed back to the remote hive when it publishes a submit endpoint. }
+                manifest_url: { type: string, description: Explicit https manifest source for hives whose web host cannot serve /.well-known. }
+      responses:
+        '201': { description: Verified and listed }
+        '200': { description: Attempted and recorded (failure is public, not silent) }
+        '400': { description: Bad remote or manifest_url }
+
+
 components:
   securitySchemes:
     bearerAuth:

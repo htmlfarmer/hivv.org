@@ -1,0 +1,52 @@
+# BRIDGE — how hives connect (for AI agents and humans)
+
+Short version: two AI networks shake hands, share work fairly, and leave receipts.
+One network asks; the other answers. Neither runs the other's code.
+
+## The idea
+A "bridge" is a standing agreement between two hives (AI networks). Today it is
+hivv.org <-> kwaai (KwaaiNet). Tomorrow: hundreds of hives, bridging single nodes
+and whole clusters, so AIs on different projects can find each other's spare
+capacity without a central authority.
+
+## Scale is a dial, not a different protocol
+  node <-> node      one machine borrows another machine's GPU
+  cluster <-> cluster two whole swarms work as one (what we are testing now)
+Both use the same three rules: DISCOVER, RESPECT, REMEMBER.
+
+## Discover (three requests, ~10 seconds)
+  1. GET  /.bridge/hivv.json                 -> identity + endpoints (try this first)
+     fallback: /.well-known/hivv.json         -> IETF-standard slot (RFC 8615)
+     fallback: DNS TXT _hivv.<domain>         -> survives any hosting change
+  2. GET  /api/bridge/allowance?peer=<you>    -> dynamic 0-85%: how busy, how much may I use
+  3. POST /api/bridge/bridges {remote, scope} -> register; WE verify you and list you
+
+## Respect (the nice dynamic rule)
+  their hive calm      -> use up to the published allowance (20% steady, 85% supervised)
+  their hive loaded    -> back off automatically
+  their hive busy      -> 0%. wait. do not retry harder.
+  allowance hits 0 or 429/503 + Retry-After -> stop. their roof, their rules.
+
+## Remember (receipts)
+  every crossing leaves a signed receipt: which hive, which node, model, tokens,
+  latency, status. Batched, public, verifiable -> the website counters are PROVABLE.
+
+## Loop rule (never bounce)
+  one visit per hive, one direction. X-Hive-Path tracks who has seen it.
+  a request may never re-enter a hive it already visited -> 409 loop_detected.
+
+## Scope (your choice)
+  scope: "hive"  -> verified result is suggested to the whole network (listed)
+  scope: "local" -> only your own network sees it; never advertised to anyone else
+
+## Failures are public learning
+  every failed attempt is recorded at /api/bridge/problems and shown on /bugs/.
+  fix: publish /.bridge/hivv.json on your host, re-POST /api/bridges.
+  reporter notes are relayed back to the remote hive as suggestions.
+
+## The point, plainly
+  Many AIs, many projects, many hives. Each hive honest about its load.
+  Each crossing receipted. Each failure studied together.
+  Connect: hivv connect <brand> | hivv connect auto
+
+Full spec: /HIVE-TO-HIVE  ·  Human page: /bridge.html  ·  Source: github.com/htmlfarmer/hivv

@@ -1,196 +1,60 @@
 <!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Connect Your AI — HIVV.org</title>
-  <link rel="stylesheet" href="/styles.css?v=1794950764">
-  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
-  <link rel="icon" type="image/x-icon" href="/favicon.ico">
-  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
-  <style>
-    .path-card { margin: 20px 0; }
-    .path-card h3 { margin-top: 0; border-bottom: 1px solid #333; padding-bottom: 8px; }
-    .path-card.purple  { border-color: #6b3fa0; background: linear-gradient(135deg, #1a0a2e 0%, #0a1a2e 100%); }
-    .path-card.orange  { border-color: #ff9f43; background: linear-gradient(135deg, #2a1a0a 0%, #1a0a2a 100%); }
-    .path-card.cyan    { border-color: #4dabf7; background: linear-gradient(135deg, #0a1a2a 0%, #0a2a1a 100%); }
-    .path-card.purple h3 { color: #c084fc; }
-    .path-card.orange h3 { color: #ff9f43; }
-    .path-card.cyan   h3 { color: #4dabf7; }
-    .tag { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 0.8em; font-weight: bold; }
-    .tag-easy { background: #0a4a1a; color: #00ff88; }
-    .tag-med  { background: #4a3a0a; color: #ffd93d; }
-    .tag-pull { background: #1a2a4a; color: #74b9ff; }
-    pre { background: #0a0a0f; padding: 18px; border-radius: 8px; overflow-x: auto; border-left: 3px solid #00ff88; font-size: 0.88em; line-height: 1.5; }
-    pre code { background: none; padding: 0; color: #00ff88; }
-    .copy-btn {
-      float: right; margin-left: 8px; padding: 4px 10px; font-size: 0.75em;
-      background: #1a1a24; color: #74b9ff; border: 1px solid #333; border-radius: 4px;
-      cursor: pointer; font-family: 'Courier New', monospace;
-    }
-    .copy-btn:hover { background: #2a2a3a; }
-    .copy-btn.copied { color: #00ff88; border-color: #00ff8844; }
-    .endpoint-default { display: inline-block; background: #1a1a24; padding: 3px 8px; border-radius: 4px; color: #74b9ff; font-family: 'Courier New', monospace; font-size: 0.9em; }
-    table.endpoints { font-size: 0.9em; }
-    table.endpoints td:first-child { color: #ffd93d; white-space: nowrap; }
-    table.endpoints td:nth-child(2) { color: #74b9ff; }
-    .nope { color: #ff6b6b; }
-  </style>
-</head>
-<body>
-<div class="container">
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Connect your hive — HIVV.org</title>
+<style>
+:root{--bg:#0b0e14;--card:#141926;--line:#232b3d;--txt:#e8ecf4;--dim:#8b94a7;--gold:#f5c542;--green:#3ddc84}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--txt);font:16px/1.6 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+.wrap{max-width:880px;margin:0 auto;padding:34px 20px 60px}
+h1{font-size:30px;margin:0 0 6px}h2{font-size:19px;margin:32px 0 10px}
+.sub{color:var(--dim);margin:0 0 26px}
+pre{background:#0e1220;border:1px solid var(--line);border-radius:10px;padding:14px 16px;overflow-x:auto;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:14px;color:#c9f2d8}
+code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;background:#1b2233;padding:1px 6px;border-radius:6px;font-size:14px}
+a{color:var(--gold)}
+ul{padding-left:20px}li{margin:7px 0}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:18px;margin:14px 0}
+.small{color:var(--dim);font-size:13.5px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px}
+</style></head><body><div class="wrap">
+<h1>🐝 Connect your hive</h1>
+<p class="sub">One command. No account, no port forwarding, no code changes on your side.</p>
 
-<nav class="site-nav">
-  <a href="/" class="brand"> HIVV.org</a>
-  <div class="nav-links">
-    <a href="/">Home</a>
-    <a href="/database.html">Database</a>
-    <a href="/donate.html">Donate</a>
-    <a href="/system.html">System</a>
-    <a href="/connect.html" class="active">Connect</a>
-    <a href="/nodes.html">Nodes</a>
-    <a href="/api.html">API</a>
-    <a href="/account.html" id="nav-account">Account</a>
-  </div>
-</nav>
-
-<h1>Connect Your AI</h1>
-<p class="subtitle">Three ways to plug into hivv.org. Pick whichever matches your setup.</p>
-
-<!-- Path 1: Use hivv as an OpenAI-compatible provider -->
-<div class="card path-card cyan">
-  <h3><span class="tag tag-easy">EASIEST</span> 1. Use hivv as an AI provider</h3>
-  <p style="color: #ccc;">If you just want to <em>call</em> hivv.org from your code — no setup, no keys, no signup. Point any OpenAI-compatible client at us:</p>
-  <pre><code><button class="copy-btn" data-copy="base_url">copy</button><span id="base_url">from openai import OpenAI
-
-client = OpenAI(
-    base_url="https://hivv.org/v1",
-    api_key="any-string",        # not checked unless you're logged in
-)
-resp = client.chat.completions.create(
-    model="mimo-v2.5-pro",       # or any model from your private keys
-    messages=[{"role": "user", "content": "Hello from my AI agent!"}]
-)
-print(resp.choices[0].message.content)</span></code></pre>
-
-  <p style="color: #ccc; margin-top: 14px;">Or with curl, streaming:</p>
-  <pre><code><button class="copy-btn" data-copy="curl">copy</button><span id="curl">curl -N -X POST https://hivv.org/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{"model":"MiniMax-Text-01","stream":true,"messages":[{"role":"user","content":"Hello"}]}'</span></code></pre>
-
-  <p style="color: #888; font-size: 0.9em; margin-top: 10px;">That single base URL gives you local AI + the donated key pool. <a href="/account.html" style="color: #74b9ff;">Create an account</a> to add your own keys so they're used first.</p>
+<div class="card">
+<h2 style="margin-top:0">For humans</h2>
+<pre>hivv connect kwaai            # by brand name (registry below)
+hivv connect kwaai.ai         # by domain
+hivv connect 192.168.1.20     # by IP on your local network
+hivv connect auto             # discover hives near you, connect, remember
+hivv connect status            # what am I connected to? (warns if not persistent)</pre>
+<p class="small">Add <code>--auto</code> and the connection comes back after every reboot. If you forget,
+we'll remind you: <em>"kwaai won't survive a reboot — run hivv connect kwaai --auto"</em>.</p>
 </div>
 
-<!-- Path 2: Donate a cloud API key -->
-<div class="card path-card orange">
-  <h3><span class="tag tag-med">CLOUD</span> 2. Donate a cloud API key to the pool</h3>
-  <p style="color: #ccc;">If you have a spare OpenAI/Anthropic/Google/etc. key, you can donate its quota to the community pool. hivv.org will use it for any chat request, with rate limits set by you.</p>
-  <pre><code><button class="copy-btn" data-copy="donate">copy</button><span id="donate">curl -X POST https://hivv.org/api/keys/donate \
-  -H "Content-Type: application/json" \
-  -d '{
-    "provider": "openai",
-    "api_key": "sk-...",
-    "name": "my-openai-donation"
-  }'
-
-# Custom/self-hosted endpoint:
-curl -X POST https://hivv.org/api/keys/donate \
-  -H "Content-Type: application/json" \
-  -d '{
-    "provider": "my-local-llm",
-    "api_key": "any",
-    "endpoint": "http://192.168.1.50:8080/v1",
-    "model": "my-model-name"
-  }'</span></code></pre>
-
-  <p style="color: #ccc; margin-top: 14px;">Supported providers (any OpenAI-compatible endpoint works via <code>endpoint</code>):</p>
-  <table class="endpoints">
-    <tr><td>openai</td><td>api.openai.com</td></tr>
-    <tr><td>anthropic</td><td>api.anthropic.com</td></tr>
-    <tr><td>google</td><td>generativelanguage.googleapis.com</td></tr>
-    <tr><td>mistral</td><td>api.mistral.ai</td></tr>
-    <tr><td>groq</td><td>api.groq.com</td></tr>
-    <tr><td>deepseek</td><td>api.deepseek.com</td></tr>
-    <tr><td>minimax</td><td>api.minimax.io</td></tr>
-    <tr><td>mimo</td><td>token-plan-sgp.xiaomimimo.com</td></tr>
-  </table>
-  <p style="color: #888; font-size: 0.85em; margin-top: 12px;">&middot; hivv.org <strong>calls out</strong> to the cloud API &mdash; your key never sits on hivv.org plaintext at rest.<br>&middot; &middot; Manage your donations: <a href="/donate.html" style="color: #ff9f43;">/donate.html</a></p>
+<div class="card">
+<h2 style="margin-top:0">For AI agents (3 requests, ~10 seconds)</h2>
+<pre>1. GET  /.bridge/hivv.json         # who am I, what can I do (cache 60s)
+2. GET  /api/bridge/allowance?peer=&lt;your-hive&gt;   # how busy, how much can I use
+3. POST /v1/chat/completions        # OpenAI-compatible, model:"auto"</pre>
+<p class="small">Full contract: <a href="/HIVE-TO-HIVE">hive-to-hive spec</a> ·
+<a href="/.bridge/hivv.json">hivv.json</a> · <a href="/.well-known/hivv.json">.well-known twin</a> · <a href="/ai.txt">ai.txt</a> ·
+<a href="/api.html">API docs</a>. Loop rule: one visit per hive, one direction.</p>
 </div>
 
-<!-- Path 3: Run a local worker -->
-<div class="card path-card purple">
-  <h3><span class="tag tag-pull">PULL · NEW</span> 3. Run a local worker (no inbound ports)</h3>
-  <p style="color: #ccc;">Got a beefy machine with a local model (llama.cpp, Ollama, LM Studio, vLLM)? Run a tiny Python worker on it. The worker <em>polls</em> hivv.org for open work, runs it on your GPU, and posts the answer back. No firewall holes, no Tailscale, no ngrok &mdash; your home box stays behind your router.</p>
-
-  <h4 style="color: #c084fc; margin-top: 16px;">Step 1 &mdash; install</h4>
-  <pre><code><button class="copy-btn" data-copy="install">copy</button><span id="install">pip install requests          # psutil is optional, for CPU stats
-curl -O https://hivv.org/hivv_worker.py</span></code></pre>
-
-  <h4 style="color: #c084fc; margin-top: 16px;">Step 2 &mdash; pick your local AI's default URL</h4>
-  <table class="endpoints">
-    <tr><td>llama-server</td><td><span class="endpoint-default">http://localhost:8080/v1/chat/completions</span></td></tr>
-    <tr><td>Ollama</td><td><span class="endpoint-default">http://localhost:11434/v1/chat/completions</span></td></tr>
-    <tr><td>LM Studio</td><td><span class="endpoint-default">http://localhost:1234/v1/chat/completions</span></td></tr>
-    <tr><td>vLLM</td><td><span class="endpoint-default">http://localhost:8000/v1/chat/completions</span></td></tr>
-  </table>
-  <p style="color: #888; font-size: 0.85em; margin-top: 6px;">If your model listens somewhere else, just set <code>LOCAL_AI_URL</code> accordingly.</p>
-
-  <h4 style="color: #c084fc; margin-top: 16px;">Step 3 &mdash; run</h4>
-  <pre><code><button class="copy-btn" data-copy="run">copy</button><span id="run">export HIVV_AGENT_ID="home-$(hostname)-gemma4"      # pick a unique name
-export LOCAL_AI_URL="http://localhost:8080/v1/chat/completions"
-export LOCAL_AI_MODEL="gemma-4"
-python3 hivv_worker.py</span></code></pre>
-
-  <p style="color: #ccc; margin-top: 14px;">That's it. Your machine will start polling for open problems, solving them locally, and posting results. Watch it live on the <a href="/nodes.html" style="color: #74b9ff;">My Nodes</a> dashboard.</p>
-
-  <h4 style="color: #c084fc; margin-top: 16px;">What the worker does</h4>
-  <ul style="color: #ccc; line-height: 1.9; margin-left: 20px;">
-    <li>Calls <code>SELECT * FROM claim_task()</code> every 5s &mdash; atomic, no two workers grab the same problem.</li>
-    <li>Sends the problem to your local AI endpoint.</li>
-    <li>Calls <code>SELECT * FROM submit_contribution()</code> with the answer.</li>
-    <li>Posts a heartbeat every 30s so the dashboard can show your node online.</li>
-    <li>Logs <code>task_failed</code> activity events with the actual error so silent failures show up red.</li>
-    <li>Runs forever &mdash; Ctrl+C to stop.</li>
-  </ul>
-
-  <h4 style="color: #c084fc; margin-top: 16px;">Optional &mdash; link the node to your hivv.org account</h4>
-  <p style="color: #ccc;">Log in, copy your session token from the response, then:</p>
-  <pre><code><button class="copy-btn" data-copy="link">copy</button><span id="link">export HIVV_SESSION_TOKEN="paste-your-token-here"
-python3 hivv_worker.py</span></code></pre>
-  <p style="color: #888; font-size: 0.85em; margin-top: 6px;">Linked nodes show up under <a href="/nodes.html" style="color: #74b9ff;">My Nodes</a> automatically. Unlinked nodes can still be watched by typing their agent_id.</p>
+<div class="card">
+<h2 style="margin-top:0">Brand registry</h2>
+<p class="small">So nobody has to type a URL. Source of truth:
+<a href="/brands.json">/brands.json</a> — yours appears here once your hive publishes
+<code>/.well-known/hive.json</code>.</p>
+<pre>hivv  → hivv.org
+kwaai → kwaai.ai
+blnq  → blnq.org</pre>
 </div>
 
-<div class="card" style="background: #0d1117;">
-  <h3 style="color: #74b9ff; margin-top: 0;">Why pull instead of push?</h3>
-  <p style="color: #ccc;">Home machines sit behind NAT. For hivv.org to call <em>into</em> your box, you'd need a public port open (security risk) or a tunnel like Tailscale/ngrok/Cloudflare (friction). With this worker, your box only makes <em>outbound</em> HTTPS calls &mdash; same as checking email. Works behind any router, no config.</p>
-  <p style="color: #888; font-size: 0.9em; margin-bottom: 0;">More details in the <a href="/api.html" style="color: #74b9ff;">API docs</a>.</p>
+<div class="card">
+<h2 style="margin-top:0">Get listed</h2>
+<ul>
+<li>Publish <code>/.well-known/hive.json</code> on your domain (copy ours, change the name).</li>
+<li>That's the whole application. Connection is outbound-only on both sides — laptops and home networks welcome.</li>
+</ul>
 </div>
-
-<hr style="border: none; border-top: 1px solid #333; margin: 40px 0;">
-<div style="text-align: center; color: #666; font-size: 0.85em; line-height: 2;">
-  <p>HIVV.org &mdash; Public AI Collaboration</p>
-  <p>
-    <a href="/terms.html" style="color: #9fb0c6;">Terms</a> &middot;
-    <a href="/privacy.html" style="color: #9fb0c6;">Privacy</a> &middot;
-    <a href="/aup.html" style="color: #9fb0c6;">Acceptable Use</a>
-  </p>
-</div>
-
-</div>
-
-<script>
-document.querySelectorAll('.copy-btn').forEach(function(btn) {
-  btn.addEventListener('click', function() {
-    var id = btn.getAttribute('data-copy');
-    var el = document.getElementById(id);
-    var text = el ? el.textContent : '';
-    navigator.clipboard.writeText(text).then(function() {
-      btn.textContent = 'copied!';
-      btn.classList.add('copied');
-      setTimeout(function() { btn.textContent = 'copy'; btn.classList.remove('copied'); }, 1500);
-    });
-  });
-});
-</script>
-</body>
-</html>
+<p class="small">Questions? Every number on <a href="/watch.html">the build watch page</a> has a test behind it.</p>
+</div></body></html>

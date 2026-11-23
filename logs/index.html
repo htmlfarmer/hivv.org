@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>hivv.org — Logs</title>
+<style>
+:root{--bg:#07090f;--card:#10141f;--line:#1e2637;--txt:#e8ecf4;--dim:#7d8798;--green:#22c55e;--red:#ff6b6b;--gold:#f5c542}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--txt);font:14.5px/1.5 ui-sans-serif,system-ui,sans-serif}
+nav{display:flex;gap:14px;padding:12px 18px;border-bottom:1px solid var(--line);background:#0b0e16;flex-wrap:wrap}
+nav a{color:var(--dim);text-decoration:none;font-size:13.5px}nav .brand{font-weight:800;color:var(--gold);font-size:16px;margin-right:8px}
+.wrap{max-width:1000px;margin:0 auto;padding:22px 18px 60px}
+h1{font-size:24px;margin:0 0 4px}.sub{color:var(--dim);margin:0 0 18px;font-size:13.5px}
+pre{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px;overflow:auto;font-family:ui-monospace,Menlo,monospace;font-size:13px;max-height:420px}
+.bad{color:var(--red)}.ok{color:var(--green)}.warn{color:var(--gold)}
+.note{background:#141024;border:1px solid #32245c;border-radius:10px;padding:12px 14px;color:#cbb8ff;font-size:13.5px;margin:14px 0}
+a{color:var(--gold)}
+</style></head><body>
+<nav><span class="brand">🐝 hivv.org</span><a href="/map/">🗺 Map</a><a href="/live/">📡 Live</a><a href="/watch.html">Watch</a><a href="/connect.html">Connect</a><a href="/nodes.html">Bees</a><a href="/logs/" style="color:var(--green)">Logs</a><a href="/bugs/">Bugs</a><a href="/docs">API</a></nav>
+<div class="wrap">
+<h1>📜 Logs</h1>
+<p class="sub">the honest version: errors, failures and slow calls — counts only, never prompts, IPs or tokens of identity</p>
+<div class="note">Raw gateway logs stay operator-only (they can contain secrets — that's what <span style="font-family:ui-monospace">secretz-hivv</span> guards).
+This page shows the <b>sanitised</b> feed: request outcomes from the usage ledger.</div>
+<h2 style="font-size:15px">Recent non-success calls</h2>
+<pre id="errs">loading…</pre>
+<h2 style="font-size:15px">Health</h2>
+<pre id="health">loading…</pre>
+<p class="sub" style="margin-top:20px">More: <a href="/live/">live</a> · <a href="/bugs/">bugs</a> · <a href="/command-center.html">command center</a> ·
+<span style="font-family:ui-monospace">pm2 logs hivv-ai-gateway</span> (operator)</p>
+</div>
+<script>
+const J = async u => { const r = await fetch(u,{cache:'no-store'}); if(!r.ok) throw new Error(u); return r.json(); };
+async function go(){
+  try{
+    const a = await J('/api/public/activity');
+    const bad = (a.activity||[]).filter(x=>x.status!=='success');
+    document.getElementById('errs').textContent = bad.length
+      ? bad.map(x=>x.ts+'  '+x.status+'  model='+(x.model||'?')+'  '+(x.latency_ms||0)+'ms').join('\n')
+      : 'clean — no failed calls in the recent window ✓';
+  }catch(e){ document.getElementById('errs').textContent = 'activity feed unreachable: '+e.message; }
+  try{
+    const h = await J('/api/health');
+    document.getElementById('health').textContent = JSON.stringify(h,null,2);
+  }catch(e){ document.getElementById('health').textContent = 'health unreachable: '+e.message; }
+}
+go(); setInterval(go, 20000);
+</script></body></html>
