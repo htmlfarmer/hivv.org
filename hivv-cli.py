@@ -19645,6 +19645,24 @@ def main(argv: list[str]) -> None:
     if cmd_name not in COMMANDS or COMMANDS[cmd_name] is None:
         if cmd_name.startswith("-"):
             die(f"unknown flag: {cmd_name} — try `{APP} --help`")
+        # LOUD, not silent (2026-11-23): `hivv if` / `hivv when` looked like
+        # they were "taking commands" — they were silently chatting, and one
+        # even spent a call that hit a context overflow. An exceptional path
+        # that does something clever in silence is worse than a crash.
+        #   · single stray word (no ?, not a greeting) → fail loud, no LLM call
+        #   · greetings and real questions still go to the hive — visibly
+        _CHAT_WORDS = {"hello", "hi", "hey", "yo", "sup", "thanks", "thank"}
+        if len(argv) == 1 and "?" not in cmd_name and cmd_name.lower() not in _CHAT_WORDS:
+            import difflib
+            _close = difflib.get_close_matches(cmd_name, list(COMMANDS), n=1, cutoff=0.7)
+            _hint = f" — did you mean `{APP} {_close[0]}`?" if _close else ""
+            print(f"  ✗ '{cmd_name}' isn't an {APP} command.{_hint}")
+            print(f"    ask the hive:   {APP} chat \"<your question>\"")
+            print(f"    ask one bee:    {APP} ask <bee> \"<question>\"")
+            print(f"    all commands:   {APP} --help")
+            sys.exit(2)
+        print(f"  · '{' '.join(argv)}' isn't a command — asking the hive instead "
+              f"(use {APP} chat \"…\" to skip this note)")
         _do_chat(" ".join(argv), stream=True)
         return
 
