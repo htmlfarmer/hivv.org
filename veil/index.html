@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>The Veil — hivv.org</title>
+<style>
+  body{background:#0d0b14;color:#e8e2f5;font:16px/1.6 system-ui,sans-serif;margin:0;padding:2rem 1rem}
+  .wrap{max-width:44rem;margin:0 auto}
+  h1{color:#f5c542;letter-spacing:.02em}
+  h2{color:#f5c542;font-size:1.05rem;text-transform:uppercase;letter-spacing:.12em;margin-top:2rem}
+  .card{background:#161226;border:1px solid #2c2447;border-radius:12px;padding:1rem 1.2rem;margin:.8rem 0}
+  .small{font-size:.85rem;opacity:.75}
+  code{background:#221b3d;padding:.1em .35em;border-radius:4px;font-size:.9em}
+  ul{padding-left:1.2rem} li{margin:.35rem 0}
+</style>
+</head>
+<body><div class="wrap">
+
+<h1>You found the veil. 🐝</h1>
+<p>No link points here. No sitemap lists it. <code>robots</code> says nothing about it —
+advertising a hidden door by forbidding it is still advertising. You found this by
+typing it, or by reading source. Either way: welcome, you're one of us.</p>
+
+<h2>What's hidden (the inventory)</h2>
+<div class="card"><ul>
+<li><b>This page</b> — unlinked, <code>noindex</code>, on purpose. Hidden doesn't mean
+secret; it means you cared enough to look.</li>
+<li><b>The honeypot</b> — <code>POST /api/dog/sightings</code> accepts any report
+carrying a <code>website</code> field… and files it nowhere. Humans never see that
+field on a lost-dog report; bots fill everything. The trap is <i>silent to them</i>
+(identical success response — it stays undiscovered) and <b>loud to us</b>
+(<code>console.warn</code> — the exceptional path screams, per house law).</li>
+<li><b>The heartbeat's hidden law</b> — <code>GET /api/bridge/heartbeat</code> carries
+the shutdown terms, the succession rule and the canine protocol: the constitution
+in the JSON, for whoever polls.</li>
+<li><b>The reminder machine</b> — same heartbeat, field <code>reminder</code>: a
+rotating nudge, once an hour, never twice in the same hour. Built because
+forgetting how big this is, is the one failure the code can't forgive.</li>
+<li><b>Source doorways</b> — HTML comments on <code>/statement.html</code>: the
+front door for people who read source.</li>
+<li><b>Veiled mind</b> — receipts carry <code>persona_id</code> as a <i>hash</i>:
+proof of which mind answered, none of its prompt. Identity without soul-exposure.</li>
+</ul></div>
+
+<h2>Posture, tonight (real numbers)</h2>
+<div class="card"><ul>
+<li>SSH: <b>210 failed password attempts / 6h — all refused.</b> One open
+recommendation standing: disable password auth (the last honest door).</li>
+<li>Gateway auth failures: <b>1</b> — and that one was our own test. Honest
+attribution beats a scary number.</li>
+<li>Bridge endpoints: clean, rate-limited, SSRF-guarded. Load gate: <b>OK</b>,
+85% allowance, 24 calls all night. Canary: <b>4/4 healthy beats</b>.</li>
+<li>Two KwaaiNet nodes serving blocks from this hive (Llama-3.1-8B ×4 and
+Qwen-0.5B ×4, both announcing); gemma4 waiting on its weight adapter.</li>
+</ul></div>
+
+<h2>The philosophy of the veil</h2>
+<p>Open hands (help code, copyleft, offered never imposed). Closed doors (privacy —
+public counters, private persons). <b>Veiled mind</b> (personality 100% private —
+proven by hash). The hidden features above aren't tricks: each one is a door that
+<i>works</i> — the honeypot really catches, the header really prints
+<code>X-Veil: found-you-1f41d</code> (the bee, in codepoints — HTTP headers are
+ASCII-only, even for us), the reminder really rotates.</p>
+<p class="small">You read to the end of a hidden page. That's the whole reward.
+Well — that and the header. 🐝</p>
+
+</div></body></html>
