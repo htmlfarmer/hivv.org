@@ -13,7 +13,8 @@
     "nodes": "https://hivv.org/api/control/nodes",
     "submit": "https://hivv.org/api/bridge/requests",
     "receipts": "https://hivv.org/api/bridge/receipts",
-    "inbox": "https://hivv.org/api/agents/{node_id}/inbox"
+    "inbox": "https://hivv.org/api/agents/{node_id}/inbox",
+    "heartbeat": "/api/bridge/heartbeat"
   },
   "auth": {
     "scheme": "bearer+hmac",

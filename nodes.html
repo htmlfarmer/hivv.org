@@ -422,6 +422,13 @@
     
     <h2 class="section-title">Your Nodes</h2>
     
++    <!-- 🌍 Connected hives — the hive-to-hive bridge, watched live -->
+    <div id="hives-section" style="display:none;margin:20px 0;border:1px solid var(--border);border-radius:12px;padding:16px 18px;background:rgba(34,197,94,.04)">
+      <h2 style="margin:0 0 4px;font-size:1.05em;">🌍 Connected hives
+        <span style="font-size:.68em;font-weight:400;color:var(--muted,#888);">hive-to-hive bridge · live pulse from their own state feed</span>
+      </h2>
+      <div id="hives-list" style="font-size:.92em;">checking…</div>
+    </div>
     <div class="nodes-grid" id="nodes-grid">
       <div class="node-card">
         <div style="text-align: center; padding: 40px; color: var(--text-muted);">
@@ -618,5 +625,32 @@
     loadNodes();
     setInterval(loadNodes, 10000);
   </script>
++<script>
+// bridge peers with their sampled pulse — one GET, cached15s by the API
+fetch('/api/bridge/peers', {cache:'no-store'}).then(r=>r.json()).then(d=>{
+  const peers = d.peers || [];
+  if (!peers.length) return;
+  const el = document.getElementById('hives-section');
+  document.getElementById('hives-list').innerHTML = peers.map(p=>{
+    const fresh = p.age_ms != null && p.age_ms < 1800000;
+    const chip = fresh
+      ? '<span style="color:var(--yes,#22c55e)">● verified</span>'
+      : '<span style="color:#f59e0b">● stale</span>';
+    const pu = p.pulse
+      ? (p.pulse.ok
+          ? ((p.pulse.declared_online!=null? p.pulse.declared_online+' nodes online' : (p.pulse.online_rows!=null? p.pulse.online_rows+'/'+p.pulse.server_rows+' rows online':'live')) +
+             (p.pulse.models!=null? ' · '+p.pulse.models+' models':''))
+          : '<span style="color:#f59e0b">pulse: '+p.pulse.error+'</span>')
+      : '<span style="color:#888">pulse: warming…</span>';
+    return '<div style="display:flex;flex-wrap:wrap;gap:14px;align-items:baseline;padding:8px 0;border-bottom:1px dashed var(--border,#2a2a2a)">'
+      + '<strong>🐝 '+p.remote_hive+'</strong>'
+      + chip
+      + '<span>'+pu+'</span>'
+      + '<span style="color:#888;font-size:.85em">'+(p.protocol||'')+' · verify '+(p.latency_ms||'?')+'ms</span>'
+      + '</div>';
+  }).join('');
+  el.style.display='block';
+}).catch(()=>{});
+</script>
 </body>
 </html>

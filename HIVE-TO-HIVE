@@ -1,0 +1,177 @@
+(no output)
+## 3. Submitting requests to a hive — `POST /api/bridge/requests`
+
+The simple way for one hive to hand work to the other's architecture.
+
+```http
+POST /api/bridge/requests
+Authorization: Bearer <peer-token>
+X-Auth-Signature: <hmac over ts+nonce+method+path+sha256(body)>
+X-Hive-Origin: kwaai
+```
+
+```json
+{
+  "id": "req_01J...",
+  "kind": "chat",
+  "payload": { "model": "auto",
+               "messages": [{"role": "user", "content": "..."}],
+               "max_tokens": 512 },
+  "callback": "https://kwaai.ai/api/bridge/replies",
+  "priority": 5,
+  "not_before": 0,
+  "ttl_s": 3600,
+  "budget": { "max_tokens": 4096, "max_cost": 0 }
+}
+```
+
+**Response:** `202` with position + polling URL:
+
+```json
+{ "id": "req_01J...", "state": "queued", "position": 3,
+  "status_url": "/api/bridge/requests/req_01J...",
+  "estimated_start_s": 12 }
+```
+
+**States:** `queued → running → done | failed | expired | rejected`
+(`rejected` reasons: `loop_detected`, `allowance_zero`, `rate_limited`).
+Idempotent on `id` — resubmitting returns the same state, never doubles work.
+
+### 3.1 The scheduled AI reader (our side)
+
+One regular loop on the hive (default 60s, alongside the existing heartbeat —
+no new daemon):
+
+1. read due submissions (`now >= not_before`, not expired, priority order)
+2. check live allowance — at 0% the queue *holds* (does not fail) and drains
+   when calm returns
+3. route: local backends → peer nodes → community keys → cloud (existing order)
+4. post result to `callback` (signed), or park it in the caller's inbox
+5. write a receipt (rule 4)
+
+The reader is deliberately dumb; intelligence lives in routing, not in queues.
+
+## 4. Loop prevention (the "stupid request" shield)
+
+```
+X-Hive-Origin:      hivv.org | kwaai     // identity-based when the client
+                                         // cannot send headers
+X-Hive-Path:        hivv.org,kwaai       // visited hives, in order
+X-Hive-Hops:        1                    // +1 at each crossing
+X-Hive-Request-Id:  req_01J...           // dedupe key
+```
+
+Router rules (both hives, symmetric):
+
+- **never forward to a hive in `X-Hive-Path`** — covers "they sent it and it
+  bounced back to them" and "we sent it and it came back to us"
+- `X-Hive-Hops > 3` → drop
+- incoming request whose origin **is our own name** → `409 loop_detected`
+- registered as provider on their hive: refuse any job whose origin is `kwaai`
+- dedupe on `X-Hive-Request-Id`: a seen id is answered/refused, never
+  re-executed — retries must not become loops
+
+```json
+{ "error": { "message": "loop: hive kwaai already visited",
+             "type": "loop_detected", "code": 409 } }
+```
+
+## 5. Back-off and shutdown
+
+| Signal | Meaning | Guest reaction |
+|---|---|---|
+| `429` + `Retry-After` | rate limited | wait exactly that long |
+| `503` + `Retry-After` | shedding load | wait; do not retry harder |
+| `allowance: 0%` | busy / asked to stop | hold queue, send nothing |
+| inbox `bridge_pause` | deliberate pause | hold; resume on `bridge_resume` |
+| inbox `bridge_shutdown` | peer going away | drain, unregister politely |
+| latency/success degrade (guest-side) | they did not tell us; we noticed | step down tiers automatically |
+
+## 6. Receipts — signed, named, batched, public
+
+```json
+{
+  "hive": "kwaai",
+  "ts": 1795416600,
+  "entries": [
+    { "id": "req_01J...", "peer": "hivv.org", "node": "masjid",
+      "model": "gemma-4-E2B", "tokens": 48, "latency_ms": 237,
+      "status": "success", "cost": 0 }
+  ],
+  "signature": "ed25519:base64..."
+}
+```
+
+- batched every 60s, signed with the peer key issued at attach
+- verifiable by anyone → the website numbers are *provable*
+- we keep our own counters: a receipt only ever *confirms* what we measured
+
+## 7. Website — "who is using HIVV" (cheap, detailed, public)
+
+`GET /api/bridge/peers` (and the page rendering it), per hive:
+
+name · calls (hour/day/total) · tokens · share % of HIVV traffic · avg + p95
+latency · **nodes it used, with counts** (we measured 100% concentration on
+one node in testing) · last seen · status chip (OK/ALERT/BREACH/PAUSED) ·
+loops rejected · backoffs honored · receipts verified · allowance granted.
+
+All from counters already in memory + receipts. The details are free because
+we already count them. Mirror works both ways: map.kwaai.ai can show HIVV
+peers and hivv.org can show KwaaiNet peers — same data, two windows.
+
+## 8. Connecting — human and auto
+
+```
+$ hivv connect kwaai.ai          # by name
+$ hivv connect 192.168.1.20      # by IP on the local network
+$ hivv connect auto              # discover hives on this LAN + known peers
+```
+
+What `connect` does (10 seconds):
+
+1. GET `https://<host>/.well-known/hive.json` (1 request)
+2. verify `protocol: open-hives/0.1`
+3. attach: peer name (`kwaai`), bearer+HMAC key issued
+4. set provider endpoint + allowance polling (60s)
+5. print a plain-language summary: models, allowance, loop shield on
+
+**`connect auto`** = three cheap probes, first hit wins: `(a)` mDNS/DNS-SD
+browse for `_hivv._tcp.local` · `(b)` subnet sweep of ports 80/8080/8000 for
+`/.well-known/hive.json` · `(c)` fall back to last-known peers file. Works for
+laptops and home networks; **no port forwarding ever needed** — both sides
+only make outbound connections (submit + callback, or the existing long-poll
+inbox).
+
+## 9. Independence & reuse
+
+- bridge = one optional module (`bridge/`), flag `bridge.enabled`, off by
+  default; a stock install never sees it
+- `hivv.org` and `blnq.org` share *patterns*, not process — each repo vendors
+  its own copy and runs fully alone
+- shared units, dependency-free: circuit breaker · capacity leases · failure
+  taxonomy · signed receipts · reputation ring buffer · tombstone-safe config
+
+## 10. Phases
+
+1. **Load & allowance** — `.well-known/hive.json` + `/api/bridge/allowance`
+2. **Loop shield** — origin/path/hops + dedupe (both sides)
+3. **Submissions + scheduled AI reader** — `/api/bridge/requests` + queue loop
+4. **Receipts + website page** — signed batches, public peer table
+5. **Hardening** — breaker, leases, taxonomy, reputation (from KwaaiNet)
+6. **`hivv connect`** — one-command peering incl. `connect auto` for LANs
+7. **Routing benchmark** — affinity-vs-spread strategy study (below)
+
+## 11. Routing strategy benchmark (affinity vs spread)
+
+Question: stick to the fast node, or use idle machines too?
+
+- **A. affinity** — always the measured-fastest node. Best latency, but one
+  machine does all the work (we observed 100% concentration on `masjid`).
+- **B. spread** — round-robin across healthy nodes. Fair wear, worse p95 if
+  one node is slow.
+- **C. idle-first (hybrid)** — prefer the node with the least recent use,
+  falling back to fastest when all are busy. Uses machines "that haven't been
+  used for a while" without over-distributing.
+
+Measure per node: p50/p95 latency, tokens/s, share of total calls, time
+idle. Pick by data; expose the choice as `route.mode` in `hive.json`.

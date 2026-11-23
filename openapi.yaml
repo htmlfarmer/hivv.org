@@ -637,6 +637,36 @@ paths:
                         why: { type: string }
                         attempts: { type: integer }
 
+  /api/bridge/heartbeat:
+    get:
+      tags: [Bridge]
+      summary: Cross-network heartbeat — the pulse a peer hive polls (30-60s)
+      description: |
+        Built for cheap polling: a background 5s tick precomputes the snapshot
+        (memory counters + one deadline-bounded indexed latency query), so a
+        request is microseconds with no DB on the hot path. age_ms > 90000
+        means "this peer seems gone" — the failure signal is staleness.
+      parameters:
+        - name: peer
+          in: query
+          schema: { type: string, example: kwaai }
+      responses:
+        '200':
+          description: Pulse
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  age_ms: { type: integer, description: freshness of the snapshot; stale > 90000 }
+                  beat_ms: { type: integer, example: 5000 }
+                  allowance:
+                    type: object
+                    properties:
+                      percent: { type: integer }
+                      reason: { type: string }
+
   /api/bridge/bridges:
     get:
       tags: [Bridge]
