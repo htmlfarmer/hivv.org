@@ -46,7 +46,40 @@ th,td{text-align:left;padding:7px 10px;border-bottom:1px solid var(--line)}th{co
 </tbody></table>
 <h2>⚡ Recent activity</h2>
 <div id="ticker">loading…</div>
-<p class="foot">Data: <span class="mono">/api/public/status</span> · <span class="mono">/api/control/nodes</span> · <span class="mono">/api/public/activity</span> · <span class="mono">/api/bridge/load</span>.
+
+<style>
+#build li{padding:9px 12px;border:1px solid #1e2637;border-radius:9px;margin-bottom:7px;background:#10141f;display:flex;gap:10px;align-items:flex-start}
+#build li .t b{font-weight:650}#build li .t span{display:block;color:#7d8798;font-size:13px}
+#build .tag{font-size:11px;padding:2px 8px;border-radius:20px;border:1px solid #1e2637;color:#7d8798;white-space:nowrap}
+#build table{width:100%;border-collapse:collapse;font-size:13.5px;background:#10141f;border:1px solid #1e2637;border-radius:10px;overflow:hidden;margin-top:6px}
+#build th,#build td{text-align:left;padding:7px 9px;border-bottom:1px solid #1e2637}
+#build th{color:#7d8798;font-size:12px;text-transform:uppercase}
+#build .mono{font-family:ui-monospace,Menlo,monospace;font-size:12.5px;color:#b9c4da}
+#build h2{font-size:15px;margin:26px 0 9px;color:#c9d3e6;text-transform:uppercase;letter-spacing:.06em;border-bottom:1px solid #1e2637;padding-bottom:7px}
+</style>
+<div id="build"><h2>📋 Roadmap</h2>
+<ul>
+<li><span class="t"><b>✅ Test 1 — KwaaiNet as HIVV client</b><span>zero code changes, receipt visible on both sides</span></span><span class="tag">done</span></li>
+<li><span class="t"><b>✅ Load gate — dynamic 0–85%, kill switch, check-ins</b><span>busy hive ⇒ 0% automatically</span></span><span class="tag">done</span></li>
+<li><span class="t"><b>✅ Latency + 20-call bounded series</b><span>serial, mixed sizes, per-node attribution</span></span><span class="tag">done</span></li>
+<li><span class="t"><b>✅ Bridge spec v0.1 + discovery file LIVE</b><span>hive.json, brands.json, connect page</span></span><span class="tag">done</span></li>
+<li><span class="t"><b>🔨 /api/bridge/load + /api/bridge/allowance</b><span>memory-only, p95 &lt; 200ms target, tests pending</span></span><span class="tag">in progress</span></li>
+<li><span class="t"><b>⬜ Loop shield (origin/path/hops)</b><span>both sides · 409 loop_detected</span></span><span class="tag">next</span></li>
+<li><span class="t"><b>⬜ Submissions API + scheduled AI reader</b><span>POST /api/bridge/requests, 60s queue loop</span></span><span class="tag">planned</span></li>
+<li><span class="t"><b>⬜ "Who is using HIVV" page + signed receipts</b><span>per-hive, per-node traffic details</span></span><span class="tag">planned</span></li>
+<li><span class="t"><b>⬜ Safety verbs: hivv chill / emergency / study / debug &lt;node&gt;</b><span>slow-down, hard-stop, snapshot, per-node forensics</span></span><span class="tag">planned</span></li>
+<li><span class="t"><b>⬜ hivv connect auto + brand names + LAN discovery</b><span>survives reboots, reminds if not persistent</span></span><span class="tag">planned</span></li>
+</ul>
+<h2>🔬 Test evidence</h2>
+<table>
+<tr><th>Test</th><th>Result</th><th>Detail</th></tr>
+<tr><td>KwaaiNet CI after 822-commit merge</td><td class="ok">green</td><td class="mono">fmt · clippy · 467 tests · workspace check</td></tr>
+<tr><td>End-to-end client call</td><td class="ok">pass</td><td class="mono">05:46:39Z · 2973 tok · counters 310→311</td></tr>
+<tr><td>Latency probe ×3</td><td class="ok">pass</td><td class="mono">385 / 237 / 224 ms</td></tr>
+<tr><td>Bounded series ×20</td><td class="ok">20/20</td><td class="mono">short 200-293ms · long 1.5-3.3s</td></tr>
+<tr><td>Routing distribution</td><td class="warn">finding</td><td class="mono">20/20 landed on ONE node → benchmark planned</td></tr>
+</table>
+</div><p class="foot">Data: <span class="mono">/api/public/status</span> · <span class="mono">/api/control/nodes</span> · <span class="mono">/api/public/activity</span> · <span class="mono">/api/bridge/load</span>.
 No PII, no prompts — counts and model names only. Pages: <a href="/watch.html" style="color:var(--gold)">watch</a> · <a href="/logs/" style="color:var(--gold)">logs</a> · <a href="/bugs/" style="color:var(--gold)">bugs</a></p>
 </div>
 <script>
