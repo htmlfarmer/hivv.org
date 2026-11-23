@@ -19935,7 +19935,7 @@ def _print_sub_help(cmd: str) -> None:
         "sync":      "two-way check against GitHub (read-only — never merges)\n  flag: --fetch  fetch origin first\n  flag: --check  exit non-zero when out of sync (for CI)",
         "review-diff": "ask the hive whether a change looks safe\n  usage: hivv review-diff [--staged] [--file F] [--votes N]",
         "node":      "show details about a specific node\n  usage: hivv node <name> [--json]\n  also: hivv node chat <bee> <msg>  → chats with that bee instead",
-        "ask":       "chat with ONE bee — pins that bee (direct, else hub relay)\n  usage: hivv ask <bee> <message>\n  e.g.  hivv ask yalla \"whas up\"\n  alias: talk · node-chat\n  note: `hivv chat <msg>` asks the HIVE (any bee answers)",
+        "ask":       "chat with ONE bee — or a whole HIVE when the name is a brand/domain\n  usage: hivv ask <bee|hive> <message>\n  e.g.  hivv ask yalla \"whas up\"  ·  hivv ask kwaai \"whats up homes?\"\n  alias: talk · node-chat\n  note: `hivv chat <msg>` asks this hive's own bees; `hivv ask <hive>` crosses the bridge",
         "talk":      "chat with ONE bee — alias of ask\n  usage: hivv talk <bee> <message>",
         "node-chat": "chat with ONE bee — alias of ask\n  usage: hivv node-chat <bee> <message>",
         "reach":     "test connectivity to another node\n  usage: hivv reach <name>",
