@@ -66,6 +66,12 @@ the right amount. 😄)</p>
 “no sightings by nightfall” is the real threshold. The math lives here, not in your head. 🐝</p>
 </div>
 
+<div class="card" style="border-color:#1f3a4a;background:#0a1419">
+<div class="tier">🌡 Live weather (the earth sensor, first pulse)</div>
+<p style="margin:8px 0 0;font-size:14px" id="wx">loading…</p>
+<p class="small" style="margin:6px 0 0" id="wxnote"></p>
+</div>
+
 <h2>🧾 Recent sightings</h2>
 <div class="card"><div id="seen">loading…</div></div>
 
@@ -101,6 +107,16 @@ big idea — a planet that can feel itself and respond. It starts with one dog. 
 — built at 4:45am by the hive, for one dog. 🐾</p>
 </div>
 <script>
+async function wx(){
+  try{
+    const w = await fetch('/api/earth/weather',{cache:'no-store'}).then(r=>r.json());
+    if(w.error){ document.getElementById('wx').textContent='weather unreachable'; return; }
+    document.getElementById('wx').innerHTML =
+      '<b>'+w.temp_f+'°F</b> (feels '+w.feels_f+'°F) · pressure <b>'+w.pressure_hpa+' hPa</b> · wind '+
+      w.wind_kmh+' km/h · humidity '+w.humidity_pct+'% <span style="color:#7d8798">('+w.location+')</span>';
+    document.getElementById('wxnote').textContent = w.yalla_note;
+  }catch(e){ document.getElementById('wx').textContent='weather unreachable'; }
+}
 async function load(){
   try{
     const d = await fetch('/api/dog/sightings',{cache:'no-store'}).then(r=>r.json());
@@ -124,7 +140,7 @@ async function load(){
     }
   }catch(e){ document.getElementById('seen').textContent='feed unreachable'; }
 }
-load(); setInterval(load, 30000);
+load(); wx(); setInterval(load, 30000); setInterval(wx, 600000);
 document.getElementById('send').onclick=async()=>{
   const where=document.getElementById('where').value.trim();
   if(!where){ document.getElementById('sent').textContent='tell us WHERE you saw him 🐾'; return; }
