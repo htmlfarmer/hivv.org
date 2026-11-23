@@ -52,6 +52,20 @@ the right amount. 😄)</p>
 <p class="small" id="sent" style="margin:4px 0 0"></p>
 </div>
 
+<div class="card" style="border-color:#2a2440;background:#0d1119">
+<div class="tier">⏱ The clock (carried for you — no math on your side)</div>
+<p style="margin:8px 0 0;font-size:14px">
+<b>Yalla's known range (your data):</b> ~1–1.5 mi favorite · hard ceiling ~3 mi — the dawn walk is <i>that circle</i>, his usual corners first.<br>
+<b>6:15–7:00</b> — his return window (quiet dawn, his commute pattern)<br>
+<b>by 10:00</b> — <i>unusual</i>, not yet serious — expand: more doors, more posts<br>
+<b>by 11:00</b> — elevated; for a dog who came home twice last night, still “hide-and-wait”<br>
+<b>end of day one, no sighting</b> — <b class="bad">very serious</b> — dusk search (his active window), collar today, wider radius<br>
+<b>48h / injury / leaves radius</b> — emergency — then options open, <i>your</i> call
+</p>
+<p class="small" style="margin:8px 0 0">Dogs hide all day and move at night. “Not home by 11” ≠ catastrophe;
+“no sightings by nightfall” is the real threshold. The math lives here, not in your head. 🐝</p>
+</div>
+
 <h2>🧾 Recent sightings</h2>
 <div class="card"><div id="seen">loading…</div></div>
 
@@ -72,14 +86,14 @@ table (source=gps) and the map tracks him live. One endpoint, zero drama. Order 
 big idea — a planet that can feel itself and respond. It starts with one dog. 🌍</p>
 </div>
 
-<h2>📞 Moscow, Idaho resources (verified today)</h2>
+<h2>📞 Moscow, Idaho resources — community first, authorities only if you choose</h2>
 <div class="card">
 <ul class="small" style="margin:0;padding-left:20px;line-height:1.9">
-<li><b>Humane Society of the Palouse</b>, Moscow — where Latah County strays go (per Sheriff's Office)</li>
-<li><b>Latah County Sheriff</b> — <span class="mono">208-882-2216</span> (ext.4)</li>
-<li><b>Facebook:</b> “Moscow and Surrounding Area Lost/Found Pets” — post a photo there at dawn</li>
-<li><b>nOkill Network</b> — lost/found listings for Moscow, ID</li>
-<li>Microchip: if Yalla has one, tell the registry he's lost <i>now</i> — recovered dogs call home instantly</li>
+<li><b>Facebook:</b> “Moscow and Surrounding Area Lost/Found Pets” — <b>first call</b>, community-only: photo + number + “no questions asked”</li>
+<li><b>The Migels</b> — one street over; they've caught him before; knock at a civil hour</li>
+<li><b>Chip registry</b> — owner-side flag; calls <i>only you</i>, never a shelter (safe channel)</li>
+<li><b>nOkill Network</b> — community lost/found listings for Moscow, ID</li>
+<li><i>Only if you choose:</i> Humane Society of the Palouse · Latah County Sheriff <span class="mono">208-882-2216</span> — kept out of the main plan by request; authorities can hold, and you've been burned before</li>
 </ul>
 </div>
 
@@ -115,8 +129,15 @@ document.getElementById('send').onclick=async()=>{
   const where=document.getElementById('where').value.trim();
   if(!where){ document.getElementById('sent').textContent='tell us WHERE you saw him 🐾'; return; }
   const note=document.getElementById('note').value.trim();
+  let geo={};
+  if(navigator.geolocation){
+    try{
+      const pos=await new Promise((res,rej)=>navigator.geolocation.getCurrentPosition(res,rej,{timeout:4000}));
+      geo={lat:pos.coords.latitude,lng:pos.coords.longitude};
+    }catch(e){ /* no coords — text still works */ }
+  }
   const r=await fetch('/api/dog/sightings',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({dog:'yalla',where,note})}).then(r=>r.json()).catch(()=>({}));
+    body:JSON.stringify({dog:'yalla',where,note,...geo})}).then(r=>r.json()).catch(()=>({}));
   document.getElementById('sent').textContent = r.ok
     ? (r.duplicate?'already reported (someone beat you to it — good sign!)':'✓ sent to the hive — it's on the map')
     : 'failed — text instead: 773-321-8181';

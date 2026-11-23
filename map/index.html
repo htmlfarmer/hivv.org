@@ -54,8 +54,9 @@ h1{font-size:23px;margin:0 0 2px}.sub{color:var(--dim);font-size:13.5px;margin:0
   <div class="card"><div class="k">Hive mood (5 min)</div><div class="v" id="mood">…</div><div class="n" id="moodn">loading</div></div>
   <div class="card"><div class="k">Traffic</div><div class="v" id="req">…</div><div class="n" id="reqn">last hour / today</div></div>
   <div class="card"><div class="k">Bees online</div><div class="v" id="bees">…</div><div class="n" id="beesn">of registered</div></div>
-  <div class="card"><div class="k">🔗 Bridges</div><div id="bridges" class="n">checking…</div></div>
-  <div class="card"><div class="k">⚡ Activity</div><div id="ticker">loading…</div></div>
+<div class="card"><div class="k">🔗 Bridges</div><div id="bridges" class="n">checking…</div></div>
+<div class="card"><div class="k">🐾 Yalla sightings</div><div id="paws" class="n">checking…</div></div>
+<div class="card"><div class="k">⚡ Activity</div><div id="ticker">loading…</div></div>
 </div>
 </div>
 
@@ -112,6 +113,23 @@ async function tick(){
       ? peers.map(p=>'<div class="row"><span>🔗 '+p.remote_hive+'</span><span class="ok">'+(p.allowance_percent!=null?p.allowance_percent+'%':'✓')+'</span></div>').join('')
       : '<div class="row"><span>no verified bridges yet — be the first: <a href="/connect.html" style="color:var(--gold)">connect</a></span></div>';
   }catch(e){ document.getElementById('bridges').textContent='bridge registry warming up'; }
+  try{
+    const s = await J('/api/dog/sightings');
+    const list = s.sightings||[];
+    document.getElementById('paws').innerHTML = list.length
+      ? list.slice(0,5).map(x=>'<div style="padding:3px 0;border-bottom:1px dashed #1a2130">🐾 '+
+          new Date(x.created_at).toLocaleTimeString()+' — '+x.where_text+'</div>').join('')+
+          '<div style="padding-top:6px"><a href="/yalla/" style="color:#f5c542">report / see all →</a></div>'
+      : '<span style="color:#7d8798">no sightings yet · <a href="/yalla/" style="color:#f5c542">report one</a></span>';
+    if(map && typeof L!=='undefined'){
+      if(!window._pawLayer){ window._pawLayer = L.layerGroup().addTo(map); }
+      window._pawLayer.clearLayers();
+      list.filter(x=>x.lat!=null&&x.lng!=null).forEach(x=>{
+        L.circleMarker([x.lat,x.lng],{radius:9,color:'#f5c542',weight:2,fillOpacity:.8})
+          .bindTooltip('🐾 Yalla sighting: '+x.where_text).addTo(window._pawLayer);
+      });
+    }
+  }catch(e){ document.getElementById('paws').textContent='sightings unreachable'; }
   try{
     const a = await J('/api/public/activity');
     const items = (a.activity||[]).slice(0,10).map(x=>'<div>'+((x.ts||'').slice(11,19))+' '+(x.model||'?')+' '+(x.tokens||0)+' tok '+(x.status==='success'?'':'<span class="bad">'+x.status+'</span>')+'</div>').join('');
