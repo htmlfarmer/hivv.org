@@ -41,7 +41,12 @@ h1{font-size:23px;margin:0 0 2px}.sub{color:var(--dim);font-size:13.5px;margin:0
 
 <div class="layout">
 <div>
-  <div id="map"></div>
++<div class="tabs" style="display:flex;gap:8px;margin-bottom:10px">
+  <button class="tab on" data-pane="hive" style="cursor:pointer;font:inherit;font-size:13px;padding:6px 14px;border-radius:8px;border:1px solid #232b3d;background:#141926;color:#e8ecf4">🌐 Hive</button>
+  <button class="tab" data-pane="world" style="cursor:pointer;font:inherit;font-size:13px;padding:6px 14px;border-radius:8px;border:1px solid #232b3d;background:#10141f;color:#8b94a7">🌍 World · xyzo.org</button>
+</div>
+<div id="map"></div>
+<div id="world" style="display:none;height:520px;border:1px solid var(--line);border-radius:12px;overflow:hidden;background:#0a0d15"></div>
   <p class="foot">Yellow 🐝 = a bee (from <span class="mono">/api/control/nodes</span>) ·
   blue line = hive-to-hive bridge · ring = this hive (Moscow, Idaho). No map tiles? The list on the right still works offline. 🏡</p>
 </div>
@@ -114,4 +119,24 @@ async function tick(){
   }catch(e){}
 }
 tick(); setInterval(tick, 10000);
-</script></body></html>
++<script>
+// tabs: the World pane lazy-loads xyzo.org on FIRST click — visitors who
+// never click cost xyzo nothing (low-cost by construction).
+document.querySelectorAll('.tab').forEach(b => b.addEventListener('click', () => {
+  document.querySelectorAll('.tab').forEach(x => { x.classList.remove('on'); x.style.background='#10141f'; x.style.color='#8b94a7'; });
+  b.classList.add('on'); b.style.background='#141926'; b.style.color='#e8ecf4';
+  const world = b.dataset.pane === 'world';
+  document.getElementById('map').style.display = world ? 'none' : 'block';
+  const w = document.getElementById('world');
+  w.style.display = world ? 'block' : 'none';
+  if (world && !w.dataset.loaded) {
+    const f = document.createElement('iframe');
+    f.src = 'https://xyzo.org/';
+    f.title = 'xyzo.org world map';
+    f.style.cssText = 'width:100%;height:100%;border:0';
+    w.appendChild(f); w.dataset.loaded = '1';
+  }
+  if (!world && map) setTimeout(() => map.invalidateSize(), 120);
+}));
+</script>
+</body></html>
