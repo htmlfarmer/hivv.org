@@ -359,6 +359,96 @@ _spin() {
 need() { command -v "$1" >/dev/null 2>&1; }
 _can_sudo() { sudo -n true 2>/dev/null; }
 
+# ── build tools (git + cmake) — NEVER a dead end ──────────────────────
+# THE FAILURE THIS FIXES
+# ----------------------
+# 2026-11-21 (asher@wahi): `hivv install llm` on a box with no git died with
+#   FileNotFoundError: [Errno 2] No such file or directory: 'git'
+# — a Python traceback mid-install with no way forward. A missing tool must
+# be AUTO-INSTALLED when we safely can, and otherwise the EXACT copy-paste
+# command must be printed. Same contract as scripts/lib/deps.sh.
+#
+# Never prompts for a password (`sudo -n` only) — a prompt hangs CI and
+# unattended installs.
+_pkg_mgr() {
+    if   need apt-get; then echo apt
+    elif need dnf;     then echo dnf
+    elif need yum;     then echo yum
+    elif need pacman;  then echo pacman
+    elif need apk;     then echo apk
+    elif need zypper;  then echo zypper
+    elif need brew;    then echo brew
+    else echo none
+    fi
+}
+
+_pkg_install_cmd() {
+    local pm="$1"; shift
+    case "$pm" in
+        apt)    echo "apt-get install -y $*" ;;
+        dnf)    echo "dnf install -y $*" ;;
+        yum)    echo "yum install -y $*" ;;
+        pacman) echo "pacman -S --noconfirm $*" ;;
+        apk)    echo "apk add --no-cache $*" ;;
+        zypper) echo "zypper --non-interactive install $*" ;;
+        brew)   echo "brew install $*" ;;
+        *)      echo "" ;;
+    esac
+}
+
+_pkg_manual_hint() {
+    local pm="$1"; shift
+    case "$pm" in
+        apt)    echo "sudo apt-get update && sudo apt-get install -y $*" ;;
+        dnf)    echo "sudo dnf install -y $*" ;;
+        yum)    echo "sudo yum install -y $*" ;;
+        pacman) echo "sudo pacman -S --noconfirm $*" ;;
+        apk)    echo "sudo apk add $*" ;;
+        zypper) echo "sudo zypper --non-interactive install $*" ;;
+        brew)   echo "brew install $*" ;;
+        *)      echo "" ;;
+    esac
+}
+
+# ensure_build_tools <tool> [tool...]
+#   Returns 0 when every tool is present afterwards.
+#   Auto-installs via the detected package manager; on failure prints the
+#   EXACT command to run and returns 1. NEVER exits, NEVER hangs.
+ensure_build_tools() {
+    local missing=() t pm cmd hint sudo_cmd=""
+    for t in "$@"; do
+        need "$t" || missing+=("$t")
+    done
+    [[ ${#missing[@]} -eq 0 ]] && return 0
+
+    pm="$(_pkg_mgr)"
+    if [[ "$pm" != "none" ]]; then
+        printf '  %s→%s installing build tools: %s (via %s)…\n' "$BLU" "$RST" "${missing[*]}" "$pm"
+        [[ "$pm" == "apt" ]] && _can_sudo && sudo -n apt-get update >/dev/null 2>&1
+        cmd="$(_pkg_install_cmd "$pm" "${missing[@]}")"
+        if [[ -n "$cmd" ]]; then
+            if _can_sudo; then sudo_cmd="sudo -n"; fi
+            if $sudo_cmd $cmd >/dev/null 2>&1; then
+                missing=()
+                for t in "$@"; do need "$t" || missing+=("$t"); done
+                if [[ ${#missing[@]} -eq 0 ]]; then
+                    printf '  %s✓%s installed: %s\n' "$GRN" "$RST" "$*"
+                    return 0
+                fi
+            fi
+        fi
+    fi
+
+    hint="$(_pkg_manual_hint "$pm" "$@")"
+    printf '  %s!%s missing build tool(s): %s\n' "$YLW" "$RST" "${missing[*]}" >&2
+    if [[ -n "$hint" ]]; then
+        printf '    %sinstall them:%s %s\n' "$DIM" "$RST" "$hint" >&2
+    else
+        printf '    %sinstall %s with your package manager, then re-run this command%s\n' "$DIM" "$*" "$RST" >&2
+    fi
+    return 1
+}
+
 if [[ "$DO_UNINSTALL" == "1" ]]; then
     BIN_DIR="$PREFIX/bin"
     LIB_DIR="$PREFIX/lib/$APP"
@@ -683,10 +773,12 @@ if command -v ollama >/dev/null 2>&1; then
     fi
     if [[ "$NEEDS_FIX" -eq 1 ]] && [[ -d /etc/systemd/system ]] && _can_sudo; then
         _log "configuring ollama to listen on network (0.0.0.0)..."
-        sudo mkdir -p "$OVR_DIR" \
-            && printf '[Service]\nEnvironment="OLLAMA_HOST=0.0.0.0:11434"\n' | sudo tee "$OVR_FILE" > /dev/null \
-            && sudo systemctl daemon-reload 2>/dev/null \
-            && sudo systemctl restart ollama 2>/dev/null \
+        # `sudo -n` everywhere: never prompt for a password mid-install
+        # (a prompt hangs CI and unattended installs).
+        sudo -n mkdir -p "$OVR_DIR" \
+            && printf '[Service]\nEnvironment="OLLAMA_HOST=0.0.0.0:11434"\n' | sudo -n tee "$OVR_FILE" > /dev/null \
+            && sudo -n systemctl daemon-reload 2>/dev/null \
+            && sudo -n systemctl restart ollama 2>/dev/null \
             && _say "ollama configured for network access" \
             || _warn "couldn't configure ollama — do it manually: sudo systemctl edit ollama"
     elif [[ "$NEEDS_FIX" -eq 1 ]] && [[ -d /etc/systemd/system ]]; then
@@ -995,7 +1087,19 @@ if should_install_llm; then
   HAVE_OLLAMA=0
   LLAMA_BIN=""
 
-  if command -v llama-cli >/dev/null 2>&1 || command -v llama-server >/dev/null 2>&1 || command -v llama >/dev/null 2>&1; then
+  # THE CLI EXPECTS A SPECIFIC LAYOUT — detect it there first:
+  #   ~/llama.cpp/build/bin/llama-server   ← what `hivv llm setup` runs
+  #   ~/llama.cpp/models/                  ← where the GGUF lives
+  # Building anywhere else means `hivv llm setup` reports "not built" and
+  # builds it AGAIN. One source of truth, one place.
+  LLAMA_DIR="$HOME/llama.cpp"
+  LLAMA_BIN_DIR="$LLAMA_DIR/build/bin"
+  LLAMA_MODEL_DIR="$LLAMA_DIR/models"
+
+  if [[ -x "$LLAMA_BIN_DIR/llama-server" ]]; then
+    HAVE_LLAMA=1
+    _say "llama.cpp already built → ${CYN}$LLAMA_BIN_DIR/llama-server${RST}"
+  elif command -v llama-cli >/dev/null 2>&1 || command -v llama-server >/dev/null 2>&1; then
     HAVE_LLAMA=1
     _say "llama.cpp already installed"
   fi
@@ -1025,57 +1129,59 @@ if should_install_llm; then
 
   if [[ "$HAVE_LLAMA" -eq 0 ]] && [[ "$HAVE_OLLAMA" -eq 0 ]]; then
     printf '\n  %s📦%s installing llama.cpp for %s%s%s...\n\n' "$BLD" "$HIVE" "$CYN" "$(uname -s)" "$RST"
-    ARCH=$(uname -m)
-    ASSET=""
-    case "$(uname -s)" in
-      Linux)
-        case "$ARCH" in
-          x86_64)  ASSET="llama-linux-x64.tar.gz" ;;
-          aarch64|arm64) ASSET="llama-linux-arm64.tar.gz" ;;
-          *) _warn "unsupported arch: $ARCH — download from https://github.com/ggerganov/llama.cpp/releases";;
-        esac
-        if [[ -n "$ASSET" ]]; then
-          LLAMA_TMP=$(mktemp -d /tmp/hivv-llama.XXXXXX)
-          if _spin "downloading llama.cpp" curl -fsSL --connect-timeout 15 --max-time 300 "https://github.com/ggerganov/llama.cpp/releases/latest/download/$ASSET" -o "$LLAMA_TMP/llama.tar.gz"; then
-            tar -xzf "$LLAMA_TMP/llama.tar.gz" -C "$LLAMA_TMP" 2>/dev/null || true
-            LLAMA_BIN=$(find "$LLAMA_TMP" -name 'llama-cli' -o -name 'llama-server' 2>/dev/null | head -1)
-            if [[ -n "$LLAMA_BIN" ]] && [[ -f "$LLAMA_BIN" ]]; then
-              $SUDO cp "$LLAMA_BIN" "$BIN_DIR/llama" && $SUDO chmod 0755 "$BIN_DIR/llama"
-              _say "installed ${CYN}llama.cpp${RST} → ${CYN}$BIN_DIR/llama${RST}"
-              HAVE_LLAMA=1
-            else
-              _warn "no llama binary in archive — download from https://github.com/ggerganov/llama.cpp/releases"
-            fi
-            rm -rf "$LLAMA_TMP"
-          else
-            rm -rf "$LLAMA_TMP"
-          fi
+
+    # LLAMA_DIR / LLAMA_BIN_DIR are defined above (shared with detection) —
+    # the CLI expects the binary at ~/llama.cpp/build/bin/llama-server.
+
+    # ── build tools first ────────────────────────────────────────────
+    # No git/cmake → the build dies with a raw traceback (asher@wahi
+    # 2026-11-21). Install them NOW or print the exact command.
+    if ! ensure_build_tools git cmake; then
+      printf '  %s!%s cannot build llama.cpp without git and cmake — skipping the local LLM\n' "$YLW" "$RST" >&2
+      printf '    %sthe hivv node still works — it will use the API gateway%s\n' "$DIM" "$RST" >&2
+      HAVE_LLAMA=0
+    else
+      BUILD_OK=0
+      if [[ -x "$LLAMA_BIN_DIR/llama-server" ]]; then
+        _say "llama.cpp already built → ${CYN}$LLAMA_BIN_DIR/llama-server${RST}"
+        BUILD_OK=1
+      elif [[ -d "$LLAMA_DIR/.git" ]]; then
+        printf '  %s→%s llama.cpp source already cloned — building (a few minutes)…\n' "$BLU" "$RST"
+        if (cd "$LLAMA_DIR" && cmake -B build -DCMAKE_BUILD_TYPE=Release >/dev/null 2>&1 \
+            && cmake --build build --config Release -j "$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)" >/dev/null 2>&1) \
+            && [[ -x "$LLAMA_BIN_DIR/llama-server" ]]; then
+          _say "built llama.cpp → ${CYN}$LLAMA_BIN_DIR/llama-server${RST}"
+          BUILD_OK=1
+        else
+          _warn "llama.cpp build failed — try: cd $LLAMA_DIR && cmake -B build && cmake --build build -j"
         fi
-        ;;
-      Darwin)
-        if need brew; then
-          if brew list --formula 2>/dev/null | grep -qE '^(llama\.cpp|llama| llama\.cpp)$'; then
-            HAVE_LLAMA=1
-            _say "llama.cpp via homebrew"
+      else
+        printf '  %s→%s cloning llama.cpp…\n' "$BLU" "$RST"
+        if git clone --depth 1 https://github.com/ggerganov/llama.cpp.git "$LLAMA_DIR" >/dev/null 2>&1; then
+          printf '  %s→%s building llama.cpp (this takes a few minutes)…\n' "$BLU" "$RST"
+          if (cd "$LLAMA_DIR" && cmake -B build -DCMAKE_BUILD_TYPE=Release >/dev/null 2>&1 \
+              && cmake --build build --config Release -j "$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)" >/dev/null 2>&1) \
+              && [[ -x "$LLAMA_BIN_DIR/llama-server" ]]; then
+            _say "built llama.cpp → ${CYN}$LLAMA_BIN_DIR/llama-server${RST}"
+            BUILD_OK=1
           else
-            _log "brew install llama.cpp (this can take a minute)..."
-            if brew install llama.cpp; then
-              HAVE_LLAMA=1
-              _say "installed llama.cpp via homebrew"
-            else
-              _warn "brew install failed — or download from https://github.com/ggerganov/llama.cpp/releases"
-            fi
+            _warn "llama.cpp build failed — try: cd $LLAMA_DIR && cmake -B build && cmake --build build -j"
           fi
         else
-          printf '  %s!%s on macOS install via Homebrew:\n' "$YLW" "$RST"
-          printf '    %sbrew install llama.cpp%s   or download: https://github.com/ggerganov/llama.cpp/releases\n' "$CYN" "$RST"
-          printf '    %sno Homebrew? get it: /bin/bash -c \"$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\"%s\n' "$DIM" "$RST"
+          _warn "git clone of llama.cpp failed — check your network and try again"
         fi
-        ;;
-      *)
-        _warn "unsupported platform — download from https://github.com/ggerganov/llama.cpp/releases"
-        ;;
-    esac
+      fi
+
+      if [[ "$BUILD_OK" -eq 1 ]]; then
+        HAVE_LLAMA=1
+        # The CLI runs the binary by ABSOLUTE path, so PATH is a convenience
+        # for the user only — add it, but never fail the install over it.
+        if [[ ":$PATH:" != *":$LLAMA_BIN_DIR:"* ]]; then
+          printf 'export PATH="%s:$PATH"\n' "$LLAMA_BIN_DIR" >> "$HOME/.bashrc" 2>/dev/null || true
+          export PATH="$LLAMA_BIN_DIR:$PATH"
+        fi
+      fi
+    fi
   fi
 
   SUGGEST_JSON=$("$APP" llm suggest --json 2>/dev/null || true)
@@ -1089,19 +1195,49 @@ if should_install_llm; then
 
   if [[ "$HAVE_LLAMA" -eq 1 ]]; then
     printf '\n  %s🌐%s downloading %s — your contribution to the hive%s\n\n' "$BLD" "$HIVE" "$LLM_MODEL" "$RST"
-    MODEL_DIR="${HOME}/.local/share/${APP}/models"
+    # The CLI looks for GGUFs in ~/llama.cpp/models — use the SAME directory,
+    # otherwise `hivv llm setup` re-downloads what we just fetched.
+    MODEL_DIR="$LLAMA_MODEL_DIR"
     mkdir -p "$MODEL_DIR"
+    MODEL_PATH=""
     if [[ -n "$GGUF_URL" && -n "$GGUF_FILE" ]]; then
-      if _spin "downloading ${CYN}${GGUF_FILE}${RST}" curl -fsSL --connect-timeout 30 --max-time 1800 "$GGUF_URL" -o "${MODEL_DIR}/${GGUF_FILE}"; then
+      MODEL_PATH="${MODEL_DIR}/${GGUF_FILE}"
+      if [[ -s "$MODEL_PATH" ]]; then
+        _say "model already on disk — ${CYN}${GGUF_FILE}${RST}"
+      elif _spin "downloading ${CYN}${GGUF_FILE}${RST}" curl -fL --connect-timeout 30 --max-time 3600 -C - "$GGUF_URL" -o "$MODEL_PATH"; then
         _say "model ready — ${APP} will use it for local AI tasks"
-        printf '\n  %s✓%s serve it:  %s%s llm serve-llama %s%s\n' "$GRN" "$RST" "$CYN" "$APP" "$LLM_MODEL" "$RST"
-        printf '  %s✓%s try:     %s%s chat "hello" --local%s\n' "$GRN" "$RST" "$CYN" "$APP" "$RST"
       else
         _warn "model download failed — retry later: ${APP} llm pull-gguf ${LLM_MODEL}"
+        MODEL_PATH=""
       fi
     else
       _warn "no GGUF mapping for ${LLM_MODEL} — pick one: ${APP} llm pull-gguf gemma4:e2b"
     fi
+
+    # ── serve it: a full install means a RUNNING local LLM ──────────
+    # "installed but not serving" is the same as not installed: the hive
+    # cannot borrow compute that nothing is answering on.
+    if [[ -n "$MODEL_PATH" ]] && [[ -x "$LLAMA_BIN_DIR/llama-server" ]]; then
+      LLM_PORT=8080
+      if need curl && curl -fsS --connect-timeout 2 --max-time 4 "http://127.0.0.1:${LLM_PORT}/v1/models" >/dev/null 2>&1; then
+        _say "local LLM already serving on :${LLM_PORT}"
+      else
+        printf '  %s→%s starting the local LLM on :%s…\n' "$BLU" "$RST" "$LLM_PORT"
+        mkdir -p "$HOME/.local/share/${APP}/logs"
+        nohup "$LLAMA_BIN_DIR/llama-server" -m "$MODEL_PATH" -c 4096 \
+              --host 127.0.0.1 --port "$LLM_PORT" \
+              > "$HOME/.local/share/${APP}/logs/llama-server.log" 2>&1 &
+        sleep 3
+        if need curl && curl -fsS --connect-timeout 2 --max-time 4 "http://127.0.0.1:${LLM_PORT}/v1/models" >/dev/null 2>&1; then
+          _say "local LLM is LIVE on :${LLM_PORT} — your box is now a hive worker"
+        else
+          _warn "the server did not answer yet — check: ${APP} llm status"
+          printf '    %slog: %s\n' "$DIM" "$HOME/.local/share/${APP}/logs/llama-server.log" "$RST"
+        fi
+      fi
+    fi
+
+    printf '\n  %s✓%s try:     %s%s chat "hello" --local%s\n' "$GRN" "$RST" "$CYN" "$APP" "$RST"
     printf '  %s✓%s full check:  %s%s llm status%s\n\n' "$GRN" "$RST" "$CYN" "$APP" "$RST"
 
   elif [[ "$HAVE_OLLAMA" -eq 1 ]]; then

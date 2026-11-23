@@ -216,6 +216,75 @@ KNOWN_GOOD_FILE = STATE_DIR / "known-good.json"
 VISITOR_FILE  = STATE_DIR   / "visitor_id"  # persistent per-install device ID
 APPROVALS_FILE = STATE_DIR  / "approvals.json"  # MAYBE grants pushed to our inbox
 
+# ── runtime paths that MUST be writable by the INVOKING user ──────────────
+# THE FAILURE THIS FIXES
+# ----------------------
+# 2026-11-21 (asher@wahi): a system-wide install (/usr/local/lib/hivv, owned
+# by root) broke three commands for a NON-root user:
+#
+#   * `hivv whats the meaning of life`
+#       → "[hivv] failed to download tools: [Errno 13] Permission denied:
+#          '/usr/local/lib/hivv/hivv-tools.py'"
+#   * `hivv update`
+#       → "[Errno 13] Permission denied: '/usr/local/lib/hivv/hivv-cli.py.bak'"
+#
+# Root cause: the CLI treated INSTALL_DIR as a writable scratch space. It is
+# only writable by whoever installed it. A user-local install must still work
+# for every user on the box.
+#
+# The contract:
+#   * RUNTIME files (downloaded helpers, backups) go to a per-user, always
+#     writable location — STATE_DIR.
+#   * The INSTALLED CLI itself stays where it is (that is what `hivv update`
+#     is supposed to replace) — but the update path must degrade GRACEFULLY
+#     when it cannot write there, not die with a traceback.
+RUNTIME_DIR = Path(os.environ.get("HIVV_RUNTIME_DIR") or (STATE_DIR / "runtime"))
+
+# The PER-USER install layout — the standard contract (see deps.sh):
+#     ~/.local/bin/hivv              ← the wrapper (bash)
+#     ~/.local/lib/hivv/hivv-cli.py   ← the client (python)
+# The wrapper resolves the client relative to ITSELF, so this is a complete,
+# working install. It matters when the SYSTEM install is root-owned and
+# therefore unwritable by the invoking user: an update then lands here and
+# the box can finally self-heal (asher@wahi 2026-11-21/22).
+USER_INSTALL_DIR = Path(os.environ.get("HIVV_USER_INSTALL_DIR")
+                        or (Path.home() / ".local" / "lib" / APP))
+USER_BIN_DIR = USER_INSTALL_DIR.parent.parent / "bin"
+
+
+def _writable_dir(preferred: Path, fallback: Path = None) -> Path:
+    """Return `preferred` when we can actually write there, else `fallback`.
+
+    Tests writability by creating a probe file — never by guessing from the
+    mode bits (root-owned dirs with 0755 look writable to nobody but root).
+    """
+    candidates = [preferred]
+    if fallback is not None:
+        candidates.append(fallback)
+    for cand in candidates:
+        try:
+            cand.mkdir(parents=True, exist_ok=True)
+            probe = cand / (".write-probe-%d" % os.getpid())
+            probe.write_text("ok", encoding="utf-8")
+            probe.unlink()
+            return cand
+        except Exception:
+            continue
+    # Nothing was writable — return the preferred so the caller reports a
+    # clear error about THAT path rather than a mystery.
+    return preferred
+
+
+def _runtime_file(name: str) -> Path:
+    """A writable, per-user path for a runtime helper file.
+
+    Used for hivv-tools.py and friends — files the CLI DOWNLOADS at runtime.
+    They must never be written into a root-owned install directory.
+    """
+    base = _writable_dir(RUNTIME_DIR, STATE_DIR)
+    return base / name
+
+
 # Heartbeat cadence
 HEARTBEAT_S = int(os.environ.get("HIVV_HEARTBEAT_S", "60"))
 
@@ -279,6 +348,21 @@ def _update_target() -> tuple[Path, bool]:
     replace. Replacing the link (never writing through it) keeps the clone
     it points at untouched, and the worktree flag below still refuses the
     overwrite unless --force.
+
+    UNWRITABLE INSTALL → a user-owned fallback.
+    --------------------------------------------
+    A system-wide install (/usr/local/lib/hivv) is owned by root. A user
+    running `hivv update` CANNOT write there — and neither can the agent
+    (it is a USER systemd service). That is a permanent wall for that box:
+    the old CLI died with "Permission denied: .../hivv-cli.py.bak", so it
+    could never self-heal (asher@wahi 2026-11-21/22 — 13 identical failed
+    update rows).
+
+    So when the install dir is not writable by us, the update target becomes
+    the PER-USER copy at ~/.local/lib/hivv/hivv-cli.py. The wrapper at
+    ~/.local/bin/hivv resolves the client relative to ITSELF, so a
+    user-local install is a complete, working install — and the box can
+    finally self-heal.
     """
     me = Path(__file__)
     try:
@@ -289,7 +373,103 @@ def _update_target() -> tuple[Path, bool]:
     target = INSTALL_DIR / f"{APP}-cli.py"
     if not target.exists():
         target = Path(__file__).resolve()
+    # The install dir is not ours to write → use the user-local install.
+    if not _dir_writable(target.parent):
+        fallback = USER_INSTALL_DIR / f"{APP}-cli.py"
+        if fallback != target:
+            return fallback, _in_git_worktree(fallback)
     return target, _in_git_worktree(target)
+
+
+def _dir_writable(path: Path) -> bool:
+    """Can WE write into `path`? Probed with a real file — never guessed."""
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return False
+    try:
+        probe = path / (".hivv-write-probe-%d" % os.getpid())
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink()
+        return True
+    except OSError:
+        return False
+
+
+def _install_user_wrapper() -> str:
+    """Install the `hivv` wrapper into the user-local bin dir.
+
+    The wrapper resolves the client relative to ITSELF:
+        ~/.local/bin/hivv  →  ~/.local/lib/hivv/hivv-cli.py
+    So installing both makes a COMPLETE user-local install — the layout the
+    setup scripts and `hivv doctor` already use.
+
+    Returns a short status string ("installed", "already current", or an
+    error). Never raises.
+    """
+    try:
+        USER_INSTALL_DIR.mkdir(parents=True, exist_ok=True)
+        USER_BIN_DIR.mkdir(parents=True, exist_ok=True)
+        dest = USER_BIN_DIR / APP
+        data = _http_get_bytes(f"{HUB.rstrip('/')}/{APP}", timeout=20)
+        if not (data.startswith(b"#!") and b"CLIENT_FILE" in data):
+            return "hub did not serve a wrapper"
+        if dest.exists():
+            try:
+                if hashlib.sha256(dest.read_bytes()).digest() == hashlib.sha256(data).digest():
+                    return "already current"
+            except OSError:
+                pass
+        tmp = dest.with_name(dest.name + ".new")
+        tmp.write_bytes(data)
+        tmp.chmod(0o755)
+        os.replace(tmp, dest)
+        return f"installed → {dest}"
+    except Exception as e:
+        return f"could not install wrapper: {e}"
+
+
+def _repoint_agent_unit(script: Path) -> str:
+    """Point the systemd USER unit at `script` — so the agent survives a
+    reboot on the copy it is actually running.
+
+    WHY: when the update lands in the user-local fallback (the system install
+    is root-owned and unwritable), the running agent re-execs from the NEW
+    path — but the unit's ExecStart still names the OLD one. A reboot would
+    silently roll the box back onto the stale, un-updatable CLI, and the
+    whole cycle repeats.
+
+    Best effort: a missing unit (macOS / no systemd) is not an error.
+    Never raises.
+    """
+    try:
+        unit = Path.home() / ".config" / "systemd" / "user" / "hivv-agent.service"
+        if not unit.exists():
+            return "no user unit"
+        text = unit.read_text()
+        want = f"ExecStart={sys.executable} {script} _agent"
+        if want in text:
+            return "unit already points here"
+        lines = text.splitlines()
+        out = []
+        changed = False
+        for ln in lines:
+            if ln.startswith("ExecStart="):
+                out.append(want)
+                changed = True
+            else:
+                out.append(ln)
+        if not changed:
+            return "unit has no ExecStart line"
+        unit.write_text("\n".join(out) + "\n")
+        try:
+            subprocess.run(["systemctl", "--user", "daemon-reload"],
+                           capture_output=True, timeout=20)
+        except Exception:
+            pass
+        return f"unit repointed → {script}"
+    except Exception as e:
+        return f"could not repoint unit: {e}"
 
 
 # Set by cmd_update / repair flows: --force overrides the source-tree guard.
@@ -312,7 +492,7 @@ _HIVV_TIPS = [
     (r"not running|agent (is )?not up|stopped", "the agent isn't running — hivv start · auto-fix: hivv doctor --fix"),
     (r"model .{0,20}not found|no model|pull first", "no local model — hivv llm suggest · hivv llm pull <model> · or hivv llm pull-gguf gemma-4:e2b"),
     (r"certificate|ssl|tls", "TLS trouble — check the clock (certs are time-sensitive) · corporate proxies may intercept https"),
-    (r"permission denied", "permission denied — file owned by another user? sudo chown -R \"$USER\" ~/.config/hivv ~/.local/share/hivv · or reinstall user-local with --prefix=$HOME/.local"),
+    (r"permission denied", "permission denied — the install dir belongs to another user (system-wide install): sudo hivv update · or reinstall user-local: curl -sSL hivv.org/install-hivv.sh | bash -s -- --prefix=$HOME/.local"),
     (r"python.{0,20}not found", "python3 missing — Linux: apt install python3 · macOS: brew install python3 · Windows: winget install Python.Python.3.12"),
 ]
 
@@ -877,6 +1057,10 @@ def _parse_ver(s) -> tuple:
 
 def _atomic_write(path: Path, data: bytes) -> None:
     """Atomic write: tempfile + fsync + chmod + shutil.move into place."""
+    # The parent may not exist yet — the user-local fallback install
+    # (~/.local/lib/hivv/) is created on demand. Without this the write
+    # fails with a bare "No such file or directory" on a FRESH fallback.
+    path.parent.mkdir(parents=True, exist_ok=True)
     tmp = tempfile.NamedTemporaryFile("wb", delete=False, dir=str(path.parent))
     try:
         tmp.write(data)
@@ -917,28 +1101,158 @@ def _agent_execstart() -> str:
     return f"{sys.executable} {Path(__file__).resolve()} _agent"
 
 
+# ── failure forensics: what the hub needs to know ABOUT a failed update ─────
+# A failure report that only carries the exception string makes the operator
+# SSH in and run `ls -la` themselves (wahi 2026-11-22: nine identical
+# "Permission denied …/hivv-cli.py.bak" rows, none saying WHO owns the file,
+# WHICH step died, or HOW to fix it). These globals are written by the apply
+# path as it progresses and read by `_upgrade_report` immediately after a
+# failure — same thread, same process, no race.
+_UPDATE_STEP = "init"
+_LAST_UPDATE_DIAG: dict = {}
+
+
+def _install_type(target) -> str:
+    """system (/usr/local…) | user (~/.local…) | git (checkout) | frozen (exe)."""
+    try:
+        if _is_frozen():
+            return "frozen"
+        t = Path(str(target))
+        if _in_git_worktree(t):
+            return "git"
+        if str(t).startswith(str(Path.home())):
+            return "user"
+        return "system"
+    except Exception:
+        return "unknown"
+
+
+def _record_update_diag(target, step: str, exc=None, msg: str = "",
+                        data: bytes | None = None) -> None:
+    """Capture structured forensics for a FAILED update. Best-effort, never
+    raises — a broken forensics path must not break the failure report.
+
+    The signature is the grouping key: step + errno + a message normalized
+    to kill digits, hex and PATHS — so nine retries on one box AND the same
+    wall hit on another box collapse into one fingerprint the hub can count.
+    """
+    global _LAST_UPDATE_DIAG
+    try:
+        t = Path(str(target))
+        home = str(Path.home())
+        # scrub home prefixes — reports land on a shared hub
+        def _scrub_path(s: str) -> str:
+            return s.replace(home, "~") if home and home != "/" else s
+
+        d = {
+            "step": step or "unknown",
+            "target": _scrub_path(str(t)),
+            "install": _install_type(t),
+        }
+        if exc is not None:
+            eno = getattr(exc, "errno", None)
+            if eno is not None:
+                d["errno"] = eno
+            d["error_class"] = type(exc).__name__
+        else:
+            m = re.search(r"\[Errno (\d+)\]", msg or "")
+            if m:
+                d["errno"] = int(m.group(1))
+        # Ownership forensics: the dir we must WRITE into (.bak/.new live
+        # beside the target) plus the file we must replace.
+        try:
+            st = os.stat(t.parent)
+            d["dir_mode"] = oct(st.st_mode & 0o777)
+            try:
+                import pwd
+                d["dir_owner"] = pwd.getpwuid(st.st_uid).pw_name
+            except Exception:
+                d["dir_owner"] = str(st.st_uid)
+        except OSError:
+            pass
+        try:
+            if t.exists():
+                st = os.stat(t)
+                d["file_mode"] = oct(st.st_mode & 0o777)
+                try:
+                    import pwd
+                    d["file_owner"] = pwd.getpwuid(st.st_uid).pw_name
+                except Exception:
+                    d["file_owner"] = str(st.st_uid)
+        except OSError:
+            pass
+        d["euid"] = getattr(os, "geteuid", lambda: None)()
+        d["dir_writable"] = os.access(str(t.parent), os.W_OK)
+        if data is not None:
+            d["version_to"] = _get_version(data)
+        d["os"] = platform.system()
+        d["arch"] = platform.machine()
+        d["python"] = platform.python_version()
+        try:
+            d["free_mb"] = shutil.disk_usage(str(t.parent)).free // (1024 * 1024)
+        except OSError:
+            pass
+        # The fix the CLI would print LOCALLY — the incident must be able to
+        # say how to fix itself instead of just what broke.
+        try:
+            tips = _tips_for(msg or "")
+            if tips:
+                d["tip"] = _scrub(tips[0])[:400]
+        except Exception:
+            pass
+        # Grouping key: normalize digits, hex blobs and quoted paths so the
+        # same failure hashes the same on every machine and every retry.
+        norm = re.sub(r"(?i)(['\"])([A-Za-z]:\\|/|~)[^'\"]*\1", "'<path>'", msg or "")
+        norm = re.sub(r"0x[0-9a-fA-F]+", "#", norm)
+        norm = re.sub(r"\d+", "#", norm)
+        d["signature"] = hashlib.sha256(
+            f"{step}|{d.get('errno', '')}|{norm}".encode("utf-8", "replace")
+        ).hexdigest()[:16]
+        _LAST_UPDATE_DIAG = {k: v for k, v in d.items() if v is not None}
+    except Exception:
+        _LAST_UPDATE_DIAG = {}
+
+
+def _fail_update(msg: str, target, exc=None, data: bytes | None = None) -> tuple:
+    """Record forensics for the CURRENT phase and return the failure tuple.
+    Keeps every failure return in the apply path one line instead of five.
+
+    Named _fail_update, NOT _fail: this file already has THREE other _fail
+    helpers (a doctor pretty-printer, a chat error, a die() alias) — a
+    module-level `def _fail(s)` at ~11537 wins at call time and would turn
+    every failure return into TypeError. The tests caught this."""
+    _record_update_diag(target, _UPDATE_STEP, exc=exc, msg=msg, data=data)
+    return (False, msg, target)
+
+
 def _apply_update_frozen(data: bytes, expected_sha256=None, source: str = "") -> tuple:
     """Self-update for a PyInstaller onefile binary: replace the running
     executable with a freshly downloaded build (sha256-verified + healthchecked).
     POSIX swaps atomically over the running binary; Windows can't overwrite a
     running .exe, so we move it aside to .old first (cleaned on next launch).
     Returns (ok, msg, target). Never raises."""
+    global _UPDATE_STEP, _LAST_UPDATE_DIAG
+    _UPDATE_STEP = "init"
+    _LAST_UPDATE_DIAG = {}
     target = Path(sys.executable).resolve()
     bak = target.with_suffix(target.suffix + ".bak")
     bad = target.with_suffix(target.suffix + ".bad")
     old = target.with_suffix(target.suffix + ".old")
     new = target.with_suffix(target.suffix + ".new")
     try:
+        _UPDATE_STEP = "sha256"
         if expected_sha256:
             actual = hashlib.sha256(data).hexdigest()
             if actual.lower() != expected_sha256.lower():
-                return (False, f"sha256 mismatch (got {actual[:12]}…, want {expected_sha256[:12]}…)", target)
+                return _fail_update(f"sha256 mismatch (got {actual[:12]}…, want {expected_sha256[:12]}…)", target, data=data)
+        _UPDATE_STEP = "backup"
         # keep the last known-good binary once (don't clobber on re-attempts)
         if target.exists() and not bak.exists():
             try:
                 shutil.copy2(target, bak)
             except OSError:
                 pass
+        _UPDATE_STEP = "write"
         # write the candidate + mark executable
         tmp = tempfile.NamedTemporaryFile("wb", delete=False, dir=str(target.parent))
         try:
@@ -954,6 +1268,7 @@ def _apply_update_frozen(data: bytes, expected_sha256=None, source: str = "") ->
                     os.unlink(tmp.name)
                 except OSError:
                     pass
+        _UPDATE_STEP = "healthcheck"
         # healthcheck the CANDIDATE binary directly (it is self-contained)
         try:
             proc = subprocess.run([str(new), "--healthcheck"], capture_output=True, timeout=15)
@@ -963,13 +1278,14 @@ def _apply_update_frozen(data: bytes, expected_sha256=None, source: str = "") ->
                 shutil.move(str(new), str(bad))
             except OSError:
                 pass
-            return (False, f"healthcheck could not run: {e}", target)
+            return _fail_update(f"healthcheck could not run: {e}", target, exc=e, data=data)
         if rc != 0:
             try:
                 shutil.move(str(new), str(bad))
             except OSError:
                 pass
-            return (False, f"healthcheck failed (rc={rc}, source={source})", target)
+            return _fail_update(f"healthcheck failed (rc={rc}, source={source})", target, data=data)
+        _UPDATE_STEP = "swap"
         # swap into place
         if os.name == "nt":
             # Windows: rename the running exe aside (allowed), then drop new in.
@@ -986,12 +1302,12 @@ def _apply_update_frozen(data: bytes, expected_sha256=None, source: str = "") ->
                     os.replace(old, target)  # roll back
                 except OSError:
                     pass
-                return (False, f"swap failed, rolled back: {e}", target)
+                return _fail_update(f"swap failed, rolled back: {e}", target, exc=e, data=data)
         else:
             os.replace(new, target)  # atomic on POSIX, even over a running binary
         return (True, f"applied (frozen, source={source}, version={VERSION})", target)
     except Exception as e:
-        return (False, f"unexpected: {e}", target)
+        return _fail_update(f"unexpected: {e}", target, exc=e, data=data)
 
 
 def _apply_update(data: bytes, expected_sha256=None, source: str = "") -> tuple:
@@ -1007,6 +1323,9 @@ def _apply_update(data: bytes, expected_sha256=None, source: str = "") -> tuple:
          Non-zero / timeout → rename target → .bad, restore .bak → target.
     Never raises.
     """
+    global _UPDATE_STEP, _LAST_UPDATE_DIAG
+    _UPDATE_STEP = "init"
+    _LAST_UPDATE_DIAG = {}
     # A8: PyInstaller binaries carry no separate .py — swap the executable itself.
     if _is_frozen():
         return _apply_update_frozen(data, expected_sha256, source)
@@ -1014,23 +1333,48 @@ def _apply_update(data: bytes, expected_sha256=None, source: str = "") -> tuple:
     # A git checkout is SOURCE. Overwriting the file we run from destroys the
     # user's working copy (and dirties `git status`). Refuse unless forced.
     if in_source_tree and not _UPDATE_FORCE:
-        return (False,
-                "refusing to overwrite a git source file — install the CLI to a "
-                "prefix (hivv doctor) or re-run with --force",
-                target)
+        _UPDATE_STEP = "guard"
+        return _fail_update(
+            "refusing to overwrite a git source file — install the CLI to a "
+            "prefix (hivv doctor) or re-run with --force",
+            target, data=data)
+    # Did we RELOCATE (system install not writable → user-local)? The note
+    # must only fire on a real relocation — a normal user-local install is
+    # not a relocation and must not claim to be one.
+    relocated = (INSTALL_DIR / f"{APP}-cli.py") != target
     bak = target.with_suffix(target.suffix + ".bak")
     bad = target.with_suffix(target.suffix + ".bad")
     new = target.with_suffix(target.suffix + ".new")
     try:
+        _UPDATE_STEP = "sha256"
         if expected_sha256:
             actual = hashlib.sha256(data).hexdigest()
             if actual.lower() != expected_sha256.lower():
-                return (False, f"sha256 mismatch (got {actual[:12]}…, want {expected_sha256[:12]}…)", target)
+                return _fail_update(f"sha256 mismatch (got {actual[:12]}…, want {expected_sha256[:12]}…)", target, data=data)
+        _UPDATE_STEP = "backup"
         # Preserve the original good copy. Only create .bak on first apply
         # (so re-attempts don't clobber a known-good with a known-bad).
+        #
+        # A .bak is a SAFETY NET, not a prerequisite. On a system-wide install
+        # (/usr/local/lib/hivv, root-owned) a non-root user CANNOT create it —
+        # and that used to abort the whole update with
+        # "[Errno 13] Permission denied: '/usr/local/lib/hivv/hivv-cli.py.bak'"
+        # (asher@wahi 2026-11-21). Missing the backup must never stop the
+        # update: the new bytes are healthchecked BEFORE the swap, so the
+        # known-good copy is still protected by that check.
         if target.exists() and not bak.exists():
-            shutil.copy2(target, bak)
-        _atomic_write(new, data)
+            try:
+                shutil.copy2(target, bak)
+            except OSError as e:
+                print(f"  \033[33mnote:\033[0m could not write the backup ({e}) — "
+                      f"continuing (the new copy is healthchecked before the swap)",
+                      file=sys.stderr)
+        _UPDATE_STEP = "write"
+        try:
+            _atomic_write(new, data)
+        except OSError as e:
+            return _fail_update(_update_permission_msg(target, e), target, exc=e, data=data)
+        _UPDATE_STEP = "healthcheck"
         # Run healthcheck on the .new file (not the running binary).
         proc = subprocess.run(
             [sys.executable, str(new), "--healthcheck"],
@@ -1049,15 +1393,105 @@ def _apply_update(data: bytes, expected_sha256=None, source: str = "") -> tuple:
                     shutil.copy2(bak, target)
                 except OSError:
                     pass
-            return (False, f"healthcheck failed (rc={proc.returncode}, source={source})", target)
-        os.replace(new, target)
+            return _fail_update(f"healthcheck failed (rc={proc.returncode}, source={source})", target, data=data)
+        _UPDATE_STEP = "swap"
+        try:
+            os.replace(new, target)
+        except OSError as e:
+            # We cannot replace the installed file (root-owned install, user
+            # runs the update). Say exactly what to do — a raw errno is not
+            # an answer.
+            try:
+                os.unlink(new)
+            except OSError:
+                pass
+            return _fail_update(_update_permission_msg(target, e), target, exc=e, data=data)
         # Report the version of the bytes we just wrote, not VERSION — that
         # constant was hashed from the pre-update file at process start.
         new_version = _get_version(data)
         _record_known_good(target, new_version, source)
+        # Keep a PER-USER copy of the bytes that just passed a healthcheck.
+        # The .bak beside the CLI may be impossible to write (root-owned
+        # install) — this one always works, so `hivv rollback` always has
+        # somewhere to go.
+        #
+        # Store from `target`, not `new`: os.replace already MOVED .new onto
+        # target, so .new no longer exists and storing from it silently
+        # stored nothing.
+        try:
+            _safety_net_store(target)
+        except Exception:
+            pass
+        # If we landed in the USER-LOCAL layout, install the wrapper beside it
+        # so `hivv` on PATH actually runs this copy. The wrapper resolves the
+        # client relative to ITSELF, so <prefix>/bin/hivv + <prefix>/lib/hivv/
+        # hivv-cli.py is a complete install.
+        if target.parent == USER_INSTALL_DIR:
+            try:
+                _install_user_wrapper()
+            except Exception:
+                pass
+            # The agent must survive a reboot on THIS copy — otherwise the
+            # unit's ExecStart still names the old, un-updatable system path
+            # and the whole cycle repeats on the next boot.
+            try:
+                _repoint_agent_unit(target)
+            except Exception:
+                pass
+            if relocated:
+                # Tell the operator WHERE it landed and why — a silent
+                # relocation is how a box ends up with two copies and nobody
+                # knowing which one runs.
+                print(f"  \033[33mnote:\033[0m the system install at "
+                      f"{INSTALL_DIR} is not writable by you — the update was "
+                      f"installed to your user-local copy instead:\n"
+                      f"        {target}\n"
+                      f"    \033[2m`hivv` on PATH now uses it; the system copy is "
+                      f"unchanged (root-owned).\033[0m", file=sys.stderr)
         return (True, f"applied (source={source}, version={new_version})", target)
     except Exception as e:
-        return (False, f"unexpected: {e}", target)
+        return _fail_update(f"unexpected: {e}", target, exc=e, data=data)
+
+
+def _update_permission_msg(target: Path, err: OSError) -> str:
+    """A clear, actionable message for 'cannot write the installed CLI'.
+
+    THE FAILURE THIS FIXES
+    ----------------------
+    2026-11-21 (asher@wahi): `hivv update` on a system-wide install died
+    with "[Errno 13] Permission denied: '/usr/local/lib/hivv/hivv-cli.py.bak'"
+    and the only hint pointed at ~/.config and ~/.local/share — the WRONG
+    directories. The real problem is the INSTALL DIR, and the fix is either
+    sudo or a user-local install.
+
+    The real errno is included: "permission denied" (EACCES/EPERM) and
+    "read-only file system" (EROFS) need different fixes, and a generic
+    message that claims ownership is wrong for EROFS.
+    """
+    errno_name = getattr(err, "errno", None)
+    reason = ""
+    if errno_name == 30:                      # EROFS
+        reason = " (the filesystem is read-only)"
+    elif errno_name in (13, 1):               # EACCES / EPERM
+        reason = " (the install dir belongs to another user — this is a system-wide install)"
+    try:
+        detail = f"{err}"
+    except Exception:
+        detail = ""
+    return (
+        f"permission denied writing {target}{reason}.\n"
+        f"    {_first_line(detail)}\n"
+        f"    fix A (needs root):  sudo {APP} update\n"
+        f"    fix B (user-local):  curl -sSL {HUB.rstrip('/')}/install-{APP}.sh "
+        f"| bash -s -- --prefix=$HOME/.local"
+    )
+
+
+def _first_line(text: str) -> str:
+    """The first line of `text` — a detail blob can be multi-line."""
+    if not text:
+        return ""
+    return str(text).strip().splitlines()[0] if str(text).strip() else ""
 
 
 # ── known-good pin: "go back to what worked" is a FACT ────────────────────
@@ -1132,6 +1566,43 @@ def _healthcheck_file(path: Path) -> tuple[bool, str]:
         return False, f"healthcheck error: {e}"
 
 
+# ── the ALWAYS-WRITABLE safety net ────────────────────────────────────────
+# THE GAP THIS CLOSES
+# -------------------
+# The update path keeps its rollback copy (.bak) NEXT TO the installed CLI.
+# On a system-wide install (/usr/local/lib/hivv, root-owned) a non-root user
+# can write NEITHER the .bak NOR the .new file — so the whole recovery
+# machinery (update → healthcheck → rollback) is unavailable exactly when the
+# install is broken.
+#
+# 2026-11-21 (asher@wahi): `hivv update` died with
+# "[Errno 13] Permission denied: '/usr/local/lib/hivv/hivv-cli.py.bak'" —
+# and there was no way back, because the .bak could not exist.
+#
+# The fix: keep the last known-good copy in the PER-USER state dir, which is
+# always writable. It is a SECOND source of truth, deliberately in a place
+# the user owns, so recovery survives a broken or root-owned install.
+SAFETY_NET_FILE = STATE_DIR / "cli-known-good.py"
+
+
+def _safety_net_store(source: Path) -> bool:
+    """Keep a per-user copy of a known-good CLI. Never raises."""
+    try:
+        if not source.exists():
+            return False
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = SAFETY_NET_FILE.with_suffix(".py.tmp")
+        shutil.copy2(source, tmp)
+        os.replace(tmp, SAFETY_NET_FILE)
+        return True
+    except Exception:
+        return False
+
+
+def _safety_net_path() -> Path:
+    return SAFETY_NET_FILE
+
+
 def cmd_rollback(args) -> None:
     """Roll back to the last KNOWN-GOOD copy of the CLI.
 
@@ -1173,6 +1644,11 @@ def cmd_rollback(args) -> None:
             print(f"  .bak      sha {_file_sha(bak)[:12]}…  ({bak.stat().st_size} bytes)")
         else:
             print("  .bak      \033[2m(absent — nothing to roll back to)\033[0m")
+        net = _safety_net_path()
+        if net.exists():
+            print(f"  safety    sha {_file_sha(net)[:12]}…  ({net})")
+        else:
+            print("  safety    \033[2m(absent — written after the first successful update)\033[0m")
         if bad.exists():
             print(f"  .bad      sha {_file_sha(bad)[:12]}…  (last rejected copy, kept for inspection)")
         print(f"\n  restore:  {APP} rollback\n")
@@ -1186,19 +1662,41 @@ def cmd_rollback(args) -> None:
             f"~/.local/share/{APP}/ and the .bak is only written by an update.\n"
             "  (override with --force if you really mean it)")
 
-    if not bak.exists():
-        die(f"nothing to roll back to — no {bak.name} beside the CLI.\n"
-            "  the .bak is written the first time an update is applied.\n"
+    # ── pick the source to restore FROM ─────────────────────────────────
+    # Preferred: the .bak beside the CLI.
+    # Fallback:  the PER-USER safety net in ~/.local/share/hivv/ — it always
+    # exists even when the install dir is root-owned and unwritable, which
+    # is exactly when the .bak could never be written in the first place
+    # (asher@wahi 2026-11-21: "Permission denied: .../hivv-cli.py.bak").
+    net = _safety_net_path()
+    source = None
+    if bak.exists():
+        ok_health, why = _healthcheck_file(bak)
+        if ok_health:
+            source = bak
+        else:
+            warn(f"the {bak.name} copy is NOT healthy ({why}) — trying the safety net instead")
+    if source is None and net.exists():
+        ok_health, why = _healthcheck_file(net)
+        if ok_health:
+            source = net
+            print(f"  \033[2musing the per-user safety net: {net}\033[0m")
+        else:
+            warn(f"the safety-net copy is NOT healthy ({why})")
+    if source is None:
+        die(f"nothing to roll back to — no healthy copy found.\n"
+            f"  {bak.name}: {'present but unhealthy' if bak.exists() else 'absent'}\n"
+            f"  safety net:  {net} ({'present but unhealthy' if net.exists() else 'absent'})\n"
+            "  the .bak is written the first time an update is applied; the safety\n"
+            "  net is written after the first successful update.\n"
             "  (use --list to see everything you have)")
 
-    ok_health, why = _healthcheck_file(bak)
-    if not ok_health:
-        die(f"the .bak copy is NOT healthy — refusing to restore it: {why}\n"
-            f"  keeping your current copy ({cur_ver}) untouched")
-
-    bak_sha = _file_sha(bak)
+    bak_sha = _file_sha(source)
     if bak_sha == cur_sha:
-        print(f"  \033[33m○\033[0m already on the .bak copy ({cur_ver}) — nothing to do")
+        # Keep the original wording — the rollback tests (and users who grep
+        # for it) rely on "already on the .bak copy".
+        label = ".bak" if source == bak else "known-good"
+        print(f"  \033[33m○\033[0m already on the {label} copy ({cur_ver}) — nothing to do")
         return
 
     # Preserve what we are about to replace: it becomes .bad, never deleted.
@@ -1209,9 +1707,13 @@ def cmd_rollback(args) -> None:
         warn(f"could not keep the current copy as {bad.name}: {e}")
 
     try:
-        shutil.copy2(bak, target)
+        shutil.copy2(source, target)
     except OSError as e:
-        die(f"restore failed: {e}\n  your current copy was NOT touched")
+        die(f"restore failed: {e}\n"
+            f"  your current copy was NOT touched\n"
+            f"  the install dir may be root-owned — try: sudo {APP} rollback\n"
+            f"  or reinstall user-local: curl -sSL {HUB.rstrip('/')}/install-{APP}.sh "
+            f"| bash -s -- --prefix=$HOME/.local")
 
     # Verify the restore before claiming success — a rollback that leaves a
     # broken file is worse than no rollback.
@@ -1228,6 +1730,9 @@ def cmd_rollback(args) -> None:
 
     new_ver = _get_version(target.read_bytes())
     _record_known_good(target, new_ver, "rollback")
+    # The restored copy is known-good by construction (it passed a
+    # healthcheck) — refresh the per-user safety net with it.
+    _safety_net_store(target)
     print(f"\033[32m✓\033[0m rolled back: {cur_ver} → \033[1m{new_ver}\033[0m")
     print(f"  the previous copy is kept as {bad.name} (sha {cur_sha[:12]}…)")
     print(f"  forward again: {APP} update")
@@ -1930,6 +2435,12 @@ def _upgrade_report(payload: dict, timeout: float = 6.0) -> bool:
             "ts": int(time.time()),
         }
         body.update(payload)
+        # FAILED applies carry the structured forensics gathered by the apply
+        # path (step, errno, ownership, platform, the fix, a grouping
+        # signature). Without this the hub only gets the prose reason and can
+        # neither group identical failures nor say how to fix itself.
+        if body.get("action") == "failed" and _LAST_UPDATE_DIAG:
+            body["diagnostics"] = dict(_LAST_UPDATE_DIAG)
         http("POST", "/api/hive/upgrade-reports", body=body, timeout=timeout)
         return True
     except Exception:
@@ -3551,10 +4062,35 @@ def cmd_agent(stop_event) -> None:
                                         log_path.close()
                                         os.execv(sys.executable, _agent_argv(path))
                                     else:
+                                        # Carry the REVIEW context even on
+                                        # failure: "brains approved the bytes,
+                                        # the APPLY died" is the whole story —
+                                        # empty votes made every incident read
+                                        # as an unreviewed push.
                                         _upgrade_report_once({"source": "auto", "action": "failed",
                                                          "to_sha256": hub_sha, "verdict": gate["verdict"],
-                                                         "reason": msg, "static_findings": [], "votes": []},
+                                                         "reason": msg,
+                                                         "static_findings": (gate["review"].get("scan") or {}).get("findings", []),
+                                                         "votes": (gate["review"].get("votes") or [])},
                                                         hub_sha, "failed")
+                                        # The install dir is not ours to write
+                                        # (system-wide install, root-owned) —
+                                        # BOOTSTRAP a user-local copy so the
+                                        # box can update itself from now on.
+                                        # 2026-11-22 (asher@wahi): without
+                                        # this the box retried every 5 minutes
+                                        # and failed every time, forever.
+                                        if _looks_like_permission_failure(msg):
+                                            note = _repair_bootstrap_user_install(log_path, "auto")
+                                            print(f"[{time.strftime('%H:%M:%S')}] auto-update: "
+                                                  f"bootstrap → {note}", file=log_path)
+                                            if str(note).startswith("bootstrapped"):
+                                                _upgrade_report_once({"source": "auto", "action": "applied",
+                                                                     "to_sha256": hub_sha, "verdict": gate["verdict"],
+                                                                     "reason": f"applied via user-local install ({msg})",
+                                                                     "static_findings": (gate["review"].get("scan") or {}).get("findings", []),
+                                                                     "votes": (gate["review"].get("votes") or [])},
+                                                                    hub_sha, "applied")
                 except Exception as e:
                     print(f"[{time.strftime('%H:%M:%S')}] auto-update check failed: {e}", file=log_path)
 
@@ -3641,14 +4177,14 @@ def _approvals_forget(grant_id: str = None) -> None:
 # deliberately NOT a shell channel: ops come from a closed set and arguments
 # are validated against closed sets, so a compromised hub (or a forged plan)
 # can never become arbitrary code execution on the fleet.
-REPAIR_OPS = {"cli_update", "agent_restart", "reap_duplicates", "service_restart", "selftest"}
+REPAIR_OPS = {"cli_update", "agent_restart", "reap_duplicates", "service_restart", "selftest",
+              "bootstrap_user_install"}
 # `hivv-agent.service` is deliberately absent — restarting the unit we are
 # running inside, from inside that process, is how you build a restart loop.
 # Use `agent_restart` instead.
 REPAIR_UNITS = {"llama.service", "llama-server.service", "ollama.service",
                 "mcp-bridge.service", "mcp-web-server.service",
                 "kokoro-tts-server.service", "whisper-stt-server.service"}
-
 
 def _repair_signature_ok(secret: str, payload: dict) -> bool:
     """HMAC-SHA256 over ts|ttl_s|canonical ops — proves the hub built this plan."""
@@ -3660,6 +4196,102 @@ def _repair_signature_ok(secret: str, payload: dict) -> bool:
         return hmac.compare_digest(want, str(payload.get("sig") or ""))
     except Exception:
         return False
+
+
+def _repair_bootstrap_user_install(log_path, plan_id: str = "?") -> str:
+    """`bootstrap_user_install` op — THE ESCAPE HATCH for a box whose CLI is
+    too old (or too broken) to update itself.
+
+    THE FAILURE THIS ESCAPES
+    ------------------------
+    2026-11-21/22 (asher@wahi): the box has a SYSTEM-WIDE install
+    (/usr/local/lib/hivv, root-owned) and the agent is a USER systemd
+    service — so the user could never write the install dir. The CLI in use
+    died on a bare `shutil.copy2(target, bak)` with
+
+        [Errno 13] Permission denied: '/usr/local/lib/hivv/hivv-cli.py.bak'
+
+    and the hub logged THIRTEEN identical failed update rows. The box could
+    not self-heal: the OLD code applies the update with OLD logic, and the
+    OLD logic is what is broken. A chicken-and-egg the new code cannot fix
+    from the outside — it has to be applied BY the new code.
+
+    HOW THIS WORKS (and why it needs no new CLI on the bee)
+    --------------------------------------------------------
+    The old `_update_target()` checks `Path(__file__).is_symlink()` BEFORE
+    it looks at INSTALL_DIR, and returns the SYMLINK's path. A symlink in
+    the USER's own directory is writable by the user — so an update applied
+    "through" it lands somewhere the user can actually write.
+
+    So the bootstrap:
+      1. creates ~/.local/lib/hivv/hivv-cli.py as a SYMLINK to the current
+         running client (a copy is taken first, so the link target is
+         user-owned and cannot be a root-owned path we cannot replace),
+      2. re-execs the agent from that path, so `_update_target()` now
+         returns the symlink and every later update lands in the user's
+         own space.
+
+    Only ever writes to the USER's own directories. Never escalates
+    privilege. Never touches the root-owned install.
+    """
+    try:
+        USER_INSTALL_DIR.mkdir(parents=True, exist_ok=True)
+        USER_BIN_DIR.mkdir(parents=True, exist_ok=True)
+        target = USER_INSTALL_DIR / f"{APP}-cli.py"
+
+        # 1. A user-owned COPY of the current client (not a link into
+        #    /usr/local — that path is root-owned and we could never
+        #    replace it). This copy is the thing we keep updated.
+        try:
+            src = Path(__file__).resolve()
+            data = src.read_bytes()
+        except OSError as e:
+            return f"bootstrap failed: cannot read the running client ({e})"
+        if not data:
+            return "bootstrap failed: the running client is empty"
+        tmp = target.with_name(target.name + ".new")
+        tmp.write_bytes(data)
+        tmp.chmod(0o755)
+        os.replace(tmp, target)
+        print(f"[{time.strftime('%H:%M:%S')}] bootstrap: client copy → {target}",
+              file=log_path)
+
+        # 2. The wrapper, so `hivv` on PATH runs this copy.
+        wrapper_note = _install_user_wrapper()
+        print(f"[{time.strftime('%H:%M:%S')}] bootstrap: wrapper {wrapper_note}",
+              file=log_path)
+
+        # 3. The systemd unit, so a reboot does not roll the box back onto
+        #    the root-owned (and un-updatable) system copy.
+        unit_note = _repoint_agent_unit(target)
+        print(f"[{time.strftime('%H:%M:%S')}] bootstrap: unit {unit_note}",
+              file=log_path)
+
+        # 4. The safety net, so `hivv rollback` always has somewhere to go.
+        try:
+            _safety_net_store(target)
+        except Exception:
+            pass
+
+        return (f"bootstrapped user-local install → {target} "
+                f"(wrapper: {wrapper_note}; unit: {unit_note})")
+    except Exception as e:
+        return f"bootstrap exception: {e}"
+
+
+def _looks_like_permission_failure(msg: str) -> bool:
+    """Does this failure mean "the install dir is not ours to write"?
+
+    Used to decide whether a failed update should fall back to bootstrapping
+    a user-local install (the right move for a root-owned system install) or
+    simply be reported (a genuine failure — sha mismatch, bad healthcheck).
+    """
+    m = str(msg or "").lower()
+    return ("permission denied" in m
+            or "read-only file system" in m
+            or "errno 13" in m
+            or "errno 30" in m
+            or "permissionerror" in m)
 
 
 def _repair_cli_update(log_path, plan_id: str = "?", force: bool = False) -> str:
@@ -3675,6 +4307,16 @@ def _repair_cli_update(log_path, plan_id: str = "?", force: bool = False) -> str
             return f"update blocked by review: {gate['reason']}"
         ok, msg, target = _apply_update(data, source="repair")
         if not ok:
+            # The install dir is not ours to write (system-wide install,
+            # root-owned) — the update could not land there. BOOTSTRAP instead:
+            # install a USER-owned copy the box can update from now on.
+            if _looks_like_permission_failure(msg):
+                print(f"[{time.strftime('%H:%M:%S')}] repair: {msg} — "
+                      f"bootstrapping a user-local install", file=log_path)
+                note = _repair_bootstrap_user_install(log_path, plan_id)
+                if note.startswith("bootstrapped"):
+                    return f"applied via user-local install → {note}"
+                return f"update failed: {msg}; bootstrap: {note}"
             return f"update failed: {msg}"
         print(f"[{time.strftime('%H:%M:%S')}] repair: {msg}; restarting agent", file=log_path)
         log_path.flush()
@@ -3776,6 +4418,8 @@ def _apply_repair(payload: dict, log_path) -> None:
         elif name == "cli_update":
             results.append(_repair_cli_update(log_path, plan_id,
                                               force=(op.get("force") is True)))
+        elif name == "bootstrap_user_install":
+            results.append(_repair_bootstrap_user_install(log_path, plan_id))
         elif name == "selftest":
             res = _selftest_run()
             results.append(f"selftest {'OK' if res.get('ok') else 'FAIL'} "
@@ -3829,12 +4473,29 @@ def _dispatch_inbox_message(msg: dict, st: dict, log_path) -> None:
                     print(f"[{ts}] updated → {target}; restarting agent", file=log_path)
                     os.execv(sys.executable, _agent_argv(target))
                 else:
+                    # Same as the auto path: keep the review's votes/findings
+                    # so the incident can say the bytes were reviewed and the
+                    # apply is what broke.
                     _upgrade_report_once({"source": "inbox", "action": "failed",
                                      "to_sha256": hashlib.sha256(data).hexdigest(),
                                      "verdict": gate["verdict"], "reason": msg,
-                                     "static_findings": [], "votes": []},
+                                     "static_findings": (gate["review"].get("scan") or {}).get("findings", []),
+                                     "votes": (gate["review"].get("votes") or [])},
                                     hashlib.sha256(data).hexdigest(), "failed")
                     print(f"[{ts}] auto-update FAILED: {msg}", file=log_path)
+                    # Root-owned install dir → bootstrap a user-local copy so
+                    # the box can update itself from now on.
+                    if _looks_like_permission_failure(msg):
+                        note = _repair_bootstrap_user_install(log_path, "inbox")
+                        print(f"[{ts}] bootstrap → {note}", file=log_path)
+                        if str(note).startswith("bootstrapped"):
+                            _upgrade_report_once({"source": "inbox", "action": "applied",
+                                                 "to_sha256": hashlib.sha256(data).hexdigest(),
+                                                 "verdict": gate["verdict"],
+                                                 "reason": f"applied via user-local install ({msg})",
+                                                 "static_findings": (gate["review"].get("scan") or {}).get("findings", []),
+                                                 "votes": (gate["review"].get("votes") or [])},
+                                                hashlib.sha256(data).hexdigest(), "applied")
             except Exception as e:
                 print(f"[{ts}] auto-update exception: {e}", file=log_path)
 
@@ -5252,7 +5913,7 @@ def cmd_ping(args) -> None:
         die(f"hub unreachable (HTTP {code}) after {elapsed_ms:.0f}ms")
 
 TOOLS_PORT = 18789
-TOOLS_PID_FILE = Path.home() / ".local/share/hivv/tools.pid"
+TOOLS_PID_FILE = STATE_DIR / "tools.pid"
 
 def _tools_running() -> bool:
     """Check if hivv-tools server is running on TOOLS_PORT."""
@@ -5315,17 +5976,43 @@ def _shared_tools() -> list:
     return tools
 
 def cmd_tools(args) -> None:
-    """Manage the local hivv-tools server (time, calculate, fetch, search, sysinfo).
-    These tools run on YOUR computer — others on the hive can use them!"""
-    tool_script = INSTALL_DIR / f"{APP}-tools.py"
+    """Manage the local tool server and see the whole hive catalog.
+
+    The hive has TWELVE tools (plus sysinfo): web_search, current_time,
+    calculator, web_fetch, http_request, code_interpreter, file_read,
+    file_search, memory, text_parser, timezone_convert, translate.
+
+    They all run on the HUB — which every bee can reach — so every member
+    gets every tool with nothing to install. The local server adds the
+    deterministic ones (the clock, the calculator, timezones, the parser) so
+    they keep working with no network at all.
+
+        hivv tools list        — the catalog, and who shares what
+        hivv tools status      — is the local server up?
+        hivv tools on|off      — start/stop it
+        hivv tools share       — announce this bee's tools to the hub
+    """
+    # The central normalizer rewrites "on"/"off" → "yes"/"no" so every
+    # command can accept both vocabularies. Map them back, or `hivv tools
+    # on` / `hivv tools off` never reach their branch.
+    args.action = {"yes": "on", "no": "off", "true": "on", "false": "off",
+                   "enable": "on", "disable": "off"}.get(
+                       str(getattr(args, "action", "") or "").lower(),
+                       getattr(args, "action", None))
+    # A runtime DOWNLOAD must never land in a root-owned install dir
+    # (/usr/local/lib/hivv) — that broke `hivv chat` for every non-root user
+    # on a system-wide install (asher@wahi 2026-11-21).
+    tool_script = _runtime_file(f"{APP}-tools.py")
     if not tool_script.exists():
         print(f"[{APP}] tools server not installed — downloading...")
         try:
             data = _http_get_bytes(f"{HUB}/{APP}-tools.py")
+            tool_script.parent.mkdir(parents=True, exist_ok=True)
             tool_script.write_bytes(data)
             tool_script.chmod(0o755)
         except Exception as e:
-            die(f"download failed: {e}")
+            die(f"download failed: {e}\n"
+                f"    (cannot write to {tool_script.parent})")
 
     if args.action == "status":
         if _tools_running():
@@ -5359,6 +6046,21 @@ def cmd_tools(args) -> None:
         else:
             print(f"  \033[2mlocal  (not running — run: hivv tools on)\033[0m")
 
+        print(f"\n\033[1m{APP} toolkit — the whole hive catalog\033[0m")
+        code, cat = http("GET", "/api/tools/catalog", timeout=8, sign=False)
+        if code == 200 and isinstance(cat, dict) and cat.get("tools"):
+            for t in cat.get("tools", []):
+                mark = "\033[32m✓\033[0m" if t.get("advertised") else "\033[2m·\033[0m"
+                verdict = t.get("default_verdict", "?")
+                vc = {"allow": "\033[32m", "ask": "\033[33m", "deny": "\033[31m"}.get(verdict, "")
+                print(f"  {mark} {t.get('name',''):<20} {vc}{verdict:<6}\033[0m "
+                      f"\033[2m{t.get('capability','')} · {'/'.join(t.get('runs_on', ['hub']))}\033[0m")
+            if not cat.get("web_search_enabled"):
+                print(f"  \033[2mweb search is built and tested but not granted yet"
+                      f" (HIVV_ENABLE_WEB_SEARCH=1 turns it on)\033[0m")
+        else:
+            print(f"  \033[2mcould not reach the hub catalog (HTTP {code})\033[0m")
+
         print(f"\n\033[1m{APP} tools — available on the hive\033[0m")
         code, resp = http("GET", "/api/tools", timeout=5, sign=False)
         if code == 200 and isinstance(resp, dict):
@@ -5384,16 +6086,21 @@ def cmd_tools(args) -> None:
         else:
             print(f"[{APP}] starting tools server on port {TOOLS_PORT}...")
             tool_cmd = [sys.executable, str(tool_script), "start"]
+            # The tool server proxies the heavy tools (code, memory, translate)
+            # to the hub, so it has to know WHICH hub.
+            tool_env = dict(os.environ, HIVV_HUB=HUB, HIVV_VISITOR_ID=_get_visitor_id())
             if IS_WINDOWS:
                 subprocess.Popen(
                     tool_cmd,
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    env=tool_env,
                     creationflags=0x00000008 | 0x00000200,  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
                 )
             else:
                 subprocess.Popen(
                     ["setsid"] + tool_cmd,
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    env=tool_env,
                     start_new_session=True
                 )
             time.sleep(2)
@@ -5460,80 +6167,122 @@ def cmd_tools(args) -> None:
 
 def cmd_call(args) -> None:
     """Invoke a tool through the hive (no local LLM needed).
-    hivv call time
-    hivv call time --tz=America/New_York
-    hivv call calculate --expr="2+2"
-    hivv call fetch --url=https://example.com
-    hivv call search --q="weather"
-    hivv call sysinfo
-    hivv call time --local   # force local server (no hub routing)
+
+    The hub owns the catalog (api/lib/toolkit.js) — every tool it lists can
+    be called here. Old names still work: time, calculate, fetch, search.
+
+        hivv call calculator --expr="2+2"
+        hivv call current_time --tz=Asia/Karachi
+        hivv call timezone_convert --tz=Europe/Paris --json='{"from_timezone":"UTC"}'
+        hivv call code_interpreter --code="print(2**10)" --lang=python
+        hivv call memory --key=unit --value=metric
+        hivv call translate --text="hello" --to=ur
+        hivv call web_fetch --url=https://example.com
+        hivv call calculator --expr="2+2" --local    # force the local server
+        hivv call calculator --expr="2+2" --via=node  # run on a bee that shares it
     """
     tool = args.tool
-    params = {}
+    params: dict = {}
+
+    # A raw JSON argument bag wins over the flags.
+    raw = getattr(args, "json_args", None)
+    if raw:
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                params.update(parsed)
+        except Exception as e:
+            die(f"--json is not valid JSON: {e}")
+
     if args.tz:
-        params["tz"] = args.tz
+        params["timezone"] = args.tz
     if args.expr:
-        params["expr"] = args.expr
+        params["expression"] = args.expr
     if args.url:
         params["url"] = args.url
     if args.q:
-        params["q"] = args.q
+        params["query"] = args.q
+    if args.method:
+        params["method"] = args.method
+    if args.code:
+        params["code"] = args.code
+    if args.lang:
+        params["language"] = args.lang
+    if args.key:
+        params["key"] = args.key
+    if args.value:
+        params["value"] = args.value
+    if args.to:
+        params["to"] = args.to
+    if args.text:
+        params["text"] = args.text
+    if args.doc_id:
+        params["id"] = args.doc_id
+    if not params:
+        params["query"] = ""
 
-    # Try local tool server first (or if --local flag), then fall back to hive routing
     force_local = getattr(args, "local", False)
-    if force_local or _tools_running():
-        try:
-            # NO `import urllib.request` here — the module imports it already,
-            # and a function-level import made `urllib` local to cmd_call, so
-            # the hive-routing path below (which runs when the local tools
-            # server is NOT up) died with UnboundLocalError.
-            local_path = f"http://localhost:{TOOLS_PORT}/{tool}"
-            if params:
-                local_path += "?" + "&".join(f"{k}={urllib.parse.quote(str(v))}" for k, v in params.items())
-            with urllib.request.urlopen(local_path, timeout=10) as r:
-                data = json.loads(r.read())
-                if tool == "sysinfo":
-                    _print_sysinfo(data)
-                elif tool == "time":
-                    print(f"{data.get('human', data.get('utc', ''))}  (local)")
-                elif tool == "calculate":
-                    print(f"{data.get('result', data)}")
-                else:
-                    print(json.dumps(data, indent=2) if isinstance(data, (dict, list)) else data)
-                return
-        except Exception as e:
-            pass  # fall through to hive
+    via = getattr(args, "via", None)
 
-    # Route through hive to another node
-    query = "&".join(f"{k}={urllib.parse.quote(str(v))}" for k, v in params.items())
-    path = f"/api/tools/{tool}/invoke" + (f"?{query}" if query else "")
-    code, resp = http("GET", path, timeout=15, sign=False)
+    # ── local first (when asked) ────────────────────────────────────────────
+    if force_local and _tools_running():
+        try:
+            body = json.dumps(params).encode("utf-8")
+            import urllib.request as _ur
+            req = _ur.Request(
+                f"http://localhost:{TOOLS_PORT}/tool/{urllib.parse.quote(str(tool))}",
+                data=body, method="POST", headers={"Content-Type": "application/json"})
+            with _ur.urlopen(req, timeout=30) as r:
+                data = json.loads(r.read())
+            _print_tool_result(tool, data, "local")
+            return
+        except Exception as e:
+            print(f"[{APP}] local tool server: {e} — trying the hive", file=sys.stderr)
+
+    # ── the hive ───────────────────────────────────────────────────────────
+    path = f"/api/tools/{urllib.parse.quote(str(tool))}/invoke"
+    body = dict(params)
+    if via:
+        body["via"] = via
+    code, resp = http("POST", path, body=body, timeout=45)
     if code == 202 and isinstance(resp, dict) and resp.get("verdict") == "MAYBE":
         _print_maybe(resp)
         return
     if code == 403 and isinstance(resp, dict) and resp.get("verdict") == "NO":
         _print_no(resp)
         sys.exit(1)
-    if code == 200:
-        data = resp if isinstance(resp, dict) else {}
-        if tool == "sysinfo":
-            _print_sysinfo(data)
-        elif tool == "time":
-            print(f"{data.get('time', '')}  (node: {data.get('node', '?')})")
-        elif tool == "calculate":
-            print(f"{data.get('result', data)}  (node: {data.get('node', '?')})")
-        else:
-            print(json.dumps(data, indent=2) if isinstance(data, (dict, list)) else data)
-    elif code == 404:
-        die(f"tool '{tool}' is not available — no bee on the hive is sharing it yet\n"
-            f"  → run: hivv tools on && hivv tools share to share your own")
-    elif code == 502:
+    if code == 404 and isinstance(resp, dict):
+        die(f"tool '{tool}' is not available\n"
+            f"  → the catalog: hivv tools list\n"
+            f"  → the hub said: {resp.get('error', 'unknown tool')}")
+    if code == 502 and isinstance(resp, dict):
         die(f"tool '{tool}' is shared on the hive but unreachable (NAT/firewall issue)\n"
             f"  → your node can't receive inbound connections from the hub\n"
-            f"  → to fix: set up port forwarding on your router for port 18789,\n"
+            f"  → to fix: set up port forwarding for port {TOOLS_PORT},\n"
             f"     or run 'hivv call {tool} --local' to use your local tools directly")
+    if not (200 <= code < 300):
+        err = resp.get("error") if isinstance(resp, dict) else resp
+        die(f"tool call failed (HTTP {code}): {err}")
+    _print_tool_result(tool, resp if isinstance(resp, dict) else {}, "hive")
+
+
+def _print_tool_result(tool: str, data: dict, where: str) -> None:
+    """Print a tool result the way a human wants to read it."""
+    if not isinstance(data, dict):
+        print(json.dumps(data, indent=2) if isinstance(data, (dict, list)) else data)
+        return
+    if data.get("ok") is False:
+        die(f"{tool} failed: {data.get('error', 'unknown error')}")
+    payload = data.get("data", data)
+    if tool in ("calculator", "calc", "calculate") and isinstance(payload, dict):
+        print(f"{payload.get('result')}   ({tool} @ {where})")
+    elif tool in ("current_time", "time", "get_time") and isinstance(payload, dict):
+        print(f"{payload.get('human', payload.get('utc'))}  {payload.get('timezone', '')}"
+              f"  ({where})")
+    elif tool == "sysinfo":
+        _print_sysinfo(payload)
     else:
-        die(f"tool call failed (HTTP {code}): {resp}")
+        print(json.dumps(payload, indent=2) if isinstance(payload, (dict, list)) else payload)
 
 def _print_sysinfo(data: dict) -> None:
     if not data:
@@ -6244,7 +6993,7 @@ def cmd_upgrades(args) -> None:
     print(f"  {'WHEN':<19} {'NODE':<15} {'SRC':<7} {'ACTION':<9} {'VERDICT':<12} {'BRAINS':<9} REASON")
     print(f"  {'─'*19} {'─'*15} {'─'*7} {'─'*9} {'─'*12} {'─'*9} {'─'*30}")
     for r in reports[:20]:
-        when = r.get("created_at", "")
+        when = r.get("last_seen") or r.get("created_at", "")
         try:
             when = time.strftime("%Y-%m-%d %H:%M", time.strptime(str(when)[:19], "%Y-%m-%dT%H:%M:%S"))
         except (ValueError, TypeError):
@@ -6263,12 +7012,66 @@ def cmd_upgrades(args) -> None:
         sus = sum(1 for v in votes if isinstance(v, dict) and v.get("verdict") == "suspicious")
         brains = f"{okv}✓/{sus}✗" if votes else "—"
         reason = str(r.get("reason") or "")[:60]
+        # Same failure hitting again under a NEW sha is the "is this thing
+        # STILL broken?" signal — surface the attempt count the hub's
+        # signature-dedup counted (wahi: ×9 over two days).
+        att = r.get("attempts") or 1
+        try:
+            att = int(att)
+        except (TypeError, ValueError):
+            att = 1
+        if att > 1:
+            reason = f"\033[33m×{att}\033[0m {reason}"
         # pad around ANSI-colored cells using visible widths
         def _w(s):  # visible width (strip ANSI)
             return len(re.sub(r"\033\[[0-9;]*m", "", s))
         def _pad(s, n):
             return s + " " * max(0, n - _w(s))
         print(f"  {_pad(when,19)} {_pad(node,15)} {_pad(src,7)} {_pad(act_col,9)} {_pad(v_col,12)} {_pad(brains,9)} {reason}")
+
+    # Failure forensics: the structured diagnostics bees attach to a FAILED
+    # apply (which step died, who owns the file, can we write, the fix).
+    # Without this block the operator reads a prose reason and SSHes in to
+    # run `ls -la` themselves — exactly what wahi's nine reports forced
+    # (2026-11-22).
+    fails = [r for r in reports
+             if r.get("action") == "failed" and isinstance(r.get("diagnostics"), dict)]
+    if fails:
+        print(f"\n  \033[1mfailure details\033[0m")
+        for r in fails[:8]:
+            d = r["diagnostics"]
+            att = r.get("attempts") or 1
+            try:
+                att = int(att)
+            except (TypeError, ValueError):
+                att = 1
+            bits = []
+            if d.get("step"):
+                bits.append(f"step={d['step']}")
+            if d.get("error_class"):
+                bits.append(str(d["error_class"]))
+            if d.get("errno") is not None:
+                bits.append(f"errno={d['errno']}")
+            if d.get("install"):
+                bits.append(f"{d['install']} install")
+            if d.get("dir_owner"):
+                bits.append(f"owner={d['dir_owner']}:{d.get('dir_mode', '?')}")
+            if d.get("euid") is not None:
+                bits.append(f"you=euid {d['euid']}")
+            if d.get("dir_writable") is False:
+                bits.append("dir NOT writable")
+            if d.get("version_to"):
+                bits.append(f"→ {d['version_to']}")
+            att_s = f" \033[33m×{att}\033[0m" if att > 1 else ""
+            print(f"    {r.get('node_id', '?')}{att_s}: {' · '.join(bits)}")
+            if d.get("target"):
+                own = (f" ({d.get('file_owner')}:{d.get('file_mode')})"
+                       if d.get("file_owner") else "")
+                print(f"      {d['target']}{own}")
+            if d.get("tip"):
+                for ln in _wrap_text(f"fix: {d['tip']}", _term_width() - 6):
+                    print(f"      \033[36m{ln}\033[0m")
+        print()
     flagged = [r for r in reports if r.get("action") in ("blocked", "failed")]
     if flagged:
         print(f"\n  \033[33m⚠ {len(flagged)} flagged outcome(s)\033[0m — details: "
@@ -6474,6 +7277,40 @@ def cmd_update(args) -> None:
         log("review skipped (--skip-review)")
     update_ok, msg, target = _apply_update(data, expected_sha256=sha, source="cli")
     if not update_ok:
+        # The install dir is not ours to write (system-wide install, root-
+        # owned) — the update could not land there. BOOTSTRAP a user-local
+        # install instead: the box then has a client it can actually update,
+        # and every later `hivv update` just works.
+        #
+        # 2026-11-21/22 (asher@wahi): the old CLI died here with a bare
+        # "[Errno 13] Permission denied: .../hivv-cli.py.bak" and the box
+        # could never self-heal — thirteen identical failed update rows.
+        if _looks_like_permission_failure(msg):
+            print(f"  \033[33m→\033[0m {msg}")
+            print("  \033[33m→\033[0m the system install is not writable by you — "
+                  "installing a user-local copy instead\n")
+            try:
+                note = _repair_bootstrap_user_install(sys.stderr, "manual")
+            except Exception as e:
+                note = f"bootstrap failed: {e}"
+            if str(note).startswith("bootstrapped"):
+                ok(f"user-local install ready → {USER_INSTALL_DIR / (APP + '-cli.py')}")
+                print(f"  \033[2m{note}\033[0m")
+                print(f"  \033[1m→\033[0m the system copy is unchanged (root-owned).")
+                print(f"    \033[2mfor a system-wide update instead: sudo {APP} update\033[0m")
+                _upgrade_report_once({"source": "manual", "action": "applied",
+                                 "to_sha256": remote_sha,
+                                 "verdict": (review or {}).get("verdict", "ok"),
+                                 "reason": f"applied via user-local install ({msg})",
+                                 "static_findings": (review or {}).get("scan", {}).get("findings", []),
+                                 "votes": (review or {}).get("votes", [])},
+                                remote_sha, "applied")
+                return
+            die(f"{msg}\n"
+                f"  and the user-local bootstrap failed: {note}\n"
+                f"  fix A (needs root):  sudo {APP} update\n"
+                f"  fix B (user-local):  curl -sSL {HUB.rstrip('/')}/install-{APP}.sh "
+                f"| bash -s -- --prefix=$HOME/.local", code=20)
         _upgrade_report_once({"source": "manual", "action": "failed",
                          "to_sha256": remote_sha,
                          "verdict": (review or {}).get("verdict", "ok"),
@@ -7410,6 +8247,28 @@ def _tcp_ok(ip: str, port, timeout: float = 0.8) -> bool:
     except OSError:
         return False
 
+def _probe_targets(n: dict) -> tuple[list, list]:
+    """(ips, ports) worth TCP-probing on a node — tools port + model ports.
+
+    Shared by `_measure_pings` and the offline LAN view (`hivv nodes` with
+    the hub down), so both agree on what "reachable" can even mean for a
+    node. Empty lists ⇒ nothing to probe (no fake reachability answers)."""
+    ports: list = []
+    for raw in [n.get("tools_port")] + [lm.get("port") for lm in
+                                        (n.get("local_models") or [])
+                                        if isinstance(lm, dict)]:
+        try:
+            p = int(raw or 0)
+        except (TypeError, ValueError):
+            continue
+        if p and p not in ports:
+            ports.append(p)
+    ips: list = []
+    for ip in (n.get("lan_ip"), n.get("ip")):
+        if isinstance(ip, str) and ip not in ("", "?") and ip not in ips:
+            ips.append(ip)
+    return ips, ports
+
 def _measure_pings(nodes: list, budget: float = 0.7) -> dict:
     """node_id → ms: time a TCP connect to each bee's tools/model port.
 
@@ -7422,20 +8281,7 @@ def _measure_pings(nodes: list, budget: float = 0.7) -> dict:
     from concurrent.futures import ThreadPoolExecutor
 
     def _probe(n: dict):
-        ports: list = []
-        for raw in [n.get("tools_port")] + [lm.get("port") for lm in
-                                            (n.get("local_models") or [])
-                                            if isinstance(lm, dict)]:
-            try:
-                p = int(raw or 0)
-            except (TypeError, ValueError):
-                continue
-            if p and p not in ports:
-                ports.append(p)
-        ips: list = []
-        for ip in (n.get("lan_ip"), n.get("ip")):
-            if isinstance(ip, str) and ip not in ("", "?") and ip not in ips:
-                ips.append(ip)
+        ips, ports = _probe_targets(n)
         if not ports or not ips:
             return None
         deadline = time.monotonic() + budget
@@ -7635,8 +8481,123 @@ def _hive_totals(nodes: list[dict], pings: dict) -> dict:
     return tot
 
 
+# ── offline roster ladder ───────────────────────────────────────────────────
+# `hivv nodes` used to die with "failed to fetch nodes" whenever hivv.org was
+# unreachable — even with every bee perfectly healthy on the local network
+# (2026-11-22: the hub's pg pool wedged for 10h; the LAN never noticed).
+# The roster now falls back: hub → this box's own gateway → last snapshot on
+# disk, with every bee's status re-derived by a LIVE LAN probe, because a
+# cached "online" from yesterday is a lie and a port that answers NOW is not.
+NODES_CACHE = STATE_DIR / "nodes-cache.json"
+
+def _save_nodes_cache(payload: dict) -> None:
+    """Atomically persist the last good roster (best-effort, never fatal)."""
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = NODES_CACHE.with_name(NODES_CACHE.name + ".tmp")
+        tmp.write_text(json.dumps({"saved_at": time.time(), "payload": payload}))
+        os.replace(tmp, NODES_CACHE)
+    except OSError:
+        pass  # a read-only or missing STATE_DIR must not break `hivv nodes`
+
+def _load_nodes_cache() -> dict | None:
+    """The snapshot written by `_save_nodes_cache`, or None if absent/corrupt."""
+    try:
+        d = json.loads(NODES_CACHE.read_text())
+        if isinstance(d, dict) and isinstance(d.get("payload"), dict):
+            return d
+    except (OSError, ValueError, json.JSONDecodeError):
+        pass
+    return None
+
+def _rederive_lan_status(payload: dict) -> None:
+    """Re-derive status + pings of a SNAPSHOT by probing the LAN right now.
+
+    Only bees with something probeable (an IP and a tools/model port) get
+    their status overwritten — a bee with no open port from here keeps its
+    cached status, because "unprobeable" is not "offline" (firewalled peers
+    and different-LAN bees would otherwise all flip to red)."""
+    nodes = payload.get("nodes") or []
+    pings = _measure_pings(nodes, budget=0.7)
+    for n in nodes:
+        if not isinstance(n, dict):
+            continue
+        ips, ports = _probe_targets(n)
+        if not ips or not ports:
+            continue
+        n["status"] = "online" if str(n.get("id", "")) in pings else "offline"
+    payload["_pings"] = pings
+    payload["total"] = len(nodes)
+    payload["online"] = sum(1 for n in nodes
+                            if isinstance(n, dict) and n.get("status") != "offline")
+
+_LOCAL_GW = "http://127.0.0.1:3011"
+
+def _fetch_nodes(timeout: float = 5.0) -> tuple[int, dict | str, str]:
+    """GET the node roster with an offline ladder.
+
+    1. the hub        — source of truth, also refreshes the disk snapshot
+    2. local gateway  — same app on this box; survives CDN/TLS/DNS breakage
+                        where the public website is down but :3011 answers
+    3. disk snapshot  — last good roster, statuses re-probed live on the LAN
+
+    Returns (code, payload, source) with source ∈ {"hub","local","cache"}.
+    On total failure the ORIGINAL hub error is returned so existing error
+    messages stay intact; when a fallback is used the payload carries
+    `_fallback = {source, hub_error[, saved_at]}` for banners and --json.
+    """
+    code, p = http("GET", "/api/control/nodes", timeout=timeout)
+    if code == 200 and isinstance(p, dict):
+        _save_nodes_cache(p)
+        return code, p, "hub"
+
+    err = str(p)
+    # 2. the gateway on THIS box — skip when HUB already points at localhost
+    if "127.0.0.1" not in HUB and "localhost" not in HUB:
+        try:
+            lcode, lp = http("GET", "/api/control/nodes", timeout=3,
+                             base_url=_LOCAL_GW)
+            if lcode == 200 and isinstance(lp, dict) and lp.get("nodes"):
+                _save_nodes_cache(lp)
+                lp["_fallback"] = {"source": "local", "hub_error": err}
+                return lcode, lp, "local"
+        except Exception:
+            pass
+
+    # 3. the snapshot — the whole point: the LAN still works without the website
+    cached = _load_nodes_cache()
+    if cached:
+        payload = dict(cached["payload"])
+        _rederive_lan_status(payload)
+        payload["_fallback"] = {"source": "cache", "hub_error": err,
+                                "saved_at": cached.get("saved_at")}
+        return 200, payload, "cache"
+
+    return code, p, "hub"
+
+def _offline_banner(payload: dict) -> list[str]:
+    """Yellow banner lines explaining a fallback view (empty when hub-fed)."""
+    fb = payload.get("_fallback") if isinstance(payload, dict) else None
+    if not fb:
+        return []
+    reason = str(fb.get("hub_error") or "hub unreachable")
+    if fb.get("source") == "cache":
+        saved = fb.get("saved_at") or 0
+        age = max(0, int(time.time()) - int(saved))
+        if age < 60:
+            age_s = "just now"
+        elif age < 3600:
+            age_s = f"{age // 60}m ago"
+        elif age < 86400:
+            age_s = f"{age // 3600}h ago"
+        else:
+            age_s = f"{age // 86400}d ago"
+        return [f"⚠ hub unreachable ({reason}) — offline LAN view, snapshot saved {age_s}",
+                "status + ping = LIVE probe on this network · version + last HB = snapshot"]
+    return [f"hub unreachable ({reason}) — answered by the local gateway on 127.0.0.1:3011"]
+
 def cmd_nodes(args) -> None:
-    code, p = http("GET", "/api/control/nodes")
+    code, p, source = _fetch_nodes()
     if getattr(args, "json_output", False):
         print(json.dumps(p, indent=2) if isinstance(p, (dict, list)) else p)
         sys.exit(0 if code == 200 else 2)
@@ -7644,48 +8605,61 @@ def cmd_nodes(args) -> None:
     # Human-readable output
     if code != 200 or not isinstance(p, dict):
         print(f"failed to fetch nodes: {p}")
+        print(f"  (no offline snapshot either — run `{APP} nodes` once while "
+              f"the hub is up to seed the LAN fallback)")
         sys.exit(2)
 
     nodes = p.get("nodes", [])
     total = p.get("total", 0)
     online = p.get("online", 0)
+    pings = p.pop("_pings", {}) if source == "cache" else {}
 
     if not nodes:
         print(f"\n  no nodes registered")
-        print(f"  start an agent: {APP} start\n")
+        print(f"  start an agent: {APP} start\n" if source != "cache"
+              else "  the offline snapshot is empty — the hub never returned a roster from this machine\n")
         sys.exit(0)
 
     # latest CLI version (hub truth) — bees behind should hivv update
     latest = None
-    try:
-        c2, v2 = http("GET", "/api/version", timeout=5, sign=False)
-        if c2 == 200 and isinstance(v2, dict):
-            latest = v2.get("version")
-    except Exception:
-        pass
-
-    # Fetch cached pings (one call, not per-node — hub caches 30s)
-    pings = {}
-    try:
-        cp, pp = http("GET", "/api/control/ping", timeout=3, sign=False)
-        if cp == 200 and isinstance(pp, dict):
-            pings = pp.get("pings", {})
-    except Exception:
-        pass
-
-    # The cache only fills when someone runs `hivv reach` — so measure the
-    # online bees it has no fresh number for ourselves (parallel, short
-    # deadline) and seed the cache for every other reader.
-    missing = [n for n in nodes
-               if n.get("status") == "online" and n.get("id") not in pings]
-    if missing:
+    if source != "cache":
         try:
-            for nid, ms in _measure_pings(missing).items():
-                pings[nid] = ms
-                http("POST", "/api/control/ping",
-                     body={"node_id": nid, "ping_ms": ms}, timeout=3)
+            c2, v2 = http("GET", "/api/version", timeout=5, sign=False,
+                          base_url=(_LOCAL_GW if source == "local" else None))
+            if c2 == 200 and isinstance(v2, dict):
+                latest = v2.get("version")
         except Exception:
             pass
+
+    # Fetch cached pings (one call, not per-node — hub caches 30s)
+    if source != "cache":
+        try:
+            cp, pp = http("GET", "/api/control/ping", timeout=3, sign=False,
+                          base_url=(_LOCAL_GW if source == "local" else None))
+            if cp == 200 and isinstance(pp, dict):
+                pings = pp.get("pings", {})
+        except Exception:
+            pass
+
+        # The cache only fills when someone runs `hivv reach` — so measure the
+        # online bees it has no fresh number for ourselves (parallel, short
+        # deadline) and seed the cache for every other reader. Never POST the
+        # numbers to a hub we couldn't reach in the first place.
+        missing = [n for n in nodes
+                   if n.get("status") == "online" and n.get("id") not in pings]
+        if missing:
+            try:
+                for nid, ms in _measure_pings(missing).items():
+                    pings[nid] = ms
+                    http("POST", "/api/control/ping",
+                         body={"node_id": nid, "ping_ms": ms}, timeout=3,
+                         base_url=(_LOCAL_GW if source == "local" else None))
+            except Exception:
+                pass
+
+    for _ln in _offline_banner(p):
+        for _w in _wrap_text(_ln, _term_width() - 2):
+            print(f"  \033[33m{_w}\033[0m")
 
     print(f"\n\033[1m{APP} nodes\033[0m — {online} online, {total} total{' · hub on ' + latest if latest else ''}\n")
 
@@ -9204,95 +10178,103 @@ def cmd_chat(args) -> None:
     _do_chat(msg, stream=True, mode=mode, local=local)
 
 def _exec_tool_locally(tool_name: str, args: dict) -> dict:
-    """Execute a single tool via local hivv-tools server. Returns {role:'tool', tool_call_id, content}."""
+    """Execute a single tool on THIS machine via the local hivv-tools server.
+
+    The local server serves the deterministic tools itself (the clock, the
+    calculator, the timezone converter, the text parser, the machine
+    snapshot) and forwards the rest to the hub — which is authoritative for
+    the sandbox, the document store and the shared memory. So a local tool
+    call can answer ANY tool in the catalog, not just six.
+
+    Returns {role:'tool', tool_call_id, content}.
+    """
     import urllib.request, urllib.parse
     base = f"http://localhost:{TOOLS_PORT}"
-    if tool_name == "time" or tool_name == "get_time":
-        tz = args.get("timezone")
-        path = f"{base}/time" + (f"?tz={urllib.parse.quote(tz)}" if tz else "")
-    elif tool_name == "calculate":
-        expr = urllib.parse.quote(str(args.get("expression", "")))
-        path = f"{base}/calculate?expr={expr}"
-    elif tool_name == "fetch":
-        url = urllib.parse.quote(str(args.get("url", "")))
-        path = f"{base}/fetch?url={url}"
-    elif tool_name == "search":
-        q = urllib.parse.quote(str(args.get("query", "")))
-        path = f"{base}/search?q={q}"
-    elif tool_name == "news":
-        q = urllib.parse.quote(str(args.get("query", args.get("location", ""))))
-        path = f"{base}/news?q={q}"
-    elif tool_name == "sysinfo":
-        path = f"{base}/sysinfo"
-    else:
-        return {"role": "tool", "tool_call_id": args.get("id", "?"), "content": f"error: unknown tool '{tool_name}'"}
+    call_id = args.get("id", "?")
+    payload = {k: v for k, v in (args or {}).items() if k != "id"}
     try:
-        with urllib.request.urlopen(path, timeout=15) as r:
+        body = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(
+            f"{base}/tool/{urllib.parse.quote(str(tool_name))}",
+            data=body, method="POST",
+            headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=30) as r:
             data = json.loads(r.read())
-            if isinstance(data, dict) and "error" in data:
-                content = f"error: {data['error']}"
-            elif tool_name == "sysinfo":
-                content = json.dumps(data)
-            elif tool_name == "time" or tool_name == "get_time":
-                ts = data.get("unix")
-                if data.get("local") and data.get("timezone"):
-                    content = f"Current time: {data['local']} ({data['timezone']})"
-                elif ts:
-                    import datetime
-                    local = datetime.datetime.fromtimestamp(ts)
-                    content = f"Current time: {local.strftime('%I:%M %p on %B %d, %Y')}"
-                else:
-                    content = f"Current time: {data.get('human', data.get('iso', '?'))}"
-            elif tool_name == "calculate":
-                if "error" in data:
-                    content = f"error: {data['error']}"
-                else:
-                    content = f"Result: {data.get('result', data)}"
-            elif tool_name == "news":
-                results = data.get("results", [])
-                if results:
-                    lines = [f"News for '{data.get('query', '')}':"]
-                    for i, r in enumerate(results[:5], 1):
-                        lines.append(f"{i}. {r.get('title', '?')}")
-                        if r.get('date'): lines.append(f"   {r['date']}")
-                        if r.get('snippet'): lines.append(f"   {r['snippet'][:100]}")
-                    content = "\n".join(lines)
-                else:
-                    content = f"No news results for '{data.get('query', '')}'"
-            elif tool_name == "search":
-                results = data.get("results", [])
-                if results:
-                    lines = [f"Search results for '{data.get('query', '')}':"]
-                    for i, r in enumerate(results[:5], 1):
-                        lines.append(f"{i}. {r.get('title', '?')}")
-                        if r.get('snippet'): lines.append(f"   {r['snippet'][:100]}")
-                    content = "\n".join(lines)
-                else:
-                    content = f"No results for '{data.get('query', '')}'"
-            else:
-                content = json.dumps(data)
-            return {"role": "tool", "tool_call_id": args.get("id", "?"), "content": content}
     except Exception as e:
-        return {"role": "tool", "tool_call_id": args.get("id", "?"), "content": f"error: {e}"}
+        return {"role": "tool", "tool_call_id": call_id, "content": f"error: {e}"}
+
+    if not isinstance(data, dict):
+        return {"role": "tool", "tool_call_id": call_id, "content": json.dumps(data)}
+    if data.get("ok") is False:
+        return {"role": "tool", "tool_call_id": call_id,
+                "content": f"error: {data.get('error', 'the tool failed')}"}
+    payload_out = data.get("data", data)
+    if tool_name in ("calculator", "calc", "calculate") and isinstance(payload_out, dict):
+        content = str(payload_out.get("result", payload_out))
+    elif tool_name in ("current_time", "time", "get_time") and isinstance(payload_out, dict):
+        content = (f"Current time: {payload_out.get('local', payload_out.get('human'))} "
+                   f"({payload_out.get('timezone')}, UTC{payload_out.get('utc_offset')})")
+    else:
+        content = json.dumps(payload_out, indent=2) if isinstance(payload_out, (dict, list)) else str(payload_out)
+    return {"role": "tool", "tool_call_id": call_id, "content": content}
+
+
+def _tool_schemas() -> list:
+    """The tool schemas to send with a chat request.
+
+    The HUB owns the catalog (api/lib/toolkit.js), so we ask it for the
+    schemas instead of keeping a second copy here that could drift. The
+    static list below is only the offline fallback.
+    """
+    try:
+        code, resp = http("GET", "/api/tools/catalog", timeout=6, sign=False)
+        if code == 200 and isinstance(resp, dict):
+            tools = resp.get("tools") or []
+            out = []
+            for t in tools:
+                if not t.get("advertised", True):
+                    continue
+                out.append({
+                    "type": "function",
+                    "function": {
+                        "name": t.get("name"),
+                        "description": t.get("description", ""),
+                        "parameters": t.get("parameters") or {"type": "object", "properties": {}},
+                    },
+                })
+            if out:
+                return out
+    except Exception:
+        pass
+    return TOOL_SCHEMAS
+
 
 def _ensure_tools_running() -> bool:
     """Make sure hivv-tools server is running. Returns True if tools are available."""
     if _tools_running():
         return True
     print(f"[{APP}] tools server not running — starting it for you...", file=sys.stderr)
-    tool_script = INSTALL_DIR / f"{APP}-tools.py"
+    # A runtime DOWNLOAD must never land in a root-owned install dir
+    # (/usr/local/lib/hivv) — that broke `hivv chat` for every non-root user
+    # on a system-wide install (asher@wahi 2026-11-21: "failed to download
+    # tools: [Errno 13] Permission denied").
+    tool_script = _runtime_file(f"{APP}-tools.py")
     if not tool_script.exists():
         print(f"[{APP}] downloading tools server...", file=sys.stderr)
         try:
             data = _http_get_bytes(f"{HUB}/{APP}-tools.py")
+            tool_script.parent.mkdir(parents=True, exist_ok=True)
             tool_script.write_bytes(data)
             tool_script.chmod(0o755)
         except Exception as e:
             print(f"[{APP}] failed to download tools: {e}", file=sys.stderr)
+            print(f"[{APP}]   (wanted: {tool_script})", file=sys.stderr)
             return False
     try:
         subprocess.Popen([sys.executable, str(tool_script), "start"],
-                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                        env=dict(os.environ, HIVV_HUB=HUB,
+                                 HIVV_VISITOR_ID=_get_visitor_id()))
         time.sleep(1.5)  # give server time to start
         if _tools_running():
             print(f"[{APP}] tools server ready on port {TOOLS_PORT}", file=sys.stderr)
@@ -10636,7 +11618,10 @@ def _do_chat(msg: str, stream: bool = True, mode: str | None = None,
     if mode:
         req_body["route"] = {"mode": mode}
     if tools_running:
-        req_body["tools"] = TOOL_SCHEMAS
+        # The schemas come from the HUB's catalog (one source of truth), so
+        # the CLI can never offer a tool the hive does not have, or miss one
+        # it does.
+        req_body["tools"] = _tool_schemas()
         req_body["local_tools"] = True
     if think_off:
         req_body["chat_template_kwargs"] = {"enable_thinking": False}
@@ -12823,6 +13808,12 @@ def cmd_volunteer(args) -> None:
     """Opt in/out of contributing compute to the network.
     Sets ~/.config/hivv/contribute.json. The agent reads this on next start."""
     action = getattr(args, "action", None) or "status"
+    # THE CENTRAL NORMALIZER REWRITES "on"/"off" → "yes"/"no" (it exists so
+    # every command can accept on/off/yes/no). That made `hivv volunteer on`
+    # and `hivv volunteer off` DEAD — they always fell through to "status",
+    # so the toggle never actually toggled. Accept both vocabularies.
+    action = {"yes": "on", "no": "off", "true": "on", "false": "off",
+              "enable": "on", "disable": "off"}.get(str(action).lower(), action)
     ensure_dirs()
     cfg = _volunteer_load()
 
@@ -12842,6 +13833,10 @@ def cmd_volunteer(args) -> None:
         print("    \033[1mDisk\033[0m      half your storage stays available for models and jobs")
         print("    \033[1mNetwork\033[0m   half your bandwidth is shared with the hive")
         print("    \033[1mHoney\033[0m     you earn double the honey points of a non-volunteer")
+        print()
+        print("    \033[1mHive access\033[0m \033[1;32mFULL\033[0m — your box is reachable by the whole network:")
+        print("                     anyone on hivv.org can send it work, and it can answer them.")
+        print("                     (A non-volunteer is firewalled off from the hive's job pool.)")
         print()
         print("  \033[1;33m→\033[0m opting out later gives all of that back to you — it is not a trap.")
         print()
@@ -12883,6 +13878,9 @@ def cmd_volunteer(args) -> None:
         print("    \033[1mDisk\033[0m      half your storage stays available for models/jobs → yours")
         print("    \033[1mNetwork\033[0m   half your bandwidth stays shared with the hive → yours")
         print("    \033[1mHoney\033[0m     you earn half the honey points of an active volunteer")
+        print("    \033[1mHive access\033[0m \033[1;31mREDUCED\033[0m — the network can no longer send you work:")
+        print("                     your bee steps out of the hive's job pool and stops")
+        print("                     answering requests from other bees.")
         print()
         print(f"  \033[1;33m→\033[0m your machine will be faster and quieter, and the network gets less of it.")
         print(f"  \033[1;33m→\033[0m \033[1m{APP} volunteer on\033[0m reverses this in one command, any time.")
@@ -12900,8 +13898,10 @@ def cmd_volunteer(args) -> None:
         since = cfg.get("opted_in_at")
         since_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(since)) if since else "default (not yet explicit)"
         print(f"  state:    \033[1;32m✓ volunteering\033[0m  (since {since_str})")
+        print(f"  hive:     \033[1;32mfull access\033[0m  \033[2m— the network can send this box work\033[0m")
     else:
         print(f"  state:    \033[2mnot volunteering\033[0m  (explicitly off)")
+        print(f"  hive:     \033[1;31mreduced\033[0m      \033[2m— this box is out of the hive's job pool\033[0m")
     print(f"  config:   {_VOLUNTEER_FILE}")
     for k, v in cfg.items():
         if k == "opted_in_at":
@@ -12910,11 +13910,12 @@ def cmd_volunteer(args) -> None:
     if not cfg.get("share_cpu"):
         print(f"\n  to join:   \033[1m{APP} volunteer on\033[0m")
         print(f"  \033[2m(you keep half your CPU, RAM, disk and bandwidth to yourself;\033[0m")
-        print(f"  \033[2m a volunteer shares half of each and earns double the honey)\033[0m")
+        print(f"  \033[2m a volunteer shares half of each, earns double the honey, and gets\033[0m")
+        print(f"  \033[2m FULL access to the hivv.org network — the hive can send this box work)\033[0m")
     else:
         print(f"\n  to leave:  \033[1m{APP} volunteer off\033[0m  (relay jobs are ON by default)")
         print(f"  \033[2m(half your CPU, RAM, disk and bandwidth are shared with the hive;\033[0m")
-        print(f"  you earn double the honey while you do)\033[0m")
+        print(f"  you earn double the honey and have full hive access while you do)\033[0m")
 
 
 def cmd_share(args) -> None:
@@ -14670,6 +15671,155 @@ def cmd_llm_serve(args):
         sys.exit(0)
 
 
+# ── build-tool preflight — NEVER a raw FileNotFoundError ─────────────────
+# THE FAILURE THIS FIXES
+# ----------------------
+# 2026-11-21 (asher@wahi): `hivv install llm` on a box without git died with
+#
+#   FileNotFoundError: [Errno 2] No such file or directory: 'git'
+#
+# — a Python traceback, mid-install, with no hint that git was the missing
+# piece and no way forward. The CLI called subprocess directly and let the
+# OSError escape.
+#
+# The contract (same as scripts/lib/deps.sh): a missing tool is AUTO-INSTALLED
+# when we safely can, and when we cannot we print the EXACT copy-paste command
+# and exit cleanly. A traceback is never an acceptable install experience.
+#
+# `cmake` matters as much as `git`: the build needs it, and a box with git but
+# no cmake fails one step later with the same ugly traceback.
+_BUILD_TOOL_PKGS = {
+    "apt":    {"git": "git", "cmake": "cmake"},
+    "dnf":    {"git": "git", "cmake": "cmake"},
+    "yum":    {"git": "git", "cmake": "cmake"},
+    "pacman": {"git": "git", "cmake": "cmake"},
+    "apk":    {"git": "git", "cmake": "cmake"},
+    "zypper": {"git": "git", "cmake": "cmake"},
+    "brew":   {"git": "git", "cmake": "cmake"},
+}
+
+_BUILD_TOOL_HINTS = {
+    "apt":    "sudo apt-get update && sudo apt-get install -y git cmake",
+    "dnf":    "sudo dnf install -y git cmake",
+    "yum":    "sudo yum install -y git cmake",
+    "pacman": "sudo pacman -S --noconfirm git cmake",
+    "apk":    "sudo apk add git cmake",
+    "zypper": "sudo zypper --non-interactive install git cmake",
+    "brew":   "brew install git cmake",
+}
+
+
+def _build_tool_pkg_manager() -> str:
+    """Detect the OS package manager name, or '' when there is none.
+
+    The name matches the keys of _BUILD_TOOL_PKGS / _BUILD_TOOL_HINTS
+    ("apt", "dnf", "yum", "pacman", "apk", "zypper", "brew").
+    """
+    if sys.platform.startswith("linux"):
+        for pm, name in (("apt-get", "apt"), ("dnf", "dnf"), ("yum", "yum"),
+                          ("pacman", "pacman"), ("apk", "apk"), ("zypper", "zypper")):
+            if shutil.which(pm):
+                return name
+        return ""
+    if sys.platform == "darwin":
+        return "brew" if shutil.which("brew") else ""
+    return ""
+
+
+def _build_tool_install_cmd(pm: str, tools: list) -> list:
+    """The package-manager command that installs `tools` — one invocation."""
+    pkgs = _BUILD_TOOL_PKGS.get(pm, {})
+    names = [pkgs.get(t, t) for t in tools]
+    if pm == "apt":
+        return ["apt-get", "install", "-y"] + names
+    if pm == "dnf":
+        return ["dnf", "install", "-y"] + names
+    if pm == "yum":
+        return ["yum", "install", "-y"] + names
+    if pm == "pacman":
+        return ["pacman", "-S", "--noconfirm"] + names
+    if pm == "apk":
+        return ["apk", "add", "--no-cache"] + names
+    if pm == "zypper":
+        return ["zypper", "--non-interactive", "install"] + names
+    if pm == "brew":
+        return ["brew", "install"] + names
+    return []
+
+
+def _build_tool_run_privileged(cmd: list) -> bool:
+    """Run a package-manager command as root when possible.
+
+    NEVER prompts for a password (`sudo -n`) — a prompt would hang CI and
+    unattended installs. When no passwordless root is available we do NOT
+    run the command at all: `apt-get install` as a normal user is a
+    guaranteed failure, and its error output is noise the user cannot act on.
+    """
+    import subprocess as _sp
+    try:
+        is_root = (os.geteuid() == 0) if hasattr(os, "geteuid") else False
+        sudo = ""
+        if not is_root:
+            if not shutil.which("sudo"):
+                return False
+            if _sp.call(["sudo", "-n", "true"],
+                        stdout=_sp.DEVNULL,
+                        stderr=_sp.DEVNULL) != 0:
+                return False
+            sudo = "sudo"
+        full = ([sudo] if sudo else []) + cmd
+        return _sp.call(full) == 0
+    except OSError:
+        return False
+
+
+def _ensure_build_tools(tools: list) -> bool:
+    """Guarantee the build tools exist. Returns True when all are present.
+
+    Auto-installs via the OS package manager when possible; otherwise prints
+    the exact command to run and returns False — the caller then exits
+    CLEANLY (no traceback).
+    """
+    missing = [t for t in tools if not shutil.which(t)]
+    if not missing:
+        return True
+
+    pm = _build_tool_pkg_manager()
+    if pm:
+        print(f"  \033[33m→\033[0m installing build tools: {', '.join(missing)} (via {pm})…")
+        # apt needs its index fresh or "Unable to locate package" is common.
+        # Use sudo ONLY when we are not already root (sudo may not exist).
+        if pm == "apt":
+            try:
+                import subprocess as _sp
+                is_root = (os.geteuid() == 0) if hasattr(os, "geteuid") else False
+                refresh = ["apt-get", "update"]
+                if not is_root:
+                    refresh = ["sudo", "-n"] + refresh
+                _sp.call(refresh, stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
+            except OSError:
+                pass
+        cmd = _build_tool_install_cmd(pm, missing)
+        if cmd and _build_tool_run_privileged(cmd):
+            still = [t for t in missing if not shutil.which(t)]
+            if not still:
+                print(f"  \033[32m✓\033[0m installed: {', '.join(missing)}")
+                return True
+
+    # Could not auto-install — print the EXACT command (never a traceback).
+    hint = _BUILD_TOOL_HINTS.get(pm, "")
+    if not hint:
+        hint = ("install git and cmake with your package manager, then re-run "
+                f"`{APP} llm install-llama --auto`")
+    print()
+    print(f"  \033[1;31m✗\033[0m missing build tool(s): {', '.join(missing)}", file=sys.stderr)
+    print(f"  \033[1m→\033[0m install them and re-run:", file=sys.stderr)
+    print(f"      {hint}", file=sys.stderr)
+    print(f"      {APP} llm install-llama --auto", file=sys.stderr)
+    print()
+    return False
+
+
 def cmd_llm_install_llama(args):
     """Print (and optionally run) the steps to build llama.cpp from source."""
     import subprocess as _sp
@@ -14712,21 +15862,39 @@ def cmd_llm_install_llama(args):
         return
 
     # --auto path
+    # Preflight FIRST: without git/cmake the build dies one line later with a
+    # raw FileNotFoundError traceback (asher@wahi 2026-11-21). Check BEFORE
+    # printing "[1/3] cloning…" so the user sees the real blocker.
+    if not _ensure_build_tools(["git", "cmake"]):
+        die("cannot build llama.cpp without git and cmake — see the command above")
+
     if os.path.isdir(_LLAMA_CPP_DIR):
         print(f"  \033[33m~/{'llama.cpp'}\033[0m already exists — skipping clone")
     else:
         print(f"  \033[1m[1/3]\033[0m cloning…")
-        rc = _sp.call(["git", "clone", git_url, _LLAMA_CPP_DIR])
+        try:
+            rc = _sp.call(["git", "clone", git_url, _LLAMA_CPP_DIR])
+        except (OSError, FileNotFoundError) as e:
+            die(f"git clone could not start: {e}\n"
+                f"    install git, then re-run: {APP} llm install-llama --auto")
         if rc != 0:
             die(f"git clone failed (rc={rc})")
 
     print(f"  \033[1m[2/3]\033[0m configuring…")
-    rc = _sp.call(build_cmd, cwd=_LLAMA_CPP_DIR)
+    try:
+        rc = _sp.call(build_cmd, cwd=_LLAMA_CPP_DIR)
+    except (OSError, FileNotFoundError) as e:
+        die(f"cmake could not start: {e}\n"
+            f"    install cmake, then re-run: {APP} llm install-llama --auto")
     if rc != 0:
         die(f"cmake configure failed (rc={rc})")
 
     print(f"  \033[1m[3/3]\033[0m compiling ({os.cpu_count() or 4} threads)…")
-    rc = _sp.call(compile_cmd, cwd=_LLAMA_CPP_DIR)
+    try:
+        rc = _sp.call(compile_cmd, cwd=_LLAMA_CPP_DIR)
+    except (OSError, FileNotFoundError) as e:
+        die(f"cmake could not start: {e}\n"
+            f"    install cmake, then re-run: {APP} llm install-llama --auto")
     if rc != 0:
         die(f"cmake build failed (rc={rc})")
 
@@ -15490,7 +16658,12 @@ def cmd_llm_setup(args) -> None:
     if os.access(srv_bin, os.X_OK):
         print(f"  \033[32m[1/3]\033[0m ✓ llama.cpp built ({srv_bin})")
     else:
+        # Preflight the toolchain BEFORE asking "build llama.cpp now?" — a
+        # yes that cannot possibly work is a trap (asher@wahi 2026-11-21:
+        # "build llama.cpp now? y" → FileNotFoundError: 'git').
         print(f"  \033[1m[1/3]\033[0m llama.cpp not built — compiling from source takes a few minutes")
+        if not _ensure_build_tools(["git", "cmake"]):
+            die("cannot build llama.cpp without git and cmake — see the command above")
         if not _confirm("build llama.cpp now?"):
             die(f"stopped — run `{APP} llm install-llama --auto` when you're ready")
         cmd_llm_install_llama(_ArgNamespace(auto=True))
@@ -17006,14 +18179,28 @@ def build_parser() -> argparse.ArgumentParser:
                     choices=["on", "off", "status", "share", "list"],
                     help="on/off/status/share/list (default: list)")
 
-    sp = sub.add_parser("call",    help="invoke a shared tool through the hive (no local LLM needed)")
-    sp.add_argument("tool", choices=["time", "calculate", "fetch", "search", "sysinfo"],
-                    help="tool to invoke")
-    sp.add_argument("--tz",  default=None, help="timezone for 'time' tool (e.g. America/New_York)")
-    sp.add_argument("--expr", default=None, help="expression for 'calculate' tool (e.g. '2+2')")
-    sp.add_argument("--url",  default=None, help="URL for 'fetch' tool")
-    sp.add_argument("-q", "--query", dest="q", default=None, help="query for 'search' tool")
+    sp = sub.add_parser("call",    help="invoke a tool through the hive (no local LLM needed)")
+    sp.add_argument("tool",
+                    help="tool to invoke: web_search, current_time, calculator, web_fetch, "
+                         "http_request, code_interpreter, file_read, file_search, memory, "
+                         "text_parser, timezone_convert, translate (old names still work)")
+    sp.add_argument("--tz",  default=None, help="timezone for the time tools (e.g. America/New_York)")
+    sp.add_argument("--expr", default=None, help="expression for the calculator (e.g. '2+2')")
+    sp.add_argument("--url",  default=None, help="URL for web_fetch / http_request")
+    sp.add_argument("-q", "--query", dest="q", default=None, help="query for search / file_search")
+    sp.add_argument("--json", dest="json_args", default=None,
+                    help="raw JSON arguments for the tool (overrides the flags above)")
+    sp.add_argument("--method", default=None, help="HTTP method for http_request")
+    sp.add_argument("--code", default=None, help="source code for code_interpreter")
+    sp.add_argument("--lang", default=None, help="language for code_interpreter (python/bash/node)")
+    sp.add_argument("--key", default=None, help="key for the memory tool")
+    sp.add_argument("--value", default=None, help="value for the memory tool")
+    sp.add_argument("--to", default=None, help="target language for translate")
+    sp.add_argument("--text", default=None, help="text for translate")
+    sp.add_argument("--id", dest="doc_id", default=None, help="document id for file_read")
     sp.add_argument("--local", action="store_true", help="force use of local tools server (bypass hive routing)")
+    sp.add_argument("--via", default=None, choices=["hub", "node"],
+                    help="run on the hub (default) or on a bee that shares the tool")
 
     sp = sub.add_parser("dev",   help="toggle dev mode (blocks auto-update to protect local changes)")
     sp.add_argument("--off", action="store_true", help="disable dev mode and re-enable auto-update")
