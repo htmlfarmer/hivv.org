@@ -475,6 +475,9 @@ _UPDATE_FORCE = False
 # Auto-heal tips: when something fails, the fix should be one glance away.
 # die()/warn() match the message against these rules and print up to 2 tips.
 # Disable with HIVV_TIPS=off. Tips are data — `hivv update` can ship new ones.
+USER_INSTALL_CMD = ("curl -sSL https://hivv.org/install-hivv.sh | bash -s -- "
+                    "--mode=user && export PATH=$HOME/.local/bin:$PATH && hivv restart agent")
+
 _HIVV_TIPS = [
     (r"timed? out|timeout", "slow or dead endpoint — a smaller model helps: hivv llm suggest · or a specific bee: hivv ask <name> \"...\""),
     (r"connection refused|econnrefused", "peer refused the link — its LLM is localhost-only: hivv firewall --apply --mode lan · cross-network: hivv firewall --apply --mode tailscale"),
@@ -487,7 +490,7 @@ _HIVV_TIPS = [
     (r"not running|agent (is )?not up|stopped", "the agent isn't running — hivv start · auto-fix: hivv doctor --fix"),
     (r"model .{0,20}not found|no model|pull first", "no local model — hivv llm suggest · hivv llm pull <model> · or hivv llm pull-gguf gemma-4:e2b"),
     (r"certificate|ssl|tls", "TLS trouble — check the clock (certs are time-sensitive) · corporate proxies may intercept https"),
-    (r"permission denied", "permission denied — the install dir belongs to another user (system-wide install): sudo hivv update · or reinstall user-local: curl -sSL hivv.org/install-hivv.sh | bash -s -- --prefix=$HOME/.local"),
+    (r"permission denied", f"permission denied — this is a ROOT-OWNED install and you do NOT need sudo: {USER_INSTALL_CMD}   (have sudo? one-time: sudo hivv update)"),
     (r"python.{0,20}not found", "python3 missing — Linux: apt install python3 · macOS: brew install python3 · Windows: winget install Python.Python.3.12"),
 ]
 
@@ -506,6 +509,21 @@ def _tips_for(msg: str) -> list:
         if len(out) >= 2:
             break
     return out
+
+def _root_owned_install_hint(client: Path) -> str | None:
+    """THE no-sudo command for a root-owned system install — or None.
+
+    Shown PROACTIVELY by "hivv doctor" (before the wall) and as the
+    permission-denied tip (after it). Regular users must never be told
+    they need sudo: wahi hit the .bak Permission denied wall seven times
+    because the only advice led with sudo, and part of the hive has no
+    sudo at all (2026-11-23)."""
+    try:
+        if client.parent.exists() and not os.access(client.parent, os.W_OK):
+            return USER_INSTALL_CMD
+    except OSError:
+        pass
+    return None
 
 def _print_tips(msg: str, to_stderr: bool = False) -> None:
     if os.environ.get("HIVV_TIPS", "on").lower() in ("off", "0", "no"):
@@ -12222,6 +12240,14 @@ def cmd_doctor(args) -> None:
     bin_path = Path(__file__).resolve()
     print(f"  wrapper:  {BIN_DIR / APP}   " + (_ok("exists") if (BIN_DIR / APP).exists() else _fail("MISSING")))
     print(f"  client:   {bin_path}   " + (_ok("exists") if bin_path.exists() else _fail("MISSING")))
+    # ROOT-OWNED system copy: print THE command BEFORE anyone hits the wall.
+    # The tip table only speaks after a Permission denied failure — doctor is
+    # where people look BEFORE things break, and the answer must not lead
+    # with sudo (many users have none — wahi's .bak wall, 2026-11-23).
+    _own_hint = _root_owned_install_hint(bin_path)
+    if _own_hint:
+        print("  install:  " + _warn("root-owned system copy — as a regular user, no sudo needed:"))
+        print(f"    {_own_hint}")
     cfg = Path.home() / ".config" / APP
     st  = Path.home() / ".local" / "share" / APP
     print(f"  config:   {cfg}   " + (_ok("exists") if cfg.exists() else _warn("missing (will be created on first run)")))
