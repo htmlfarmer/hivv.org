@@ -30,6 +30,11 @@
 # whether the box is now self-healing.
 set -u
 
+# colour vars used by the notes (set -u makes an UNDEFINED one fatal —
+# the hash-note below crashed the script on its first real run because
+# YLW was never declared)
+YLW='[33m'; CYN='[36m'; RST='[0m'
+
 APP=hivv
 # HIVV_HUB override = testable offline (file://) and self-hostable —
 # same env var the CLI itself honors.
@@ -191,4 +196,15 @@ if command -v "$APP" >/dev/null 2>&1; then
 else
     warn "hivv still not found — open a NEW terminal and run: hivv status"
 fi
+# A piped rescue CANNOT reach THIS shell's parent: bash caches the absolute
+# path of every command it has ever run, and 'curl | bash' runs in a
+# subshell — so the interactive shell that typed the command can still hold
+# the OLD /usr/local path in its hash table (wahi: rescue verified
+# ~/.local in its own shell, then the user's next 'hivv update' ran the
+# old copy and hit the old wall again — looked exactly like a revert).
+# Say the ONE-LINE fix, always.
+printf '\n  %sIMPORTANT%s — if YOUR terminal still runs the old copy (hivv update\n' "$YLW" "$RST"
+printf '   shows an old version or /usr/local), run once in that terminal:\n'
+printf '     %shash -r%s     (bash cached the old path — rescue cannot clear it\n' "$CYN" "$RST"
+printf '      from a piped script)  · or just open a NEW terminal\n'
 printf '\n done. next: hivv status · hivv start · hivv chat "hello"\n\n'
