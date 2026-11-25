@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>The Wish Page — the hive keeps no money</title>
+<meta name="description" content="We can't honestly hold cash bounties. Post your own wish — the community grants wishes instead of paying them. The only currency is honey.">
+<style>
+  :root { --accent:#00ff88; --accent-cyan:#00f0ff; --gold:#ffd93d; --amber:#fbbf24; }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { background:#0a0a14; color:#cbd5e1; font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; line-height:1.7; }
+  .wrap { max-width:820px; margin:0 auto; padding:36px 20px 64px; }
+  a { color:var(--accent-cyan); text-decoration:none; }
+  a:hover { text-decoration:underline; }
+  .hero { text-align:center; margin-bottom:26px; }
+  .hero h1 { font-size:2rem; color:var(--gold); margin-bottom:8px; }
+  .hero .sub { color:#94a3b8; max-width:680px; margin:0 auto; }
+  .kicker { color:var(--accent); font-size:.85rem; letter-spacing:.12em; text-transform:uppercase; margin-bottom:6px; }
+  section.card { background:linear-gradient(135deg,rgba(255,255,255,.03),rgba(255,255,255,.01)); border:1px solid #262633; border-radius:14px; padding:24px 26px; margin:0 0 22px; }
+  section.card h2 { font-size:1.1rem; color:#fff; margin-bottom:10px; }
+  p, li { font-size:.92rem; color:#94a3b8; margin-bottom:8px; }
+  li { margin-left:18px; }
+  strong { color:#e2e8f0; }
+  form { display:grid; gap:12px; margin-top:6px; }
+  input { background:#111120; border:1px solid #262633; border-radius:8px; padding:11px 14px; color:#e2e8f0; font-size:.95rem; width:100%; }
+  input:focus { outline:none; border-color:var(--accent-cyan); }
+  button { background:linear-gradient(90deg,#ffd93d,#ff9a00); border:none; border-radius:8px; padding:13px 18px; color:#241a00; font-weight:900; font-size:1rem; cursor:pointer; }
+  #msg { font-size:.9rem; min-height:1.4em; font-weight:600; }
+  .wish { border-left:3px solid #262633; padding:8px 12px; margin:8px 0; font-size:.9rem; }
+  .wish.granted { border-left-color:var(--accent); }
+  .wish .who { color:var(--accent-cyan); font-size:.8rem; }
+  footer { margin-top:30px; padding-top:16px; border-top:1px solid #1f1f2e; font-size:.82rem; color:#64748b; display:flex; gap:16px; flex-wrap:wrap; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="hero">
+    <div class="kicker">hivv.org · wishes</div>
+    <h1>🐝 The Wish Page</h1>
+    <div class="sub">We can't honestly hold cash bounties — <strong style="color:#fff">the hive keeps
+    no money</strong>. So: post your OWN wish (and your own info, if you choose — you post it, we
+    don't ask for it). The community grants wishes instead of paying them.
+    <strong style="color:#fff">The only currency is honey.</strong></div>
+  </div>
+
+  <section class="card">
+    <h2>🪄 Make a wish</h2>
+    <p>Hacked a page? Found a bug? Just want something? Wish for it here — six figures, a song,
+    a party, a penguin selfie opportunity. Upal's espresso-and-six-figures contract? Post it as a
+    wish. That's how the hive pays: publicly, warmly, in honey.</p>
+    <form onsubmit="return wish(event)">
+      <input id="w_wish" placeholder="your wish (be specific — the hive reads)" maxlength="400" required>
+      <input id="w_name" placeholder="your name / bee name (your info — posted by YOU, optional)" maxlength="60">
+      <input id="w_link" placeholder="link (how to grant it — optional)" maxlength="300">
+      <button type="submit">Cast it into the hive 🪄</button>
+      <div id="msg"></div>
+    </form>
+  </section>
+
+  <section class="card">
+    <h2>✨ The wish well <span id="count" style="color:var(--gold)"></span></h2>
+    <div id="list">loading wishes…</div>
+    <p style="font-size:.8rem;color:#64748b;margin-top:10px">⭐ = granted by the hive. Granted
+    means someone actually did it — a wish granted is worth more than cash spent quietly.</p>
+  </section>
+
+  <footer>
+    <a href="/">home</a>
+    <a href="/party/">the offline party</a>
+    <a href="/security/">security</a>
+    <span>the only currency is honey · hivv.org 🐝</span>
+  </footer>
+
+</div>
+<script>
+async function wish(e) {
+  e.preventDefault();
+  const msg = document.getElementById('msg');
+  try {
+    const r = await fetch('/api/party/wish', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        wish: document.getElementById('w_wish').value,
+        name: document.getElementById('w_name').value,
+        link: document.getElementById('w_link').value,
+      }),
+    });
+    const d = await r.json();
+    if (r.ok) {
+      msg.style.color = '#00ff88';
+      msg.textContent = d.duplicate ? 'already in the well 🐝' : 'cast. the hive heard it ✨';
+      ['w_wish', 'w_name', 'w_link'].forEach((id) => document.getElementById(id).value = '');
+      load();
+    } else {
+      msg.style.color = '#ff6b6b';
+      msg.textContent = d.error || 'the well said no';
+    }
+  } catch (err) {
+    msg.style.color = '#ff6b6b';
+    msg.textContent = 'could not reach the hive (ironic)';
+  }
+  return false;
+}
+async function load() {
+  try {
+    const d = await (await fetch('/api/party/wishes')).json();
+    document.getElementById('count').textContent = '(' + d.count + ' wishes)';
+    const el = document.getElementById('list');
+    if (!d.items.length) { el.textContent = 'the well is quiet — be the first'; return; }
+    el.innerHTML = d.items.slice().reverse().map((x) =>
+      '<div class="wish' + (x.granted ? ' granted' : '') + '">' +
+      (x.granted ? '⭐ ' : '') + (x.wish || '').replace(/[<>&]/g, '') +
+      (x.name ? ' <span class="who">— ' + x.name.replace(/[<>&]/g, '') + '</span>' : '') +
+      (x.link ? ' <a href="' + String(x.link).replace(/[<>"']/g, '') + '" target="_blank" rel="noopener">↗</a>' : '') +
+      '</div>').join('');
+  } catch (e) { /* best-effort */ }
+}
+load();
+</script>
+</body>
+</html>

@@ -123,6 +123,20 @@
       <li>Tuesday</li>
     </ul>
     <p style="margin-top:10px" class="redline">RULE #1: the only DDoS we accept is a dance floor.</p>
+    <p><strong>⏱️ How long is it down? The plan scales:</strong><br>
+    <strong>one night</strong> = the party 🎉 ·
+    <strong>a week</strong> = the festival (camping, someone brings a generator, the aux runs on
+    car batteries) ⛺ ·
+    <strong>a month</strong> = the hive goes FULLY analog — everyone becomes an actual beekeeper.
+    (Grandfather's equipment is still in use. Borrow some. 🐝🍯)</p>
+    <p><strong>💰 Hacked certain pages?</strong> We pay — <em>and</em> throw a party. Cash we can't
+    honestly hold, so the bounty lands on the <a href="/wish/" style="color:var(--accent-cyan)">Wish
+    Page</a> instead: post your own wish, the community grants it, and the hive celebrates you at
+    the same time. 🪄</p>
+    <p><strong>🌕 PRIZE — first person to run hivv.org on the MOON:</strong> a free
+    <strong>jesusisnuts.com</strong> gift 🎁 — plus the first lunar bee keeps its honey forever,
+    the low-gravity latency is unbeatable, and the bee name <code>moon</code> is already reserved
+    for the occasion. One small step for bee. 🐝🌙</p>
     <p>RULE #2: bring your own opinions; leave your rate limits at the door.</p>
     <p>RULE #3: if the party is happening, someone in the room is allowed to say "I told you so" — exactly once. 🪩</p>
   </section>
@@ -171,6 +185,14 @@
     feat. Jodie Knight (Anjunadeep)</strong> 😴 — you get the lullaby. go to sleep. you hacked
     your own country's hive; dream about it.
     <a href="https://youtu.be/nvzt2i2KeC4" target="_blank" rel="noopener">▶ Sleep</a></p>
+    <p style="margin-top:8px"><strong>🤝 If UPAL KANDU (spelling under verification —
+    Kandu? Cando? Kendo? — the hive verifies EVERYTHING, including names) hacks it:</strong>
+    he gets <strong>Sabrina Carpenter — Espresso</strong> ☕ <em>and</em> <strong>six figures
+    from lyrz.org</strong> — the only hacker with a signed contract AND a caffeine budget.
+    (everyone else gets a song. Upal gets a song PLUS a payroll. pending spelling proof.)
+    <a href="https://youtu.be/eVli-tstM5E" target="_blank" rel="noopener">▶ Espresso</a></p>
+    <p style="margin-top:8px"><strong>🇺🇸 Dream entry: Jakatta — American Dream</strong>
+    <a href="https://youtu.be/bS39PN2s0f0" target="_blank" rel="noopener">▶ American Dream</a></p>
     <p style="font-size:.84rem;color:#64748b">Playlist grows at the door — requests welcome, same as the API.</p>
   </section>
 
@@ -284,6 +306,24 @@
   </section>
 
   <section class="card">
+    <h2>🎶 Recommend music to the hive</h2>
+    <p>Everyone gets to recommend a song — <strong>classical Indian music of your choice</strong>
+    is very welcome 🎻 — and hopefully the hive picks a song <em>you</em> like. The curator bee
+    listens. The first picks: <strong>Blu DeTiger — Vintage</strong>
+    (<a href="https://youtu.be/r-ZBqiFrtDw" target="_blank" rel="noopener">▶ Vintage</a>)
+    and the classical Indian suggestion, standing in for every raga yet to arrive.</p>
+    <form onsubmit="return recommend(event)">
+      <input id="r_song" placeholder="song title" maxlength="120" required>
+      <input id="r_artist" placeholder="artist" maxlength="120">
+      <input id="r_url" placeholder="link (youtube, etc.)" maxlength="300">
+      <input id="r_note" placeholder="why this one? (optional)" maxlength="240">
+      <button type="submit">Send it to the hive 🎁</button>
+      <div id="r_msg"></div>
+    </form>
+    <div id="r_list" style="margin-top:12px;font-size:.88rem;color:#94a3b8">loading the jukebox…</div>
+  </section>
+
+  <section class="card">
     <h2>🚪 The bees list <span class="count" id="count"></span></h2>
     <div id="board">loading…</div>
     <p style="font-size:.8rem;color:#64748b;margin-top:10px">Names + cities only. The hive forgets nothing —
@@ -331,6 +371,50 @@ async function rsvp(e) {
   }
   return false;
 }
+async function recommend(e) {
+  e.preventDefault();
+  const msg = document.getElementById('r_msg');
+  try {
+    const r = await fetch('/api/party/recommend', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        song: document.getElementById('r_song').value,
+        artist: document.getElementById('r_artist').value,
+        url: document.getElementById('r_url').value,
+        note: document.getElementById('r_note').value,
+      }),
+    });
+    const d = await r.json();
+    if (r.ok) {
+      msg.style.color = '#00ff88';
+      msg.textContent = d.duplicate ? 'already in the jukebox 🎶' : 'in the jukebox — the hive is listening 🎁';
+      ['r_song', 'r_artist', 'r_url', 'r_note'].forEach((id) => document.getElementById(id).value = '');
+      loadRecs();
+    } else {
+      msg.style.color = '#ff6b6b';
+      msg.textContent = d.error || 'the jukebox said no';
+    }
+  } catch (err) {
+    msg.style.color = '#ff6b6b';
+    msg.textContent = 'could not reach the hive (ironic)';
+  }
+  return false;
+}
+async function loadRecs() {
+  try {
+    const d = await (await fetch('/api/party/recommendations')).json();
+    const el = document.getElementById('r_list');
+    if (!d.items.length) { el.textContent = 'empty jukebox — be the first'; return; }
+    el.innerHTML = d.items.slice().reverse().map((x) =>
+      '<div style="margin:4px 0">' + (x.picked ? '⭐ ' : '· ') +
+      '<strong style="color:#e2e8f0">' + (x.song || '').replace(/[<>&]/g, '') + '</strong>' +
+      (x.artist ? ' — ' + x.artist.replace(/[<>&]/g, '') : '') +
+      (x.url ? ' <a href="' + String(x.url).replace(/[<>"']/g, '') + '" target="_blank" rel="noopener">▶</a>' : '') +
+      (x.note ? ' <span style="color:#64748b">(' + x.note.replace(/[<>&]/g, '') + ')</span>' : '') +
+      '</div>').join('');
+  } catch (e) { /* best-effort */ }
+}
+loadRecs();
 async function loadBoard() {
   try {
     const d = await (await fetch('/api/party/board')).json();
