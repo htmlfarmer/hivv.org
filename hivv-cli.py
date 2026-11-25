@@ -8348,6 +8348,265 @@ def cmd_uninstall(args) -> None:
             warn(f"could not remove {p}: {e}")
     ok(f"uninstalled (kept config: {CONFIG_DIR}, logs: {STATE_DIR})")
 
+
+# ── hivv remove — take hivv apart piece by piece (or all of it) ────────────
+# THE RULES THIS OBEYS (a delete command earns trust the hard way):
+#   1. NO user string ever reaches the filesystem — the component name is
+#      an argparse CHOICE; every path is one WE derive from known dirs.
+#   2. NEVER delete "/" or $HOME itself, even if an env var points a
+#      state/config dir there (resolve() first, so a symlink bomb fails too).
+#   3. Every destructive step asks a human (TTY) or demands --yes;
+#      a non-TTY without --yes dies with NOTHING removed.
+#   4. Service stops only when the state dir says THIS install is live
+#      (agent.pid exists) — a test or a dead box can never stop some other
+#      process's llama/agent by accident.
+
+def _rm_size(p) -> int:
+    """Bytes under p — display only; capped so a huge tree can't stall us."""
+    total = n = 0
+    try:
+        for f in Path(p).rglob("*"):
+            try:
+                if f.is_file() and not f.is_symlink():
+                    total += f.stat().st_size
+            except OSError:
+                pass
+            n += 1
+            if n > 500000:
+                break
+    except OSError:
+        pass
+    return total
+
+
+def _fmt_bytes(n: int) -> str:
+    for unit, div in (("GB", 1 << 30), ("MB", 1 << 20), ("KB", 1 << 10)):
+        if n >= div:
+            return f"{n / div:.1f} {unit}"
+    return f"{n} B"
+
+
+def _rm_tree(p) -> bool:
+    """Delete a file or tree — refuses / and $HOME no matter what pointed here."""
+    try:
+        rp = Path(p).resolve()
+    except OSError:
+        rp = Path(p)
+    home = Path.home().resolve()
+    if rp in (Path("/"), home):
+        warn(f"refusing to delete {rp} — that looks like a root or home path")
+        return False
+    try:
+        if rp.is_dir() and not rp.is_symlink():
+            shutil.rmtree(rp)
+        elif rp.exists() or rp.is_symlink():
+            rp.unlink()
+        else:
+            return False
+        log(f"removed {rp}")
+        return True
+    except OSError as e:
+        warn(f"could not delete {rp}: {e}")
+        return False
+
+
+def _rm_confirm(what: str, items: list, yes: bool) -> bool:
+    """Show exactly what dies, then ask. Non-TTY without --yes → die."""
+    print(f"\n\033[1m{APP} remove {what}\033[0m — this deletes:")
+    for it in items:
+        print(f"  \033[31m✗\033[0m {it}")
+    if yes:
+        return True
+    if not (sys.stdin.isatty() and not os.environ.get("CI")
+            and not os.environ.get("PYTEST_CURRENT_TEST")):
+        die(f"refusing to remove {what} without a TTY to confirm — "
+            f"re-run with --yes (nothing was removed)")
+    try:
+        ans = input(f"  really remove {what}? [y/N] ").strip().lower()
+    except EOFError:
+        ans = ""
+    if ans not in ("y", "yes"):
+        print("  aborted — nothing removed")
+        return False
+    return True
+
+
+def cmd_remove(args) -> None:
+    """hivv remove <part> — delete one part of hivv, or all of it.
+
+    Parts: llm · models · agent · config · logs · state · everything.
+    Bare 'hivv remove' lists the parts with sizes and touches nothing."""
+    what = (getattr(args, "what", None) or "").strip().lower()
+    yes = bool(getattr(args, "yes", False))
+    parts = {
+        "llm":       "stop the llama server + delete ~/llama.cpp (build + GGUF models)",
+        "models":    "delete downloaded models (our GGUF dir + ollama rm --all)",
+        "agent":     "stop + remove the hivv CLI itself (keeps config · logs · state)",
+        "config":    f"delete {CONFIG_DIR} (settings only — identity lives in state)",
+        "logs":      f"delete *.log under {STATE_DIR} (keeps state + identity)",
+        "state":     f"delete {STATE_DIR} — node_id, identity, honey (re-registers as a NEW bee)",
+        "everything":"ALL of the above → a clean hivv (prints how to start over)",
+    }
+    if not what:
+        print(f"\n\033[1m{APP} remove\033[0m — which part?")
+        for k, v in parts.items():
+            size = ""
+            for cand in ((STATE_DIR,) if k in ("logs", "state") else
+                         (CONFIG_DIR,) if k == "config" else
+                         (Path(_LLAMA_CPP_DIR),) if k in ("llm", "models") else ()):
+                if Path(cand).exists():
+                    size = f"  \033[2m({_fmt_bytes(_rm_size(cand))})\033[0m"
+                    break
+            print(f"  \033[1m{k:<12}\033[0m {v}{size}")
+        print()
+        print(f"  usage: {APP} remove <part> [--yes]   (bare lists the parts)")
+        return
+    if what == "all":
+        what = "everything"
+    if what not in parts:
+        die(f"unknown part {what!r} — try '{APP} remove' to list them")
+
+    live = bool(read_pid())   # only touch services when OUR agent is up
+    if what == "llm":
+        tree = Path(_LLAMA_CPP_DIR)
+        items = [f"{tree}  ({_fmt_bytes(_rm_size(tree))})"] if tree.exists() else []
+        if not items:
+            print("  nothing to remove — no llama.cpp found")
+            return
+        if not _rm_confirm(what, items, yes):
+            return
+        if live:
+            cmd_stop(_ArgNamespace(what="llm"))
+        else:
+            print("  \033[2m(agent not running — if a server is up: hivv stop llm)\033[0m")
+        _rm_tree(tree)
+        ok(f"removed {what} — reinstall later with: {APP} llm setup")
+        return
+    if what == "models":
+        items = []
+        gg = Path(_LLAMA_CPP_MODELS)
+        if gg.exists():
+            items.append(f"{gg}  ({_fmt_bytes(_rm_size(gg))})")
+        oll = shutil.which("ollama")
+        if oll:
+            items.append("ollama's own models  (ollama rm --all)")
+        if not items:
+            print("  nothing to remove — no models found")
+            return
+        if not _rm_confirm(what, items, yes):
+            return
+        if gg.exists():
+            _rm_tree(gg)
+        if oll:
+            import subprocess as _sp2
+            try:
+                _sp2.run([oll, "rm", "--all"], capture_output=True, timeout=60)
+                print("  ollama models removed")
+            except Exception as e:
+                warn(f"ollama rm --all failed: {e}")
+        ok(f"removed {what} — re-pull with: {APP} llm pull <model>")
+        return
+    if what == "agent":
+        items = []
+        if PID_FILE.exists():
+            items.append(str(PID_FILE))
+        for p in (INSTALL_DIR / f"{APP}-cli.py", BIN_DIR / APP):
+            if Path(p).exists():
+                items.append(str(p))
+        if not items:
+            print("  nothing to remove — agent not installed here")
+            return
+        if not _rm_confirm(what, items, yes):
+            return
+        if live:
+            cmd_stop(_ArgNamespace(what="agent"))
+        for p in (PID_FILE, INSTALL_DIR / f"{APP}-cli.py", BIN_DIR / APP):
+            try:
+                if Path(p).exists():
+                    Path(p).unlink(); log(f"removed {p}")
+            except OSError as e:
+                warn(f"could not remove {p}: {e}")
+        ok(f"removed {what} (kept config · logs · state) — reinstall: curl -sSL {HUB}/install-hivv.sh | bash")
+        return
+    if what == "config":
+        if not CONFIG_DIR.exists():
+            print("  nothing to remove — no config found")
+            return
+        if not _rm_confirm(what, [f"{CONFIG_DIR}  ({_fmt_bytes(_rm_size(CONFIG_DIR))})"], yes):
+            return
+        _rm_tree(CONFIG_DIR)
+        ok("removed config")
+        return
+    if what == "logs":
+        if not STATE_DIR.exists():
+            print("  nothing to remove — no logs found")
+            return
+        logs = sorted(set(list(STATE_DIR.glob("*.log")) + list(STATE_DIR.glob("*.log.*"))
+                          + (list((STATE_DIR / "logs").glob("*")) if (STATE_DIR / "logs").is_dir() else [])))
+        if not logs:
+            print("  nothing to remove — no logs found")
+            return
+        items = [f"{f}  ({_fmt_bytes(f.stat().st_size) if f.is_file() else 'dir'})" for f in logs[:10]]
+        if len(logs) > 10:
+            items.append(f"… and {len(logs) - 10} more")
+        if not _rm_confirm(what, items, yes):
+            return
+        freed = 0
+        for f in logs:
+            try:
+                if f.is_file():
+                    freed += f.stat().st_size
+                    f.unlink()
+                elif f.is_dir():
+                    shutil.rmtree(f, ignore_errors=True)
+            except OSError:
+                pass
+        ok(f"removed logs ({_fmt_bytes(freed)} freed — state + identity kept)")
+        return
+    if what == "state":
+        if not STATE_DIR.exists():
+            print("  nothing to remove — no state found")
+            return
+        items = [f"{STATE_DIR}  ({_fmt_bytes(_rm_size(STATE_DIR))}) — node_id, identity keys, honey"]
+        if not _rm_confirm(what, items, yes):
+            return
+        if live:
+            cmd_stop(_ArgNamespace(what="agent"))
+        _rm_tree(STATE_DIR)
+        ok("removed state — the node will re-register as a NEW bee on next start")
+        return
+    if what == "everything":
+        items = []
+        for p in (PID_FILE, INSTALL_DIR / f"{APP}-cli.py", BIN_DIR / APP,
+                  Path(_LLAMA_CPP_DIR), CONFIG_DIR, STATE_DIR):
+            if Path(p).exists():
+                sz = _rm_size(p)
+                items.append(f"{p}  ({_fmt_bytes(sz)})" if sz else str(p))
+        if shutil.which("ollama"):
+            items.append("ollama's own models  (ollama rm --all)")
+        if not items:
+            print("  already clean — nothing to remove")
+            return
+        if not _rm_confirm(what, items, yes):
+            return
+        if live:
+            cmd_stop(_ArgNamespace(what="all"))
+        else:
+            print("  \033[2m(agent not running — skipping service stops)\033[0m")
+        for p in (PID_FILE, INSTALL_DIR / f"{APP}-cli.py", BIN_DIR / APP,
+                  Path(_LLAMA_CPP_DIR), CONFIG_DIR, STATE_DIR):
+            _rm_tree(p)
+        if shutil.which("ollama"):
+            import subprocess as _sp2
+            try:
+                _sp2.run(["ollama", "rm", "--all"], capture_output=True, timeout=60)
+            except Exception:
+                pass
+        print()
+        ok("clean hivv — everything removed")
+        print(f"  start over:  curl -sSL {HUB}/install-hivv.sh | bash")
+        return
+
 # ── one-shot commands ──────────────────────────────────────────────────
 # ── sync: the two-way check against GitHub ────────────────────────────────
 # THE PROBLEM THIS SOLVES
@@ -21264,6 +21523,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--votes", type=int, default=1, help="how many models to ask (default 1)")
     sp = sub.add_parser("info",     help="hub URL, version, install paths, hub_health")
     sp = sub.add_parser("uninstall",help="stop + remove install (keep config + logs)")
+    sp_rm = sub.add_parser("remove", help="delete one part of hivv (or everything) — asks before it deletes")
+    sp_rm.add_argument("what", nargs="?", choices=["llm", "models", "agent", "config", "logs", "state", "everything", "all"],
+                       help="what to delete (bare: list the parts with sizes)")
+    sp_rm.add_argument("--yes", action="store_true", help="skip the confirmation (required when not a TTY)")
 
     sp = sub.add_parser("logs",    help="tail agent log")
     sp.add_argument("n", nargs="?", type=int, default=50, help="lines (default 50)")
@@ -21827,6 +22090,7 @@ COMMANDS = _resolve_cmds({
     "upgrades":        "cmd_upgrades",
     "dev":             "cmd_dev",
     "uninstall":       "cmd_uninstall",
+    "remove":          "cmd_remove",
     "health":          "cmd_health",
     "metrics":         "cmd_metrics",
     "fast-scan":       "cmd_fast_scan",
@@ -22286,6 +22550,7 @@ hub = {HUB}   version = {VERSION}
   update             pull the latest hivv-cli.py + run health checks
   upgrade            alias for `update`
   uninstall          stop + remove install (keep ~/.config/hivv/ + logs)
+  remove             delete one part (llm|models|agent|config|logs|state|everything) — asks first
   --help, help       list every subcommand
 
 \033[1mNetwork / cluster:\033[0m
@@ -22375,12 +22640,49 @@ def _help_search(query: str) -> bool:
         return False
     ql = q.lower().lstrip("-")
     idx = _argparse_command_index()
+    # (name, help, flags, extra-haystack, subcommands) — top level from the
+    # index, PLUS nested commands (llm install, eval run …): their flags live
+    # on the nested parser, so `hivv help --model` would never reach
+    # `llm install` without this walk.
+    entries = [(c["command"], c.get("help") or "", c.get("flags") or [],
+                " ".join(c.get("subcommands") or []), c.get("subcommands") or [])
+               for c in idx["commands"]]
+    try:
+        p = build_parser()
+        for act in p._actions:
+            if not isinstance(act, argparse._SubParsersAction):
+                continue
+            for pname, psub in act.choices.items():
+                if pname.startswith("-"):
+                    continue
+                for a2 in psub._actions:
+                    if not isinstance(a2, argparse._SubParsersAction):
+                        continue
+                    helps = {getattr(ca, "dest", ""): (getattr(ca, "help", "") or "")
+                             for ca in getattr(a2, "_choices_actions", [])}
+                    for sname, ssub in a2.choices.items():
+                        if sname.startswith("-"):
+                            continue
+                        flags, pos = [], []
+                        for a3 in ssub._actions:
+                            if isinstance(a3, argparse._SubParsersAction):
+                                continue
+                            if a3.option_strings:
+                                if set(a3.option_strings) <= {"-h", "-help", "--help"}:
+                                    continue
+                                flags.append({"flag": "/".join(a3.option_strings),
+                                              "help": (a3.help or "").strip()})
+                            elif a3.dest != "help":
+                                pos.append(f"{a3.dest} {a3.help or ''}".strip())
+                        entries.append((f"{pname} {sname}", helps.get(sname, ""),
+                                        flags, " ".join(pos), []))
+    except Exception:
+        pass  # introspection is best-effort — help must never crash
     rows = []
-    for c in idx["commands"]:
-        name = c["command"]
-        hay = " ".join([name, c.get("help") or "",
-                        " ".join(f["flag"] + " " + (f.get("help") or "") for f in c.get("flags", [])),
-                        " ".join(c.get("subcommands") or [])]).lower()
+    for name, htext, flags, extra, subs in entries:
+        hay = " ".join([name, htext,
+                        " ".join(f["flag"] + " " + (f.get("help") or "") for f in flags),
+                        extra]).lower()
         # score: exact > prefix > substring-in-name > substring-in-haystack
         if name.lower() == ql:
             score = 0
@@ -22395,7 +22697,7 @@ def _help_search(query: str) -> bool:
             if close < 0.55:
                 continue
             score = 4
-        rows.append((score, name, c))
+        rows.append((score, name, htext, flags, subs))
     if not rows:
         # last-ditch: did they mean a known command?
         close = difflib.get_close_matches(ql, [c["command"] for c in idx["commands"]],
@@ -22406,17 +22708,17 @@ def _help_search(query: str) -> bool:
         return False
     rows.sort(key=lambda r: (r[0], r[1]))
     print(f"\033[1m{APP} help — '{q}'\033[0m  ({len(rows)} match{'es' if len(rows) != 1 else ''})")
-    for score, name, c in rows[:8]:
+    for score, name, htext, flags, subs in rows[:8]:
         mark = "\033[32m" if score <= 1 else ("\033[36m" if score == 2 else "\033[2m")
         print(f"  {mark}{APP} {name}\033[0m")
-        h = (c.get("help") or "").strip().splitlines()
+        h = (htext or "").strip().splitlines()
         if h:
             print(f"      {h[0][:96]}")
-        for f in (c.get("flags") or [])[:4]:
+        for f in flags[:4]:
             if f.get("flag"):
                 print(f"        {f['flag']}  {(f.get('help') or '')[:72]}")
-        if c.get("subcommands"):
-            print(f"        sub: {', '.join(c['subcommands'][:8])}")
+        if subs:
+            print(f"        sub: {', '.join(subs[:8])}")
     if len(rows) > 8:
         print(f"  \033[2m… {len(rows) - 8} more — narrow your query\033[0m")
     print(f"  details: {APP} <command> --help")
@@ -22437,6 +22739,7 @@ def _print_sub_help(cmd: str) -> None:
         "upgrades":  "recent upgrade review outcomes across the hive 🧬\n  flag: --flagged   only blocked/failed\n  flag: --node N    one bee's upgrade history",
         "upgrade":   "alias for `update`",
         "uninstall": "stop + remove install (keeps ~/.config/hivv/ + logs)",
+        "remove":    "delete one part of hivv — llm | models | agent | config | logs | state | everything\n  usage: hivv remove [part] [--yes]   bare lists the parts with sizes\n  every delete shows what dies and asks first (non-TTY needs --yes)",
         "health":    "GET /api/health",
         "metrics":   "GET /api/control/metrics/global\n  flag: --local   print this bee's local CPU/GPU/MEM/DISK snapshot",
         "nodes":     "table view of all registered nodes (fits your terminal) + hive TOTALS\n  flag: --json   output raw JSON",

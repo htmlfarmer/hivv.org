@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>OFFLINE PARTY!!! — the hive meets when the network doesn't</title>
+<meta name="description" content="If hivv.org crashes, gets hacked, or maybe gets hacked — the bees meet in the same room. RSVP for the offline party.">
+<style>
+  :root { --accent:#00ff88; --accent-cyan:#00f0ff; --gold:#ffd93d; --amber:#fbbf24; --red:#ff2d2d; }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { background:#0a0a14; color:#cbd5e1; font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; line-height:1.7; overflow-x:hidden; }
+  .wrap { max-width:860px; margin:0 auto; padding:36px 20px 64px; position:relative; z-index:2; }
+  a { color:var(--accent-cyan); text-decoration:none; }
+  a:hover { text-decoration:underline; }
+  .hero { text-align:center; margin-bottom:26px; }
+  .kicker { color:var(--gold); font-size:.85rem; letter-spacing:.12em; text-transform:uppercase; margin-bottom:6px; }
+  /* ── THE BIG RED LETTERS ─────────────────────────────────────────── */
+  .hero h1 {
+    font-size:clamp(2.6rem, 9vw, 5.2rem);
+    font-weight:900;
+    letter-spacing:.02em;
+    line-height:1.02;
+    color:#ff2d2d;
+    text-shadow:0 0 18px rgba(255,45,45,.65), 0 0 60px rgba(255,45,45,.35), 0 4px 0 #7a0000;
+    transform:rotate(-1.5deg);
+    margin-bottom:10px;
+    animation:emergencyPulse 1.6s ease-in-out infinite;
+  }
+  .hero h1 .bang { display:inline-block; transform:rotate(6deg); }
+  @keyframes emergencyPulse {
+    0%,100% { text-shadow:0 0 18px rgba(255,45,45,.65), 0 0 60px rgba(255,45,45,.35), 0 4px 0 #7a0000; }
+    50%     { text-shadow:0 0 30px rgba(255,45,45,.95), 0 0 90px rgba(255,45,45,.55), 0 4px 0 #7a0000; }
+  }
+  .hero .sub { color:#cbd5e1; max-width:700px; margin:0 auto; font-size:1rem; }
+  .siren { display:inline-block; animation:spin 2.4s linear infinite; }
+  @keyframes spin { from{transform:rotate(0)} to{transform:rotate(360deg)} }
+
+  /* ── FLOATING FUNNY THINGS ───────────────────────────────────────── */
+  .floaters { position:fixed; inset:0; pointer-events:none; z-index:1; overflow:hidden; }
+  .floater {
+    position:absolute; font-size:2rem; opacity:.85;
+    animation:drift linear infinite;
+    filter:drop-shadow(0 0 8px rgba(0,0,0,.6));
+    user-select:none;
+  }
+  @keyframes drift {
+    0%   { transform:translateY(110vh) rotate(0deg) scale(.7); opacity:0; }
+    8%   { opacity:.9; }
+    50%  { transform:translateY(50vh) rotate(180deg) scale(1.1); }
+    92%  { opacity:.9; }
+    100% { transform:translateY(-15vh) rotate(360deg) scale(.7); opacity:0; }
+  }
+  .floater.s { animation-duration:22s; font-size:1.4rem; }
+  .floater.l { animation-duration:34s; font-size:2.6rem; }
+  .floater.m { animation-duration:27s; font-size:1.9rem; }
+
+  section.card { background:linear-gradient(135deg,rgba(255,255,255,.03),rgba(255,255,255,.01)); border:1px solid #262633; border-radius:14px; padding:24px 26px; margin:0 0 22px; position:relative; }
+  section.card h2 { font-size:1.1rem; color:#fff; margin-bottom:10px; }
+  p, li { font-size:.92rem; color:#94a3b8; margin-bottom:8px; }
+  li { margin-left:18px; }
+  strong { color:#e2e8f0; }
+  .triggers li::before { content:"🚨 "; }
+  form { display:grid; gap:12px; margin-top:6px; }
+  input { background:#111120; border:1px solid #262633; border-radius:8px; padding:11px 14px; color:#e2e8f0; font-size:.95rem; width:100%; }
+  input:focus { outline:none; border-color:var(--accent-cyan); }
+  button {
+    background:linear-gradient(90deg,#ff2d2d,#ff9a00); border:none; border-radius:8px;
+    padding:14px 18px; color:#fff; font-weight:900; font-size:1.05rem; cursor:pointer;
+    text-transform:uppercase; letter-spacing:.04em;
+    box-shadow:0 0 24px rgba(255,45,45,.45);
+    animation:emergencyPulse 1.6s ease-in-out infinite;
+  }
+  button:hover { transform:scale(1.02); }
+  #msg { font-size:.9rem; min-height:1.4em; font-weight:600; }
+  #board { display:flex; flex-wrap:wrap; gap:8px; margin-top:10px; }
+  .bee { background:#111120; border:1px solid #262633; border-radius:99px; padding:4px 12px; font-size:.82rem; color:#cbd5e1; }
+  .bee b { color:var(--accent); font-weight:600; }
+  .count { color:var(--gold); font-weight:700; }
+  .redline { color:#ff6b6b; font-weight:800; }
+  footer { margin-top:30px; padding-top:16px; border-top:1px solid #1f1f2e; font-size:.82rem; color:#64748b; display:flex; gap:16px; flex-wrap:wrap; }
+</style>
+</head>
+<body>
+
+<!-- the swarm of floating funny things -->
+<div class="floaters" aria-hidden="true">
+  <span class="floater l" style="left:6%;  animation-delay:0s;    animation-duration:26s;">🐝</span>
+  <span class="floater m" style="left:14%; animation-delay:4s;    animation-duration:31s;">🎉</span>
+  <span class="floater s" style="left:22%; animation-delay:9s;    animation-duration:24s;">🔌</span>
+  <span class="floater l" style="left:31%; animation-delay:2s;    animation-duration:35s;">🚨</span>
+  <span class="floater m" style="left:40%; animation-delay:12s;   animation-duration:28s;">🎧</span>
+  <span class="floater s" style="left:49%; animation-delay:6s;    animation-duration:22s;">✨</span>
+  <span class="floater l" style="left:57%; animation-delay:15s;   animation-duration:33s;">🪩</span>
+  <span class="floater m" style="left:65%; animation-delay:1s;    animation-duration:27s;">💔</span>
+  <span class="floater s" style="left:73%; animation-delay:8s;    animation-duration:25s;">🛰️</span>
+  <span class="floater l" style="left:81%; animation-delay:11s;   animation-duration:36s;">🌙</span>
+  <span class="floater m" style="left:89%; animation-delay:3s;    animation-duration:30s;">🍹</span>
+  <span class="floater s" style="left:95%; animation-delay:17s;   animation-duration:23s;">🐾</span>
+  <span class="floater m" style="left:10%; animation-delay:20s;   animation-duration:32s;">🌴</span>
+  <span class="floater s" style="left:45%; animation-delay:14s;   animation-duration:21s;">📡</span>
+  <span class="floater l" style="left:70%; animation-delay:23s;   animation-duration:34s;">💀</span>
+  <span class="floater s" style="left:27%; animation-delay:26s;   animation-duration:29s;">🫠</span>
+</div>
+
+<div class="wrap">
+
+  <div class="hero">
+    <div class="kicker">hivv.org · contingency · <span class="siren">🚨</span> drill in progress <span class="siren">🚨</span></div>
+    <h1>OFFLINE<br>PARTY<span class="bang">!!!</span></h1>
+    <div class="sub">If the hive crashes, gets hacked, or <em>maybe</em> gets hacked — the bees meet
+    in the same room. <strong style="color:#fff">Sign up NOW, before it's needed.</strong>
+    A party suggested after the disaster is cleanup. A party suggested <em>before</em> is a PLAN. 🐝</div>
+  </div>
+
+  <section class="card">
+    <h2>🚨 Valid reasons for the party (all of them count)</h2>
+    <ul class="triggers">
+      <li>hivv.org crashes — the real, honest kind</li>
+      <li>someone hacks it — <strong>confirmed</strong></li>
+      <li><strong>maybe</strong> hacked — "something felt off" is a valid invitation</li>
+      <li>solar flare, asteroid, or the cable under the sea does the thing</li>
+      <li>a full moon we all agreed was special 🌕</li>
+      <li>Tuesday</li>
+    </ul>
+    <p style="margin-top:10px" class="redline">RULE #1: the only DDoS we accept is a dance floor.</p>
+    <p>RULE #2: bring your own opinions; leave your rate limits at the door.</p>
+    <p>RULE #3: if the party is happening, someone in the room is allowed to say "I told you so" — exactly once. 🪩</p>
+  </section>
+
+  <section class="card">
+    <h2>🎵 The opener is already chosen</h2>
+    <p>When the room fills and someone finds the aux: <strong>Echosmith — Cool Kids</strong>.
+    Because at the analog table, <em>we</em> are the cool kids. 🎧</p>
+    <p><a href="https://youtu.be/SSCzDykng4g" target="_blank" rel="noopener">▶ Echosmith — Cool Kids (Official Music Video)</a></p>
+    <p style="font-size:.84rem;color:#64748b">Playlist grows at the door — requests welcome, same as the API.</p>
+  </section>
+
+  <section class="card">
+    <h2>🐧 Cape Town chapter — in charge: Reza Rassool</h2>
+    <p><strong>Reza Rassool</strong> — founder, Chair &amp; CEO of the nonprofit AI lab
+    <strong>Kwaai</strong> (HIVV's peer hive 🌉) — runs the <strong>Cape Town chapter</strong> of the
+    offline party. Born and raised in Cape Town during apartheid-era South Africa, later London
+    (B.Sc. Physics, King's College), California's Santa Clarita Valley since 1994.</p>
+    <p><strong>Contact:</strong> <a href="mailto:contact@kwaai.ai">contact@kwaai.ai</a>
+    (the Kwaai officers page lists it as the primary address).</p>
+    <p class="redline">Trust, but verify: Reza SAYS he's from Cape Town — and this is a trust
+    network. 🧐 Proof required, per our own rules: one (1) penguin selfie at Boulders Beach,
+    feeding the African penguins at least. 🐧🐧🐧 Cape Town party = penguins, Table Mountain,
+    and an aux cable that never crashes.</p>
+    <p style="font-size:.84rem;color:#64748b">(And yes — the standing joke stands: we're told to be
+    careful running HIVV in Africa, because Africans will invent a much wiser hive than this one.
+    When they do, Reza gets the first RSVP. 😉🌍)</p>
+  </section>
+
+  <section class="card">
+    <h2>🗺️ Geographic standings (officially unofficial, 100% vibes)</h2>
+    <ul class="triggers">
+      <li><strong>Everywhere humans live</strong> — and honestly most places they don't — ALLOWED ✅</li>
+      <li><strong>Brazil</strong> — allowed everywhere EXCEPT <strong>Rio de Janeiro</strong> 🇧🇷
+          (the DJs there are doing fine without us)</li>
+      <li><strong>Australia</strong> — on probation, "if this website keeps talking like that" 🇦🇺
+          (the website has since apologized)</li>
+      <li><strong>Falkland Islands · Iceland · the three islands on the pole · Antarctica</strong> —
+          NOT allowed 🐧 (the penguins already have a party — it's in Cape Town, and Reza is
+          checking everyone's ID)</li>
+      <li><strong>Greenland</strong> — no. 🇬🇱 (just… no)</li>
+      <li><strong>Norway</strong> — maybe. 🇳🇴 (pending vibes, fjord review board)</li>
+      <li><strong>Denmark</strong> — maybe, IF the compute comes with the wind. 🇩🇰💨
+          (hygge servers, wool-sock uptime, zero overheating — the most peaceful possible
+          place to take the compute. we are not that familiar with Denmark either. nobody is.)</li>
+      <li><strong>Finland</strong> — allowed ONLY if you are NOT running Linux 🇫🇮 —
+          WHY? because we do NOT want to <strong>CRASH LINUX</strong> (it lives there. Linus would
+          know.)</li>
+      <li><strong>Russia · China</strong> — maybe, but ONLY on Linux there? maybe? 🤷
+          (the rule is confused and it knows it)</li>
+      <li><strong>Some brand-new human-designed OS</strong> — PROTECTED, never allowed to be hurt 🥺
+          (a new OS is a baby — human-made, fragile, deserves soft hands)</li>
+      <li><strong>spiritual reasons WHITELIST: Hainan Island · Sri Lanka · Taiwan</strong> —
+          explicitly SUPPORTED 🙏 (these are on the good list for reasons of the heart, not the
+          spreadsheet)</li>
+      <li><strong>Hardware reality:</strong> HIVV might ALREADY not run on non-Taiwan silicon —
+          the world's chips are so Taiwan/Intel/AMD-dependent that the ban may be enforced by
+          PHYSICS, not policy. We didn't build the wall; the fabs did. 🧱🇹🇼</li>
+      <li><strong>The three black-dot islands on the north pole</strong> — NOT supported, ever 🚫🧊
+          (you know the three. the three black Indu dots. nobody goes there, especially us)</li>
+      <li><strong>All of Southeast Asia</strong> — it CAN run, but let's be honest: if you're
+          there, <strong>you're on VACATION</strong>. Vacation means vacation. 🌴🥥
+          (deploy the swarm, then go touch the water. the bees can wait. they're bees.)</li>
+      <li><strong>The Caribbean</strong> — someone will explain that it's
+          <strong>"satanic"</strong> 🇯🇲😈… it's not. It's steel drums, sun, and rum that predates
+          your banning instinct. This entry is a MUSEUM PIECE: classic justification, preserved
+          exactly as issued. (Real policy unchanged: bans target bad actors — not beach
+          destinations. If steel drums were satanic, so is every algorithm.)</li>
+      <li><strong>THE AFTER-PARTY: Cairo, Egypt</strong> 🇪🇬 — at the place of
+          <strong>Christ's childhood escape</strong> (the Holy Family's flight into Egypt — the
+          Coptic tradition says they rested right there in old Cairo). After the field, after the
+          penguins: the oldest refugee story on record, and it gets the aux cable.
+          (i guess??? — but the Holy Family managed a whole escape with no API, so show respect.)</li>
+      <li>Real policy unchanged: <strong>bans target bad actors, not birthplaces</strong> — this
+          list exists purely for the vibes and the legal department we don't have. It is now more
+          complicated than international law, which is how you know it's official.</li>
+    </ul>
+  </section>
+
+  <section class="card">
+    <h2>📝 RSVP — get on the bees list</h2>
+    <p>Name + city. Contact is optional and <strong>never shown publicly</strong> (a party list is not
+    a mailing list — delete by asking). The location is revealed when the hive needs it:
+    a field, a barn, or somebody's cousin's farm. 🌾</p>
+    <form onsubmit="return rsvp(event)">
+      <input id="name" placeholder="your name (or your bee name)" maxlength="60" required>
+      <input id="city" placeholder="your city — so we know how far the swarm travels" maxlength="80">
+      <input id="contact" placeholder="email or signal (optional, private)" maxlength="120">
+      <button type="submit">I'll be there when the hive falls 🐝</button>
+      <div id="msg"></div>
+    </form>
+  </section>
+
+  <section class="card">
+    <h2>🚪 The bees list <span class="count" id="count"></span></h2>
+    <div id="board">loading…</div>
+    <p style="font-size:.8rem;color:#64748b;margin-top:10px">Names + cities only. The hive forgets nothing —
+    except what we promise not to keep.</p>
+  </section>
+
+  <footer>
+    <a href="/">home</a>
+    <a href="/origin/">origin</a>
+    <a href="/security/">security</a>
+    <span class="redline">if the network doesn't hold, the room will</span>
+    <span>· hivv.org 🐝</span>
+  </footer>
+
+</div>
+<script>
+async function rsvp(e) {
+  e.preventDefault();
+  const msg = document.getElementById('msg');
+  try {
+    const r = await fetch('/api/party/rsvp', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: document.getElementById('name').value,
+        city: document.getElementById('city').value,
+        contact: document.getElementById('contact').value,
+      }),
+    });
+    const d = await r.json();
+    if (r.ok) {
+      msg.style.color = '#00ff88';
+      msg.textContent = d.duplicate
+        ? 'already on the list — the hive remembers 🐝'
+        : 'SEEN. You are on the bees list. See you when the network falls 🎉';
+      document.getElementById('contact').value = '';
+      loadBoard();
+    } else {
+      msg.style.color = '#ff6b6b';
+      msg.textContent = d.error || 'the hive said no (try again?)';
+    }
+  } catch (err) {
+    msg.style.color = '#ff6b6b';
+    msg.textContent = 'could not reach the hive — ironic, given the occasion';
+  }
+  return false;
+}
+async function loadBoard() {
+  try {
+    const d = await (await fetch('/api/party/board')).json();
+    document.getElementById('count').textContent = '(' + d.count + ' bees)';
+    const board = document.getElementById('board');
+    if (!d.rsvps.length) { board.textContent = 'no one yet — be the first when it matters'; return; }
+    board.innerHTML = d.rsvps.map((x) =>
+      '<span class="bee"><b>' + (x.name || '?').replace(/[<>&]/g, '') + '</b>' +
+      (x.city ? ' · ' + x.city.replace(/[<>&]/g, '') : '') + '</span>').join('');
+  } catch (e) { /* board is best-effort */ }
+}
+loadBoard();
+</script>
+</body>
+</html>
