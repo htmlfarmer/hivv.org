@@ -12,8 +12,7 @@ right thing in three scenarios:
 Plus a smoke test for the `--healthcheck` flag and `_parse_ver`.
 
 Run:  python3 tests/test_update_rollback.py
-       (from inside hivv.org/public_html/)
-       or  python3 /var/www/vhosts/hivv.org/public_html/tests/test_update_rollback.py
+       (from inside the repo's public_html/ — wherever it is cloned)
 
 Stdlib only — no pytest. Exit 0 = all pass, exit 1 = any failure.
 """

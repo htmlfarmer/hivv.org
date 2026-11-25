@@ -6,8 +6,7 @@ Verifies that `_llm_pick_model(specs)` returns the right tier and primary
 recommendation for representative hardware profiles.
 
 Run:  python3 tests/test_llm_tiers.py
-       (from inside hivv.org/public_html/)
-       or  python3 /var/www/vhosts/hivv.org/public_html/tests/test_llm_tiers.py
+       (from inside the repo's public_html/ — wherever it is cloned)
 
 Stdlib only — no pytest. Exit 0 = all pass, exit 1 = any failure.
 """

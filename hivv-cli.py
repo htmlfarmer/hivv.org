@@ -37,6 +37,7 @@ Per-subcommand --help also works.
 from __future__ import annotations
 
 import argparse
+import base64
 from datetime import datetime
 import getpass
 import hashlib
@@ -178,6 +179,26 @@ def _fallback_tool_schemas() -> list:
 
 
 TOOL_SCHEMAS = _fallback_tool_schemas()
+
+# ── WHOSE home? (root vs regular-user installs) ──────────────────────────
+# `sudo hivv install llm` must install for the user who TYPED the command.
+# Building into /root/llama.cpp — and advising /root/.bashrc — leaves the
+# logged-in user with a model they cannot see, run, or stop. A real root
+# login (no SUDO_USER) keeps /root, which is correct for it. Every llama.cpp
+# path below derives from this one resolution.
+def _llm_target_home() -> tuple[str, str | None]:
+    """(home_dir, owner_user) for llama.cpp, models and PATH advice."""
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        su = (os.environ.get("SUDO_USER") or "").strip()
+        if su and su != "root":
+            try:
+                import pwd
+                return pwd.getpwnam(su).pw_dir, su
+            except Exception:
+                pass
+    return os.path.expanduser("~"), None
+
+_LLM_HOME, _LLM_HOME_OWNER = _llm_target_home()
 
 # XDG-ish paths (with fallback to ~/.hivv for legacy)
 CONFIG_DIR    = Path(os.environ.get("HIVV_CONFIG_DIR")  or (Path.home() / ".config" / APP))
@@ -765,6 +786,545 @@ def _support_token(token: str | None) -> str:
     return "ok"
 
 
+# ── Ed25519 bee identity (Phase 1) ─────────────────────────────────────
+# Every bee MAY hold an Ed25519 keypair; the hub binds node_id -> public key
+# (api/lib/identity.js). The private key NEVER leaves STATE_DIR/identity/.
+#
+# DUAL-MODE: identity blocks are additive — when key material is unavailable
+# (no backend, unwritable state dir) the agent keeps working exactly as
+# before. When present, the hub verifies the signature; a mismatch makes the
+# agent rebind automatically using its legacy proof (node secret + hw_id).
+IDENTITY_DIR = STATE_DIR / "identity"
+IDENTITY_KEY = IDENTITY_DIR / "ed25519.key"   # PKCS8 PEM, 0600
+IDENTITY_PUB = IDENTITY_DIR / "ed25519.pub"   # base64 raw 32 bytes
+# The OPERATOR's own key (a person/org) — distinct from any bee key, so one
+# operator can endorse many nodes and no bee can forge an endorsement.
+OPERATOR_KEY = IDENTITY_DIR / "operator.key"  # PKCS8 PEM, 0600
+OPERATOR_PUB = IDENTITY_DIR / "operator.pub"
+
+
+def _canonical_json(v) -> str:
+    """Mirror of api/lib/attest.js canonicalize — BYTE PARITY IS THE SIGNING
+    CONTRACT (a signature made here must verify on the hub and vice versa).
+
+    Rules: object keys sorted by UTF-8 BYTES (not code points), no
+    insignificant whitespace, integers only, standard JSON escaping.
+    Pinned both directions by tests/test_identity_cli.py.
+    """
+    if v is None:
+        return "null"
+    if v is True:
+        return "true"
+    if v is False:
+        return "false"
+    if isinstance(v, int):          # bool handled above (bool is an int)
+        if not (-(2**53 - 1) <= v <= 2**53 - 1):
+            raise ValueError(f"canonical JSON integer out of range: {v}")
+        return str(v)
+    if isinstance(v, float):
+        # JS JSON.parse(1.0) === 1 — render integral floats identically.
+        if v.is_integer() and abs(v) < 2**53:
+            return str(int(v))
+        raise ValueError(f"canonical JSON allows integers only, got {v}")
+    if isinstance(v, str):
+        return json.dumps(v, ensure_ascii=False)
+    if isinstance(v, (list, tuple)):
+        return "[" + ",".join(_canonical_json(x) for x in v) + "]"
+    if isinstance(v, dict):
+        # null is KEPT (JS canonicalize only drops undefined, which JSON
+        # cannot express) — builders simply never emit null fields.
+        keys = sorted(v.keys(), key=lambda k: str(k).encode("utf-8"))
+        return "{" + ",".join(
+            json.dumps(str(k), ensure_ascii=False) + ":" + _canonical_json(v[k])
+            for k in keys) + "}"
+    raise ValueError(f"canonical JSON cannot serialize type {type(v).__name__}")
+
+
+def _principal_from_pub(pub_b64: str) -> str:
+    """Self-certifying id: hivv_ + sha256(raw_pub)[:32] — the same namespace
+    the hub's attestation issuers use (attest.principalIdFromRaw)."""
+    raw = base64.b64decode(pub_b64)
+    if len(raw) != 32:
+        raise ValueError("ed25519 public key must be 32 bytes")
+    return "hivv_" + hashlib.sha256(raw).hexdigest()[:32]
+
+
+def _identity_generate() -> tuple:
+    """(priv_pem, raw_pub_32). Primary: the cryptography package (already
+    installed on the fleet). Fallback: the openssl CLI (Ed25519 since 1.1.1,
+    sign via pkeyutl -rawin). Both emit standard keys the hub verifies."""
+    try:
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric import ed25519
+        key = ed25519.Ed25519PrivateKey.generate()
+        priv_pem = key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption())
+        raw = key.public_key().public_bytes(
+            serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+        return priv_pem, raw
+    except ImportError:
+        pass
+    import subprocess
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        key_path = os.path.join(td, "k.pem")
+        subprocess.run(["openssl", "genpkey", "-algorithm", "Ed25519",
+                        "-out", key_path],
+                       check=True, capture_output=True, timeout=30)
+        with open(key_path, "rb") as fh:
+            priv_pem = fh.read()
+        der = subprocess.run(
+            ["openssl", "pkey", "-in", key_path, "-pubout", "-outform", "DER"],
+            check=True, capture_output=True, timeout=30).stdout
+        if len(der) != 44:   # 12-byte SPKI prefix + 32 raw bytes
+            raise RuntimeError(f"unexpected SPKI DER length {len(der)}")
+        return priv_pem, der[-32:]
+
+
+def _identity_sign(priv_pem: bytes, msg: bytes) -> str:
+    """Ed25519 sign canonical bytes -> base64. openssl fallback signs the raw
+    message (-rawin) — never a digest, never shell-interpolated."""
+    try:
+        from cryptography.hazmat.primitives import serialization
+        key = serialization.load_pem_private_key(priv_pem, password=None)
+        return base64.b64encode(key.sign(msg)).decode()
+    except ImportError:
+        pass
+    import subprocess
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        key_path = os.path.join(td, "k.pem")
+        msg_path = os.path.join(td, "m.bin")
+        sig_path = os.path.join(td, "s.bin")
+        with open(key_path, "wb") as fh:
+            fh.write(priv_pem)
+        with open(msg_path, "wb") as fh:
+            fh.write(msg)
+        os.chmod(key_path, 0o600)
+        subprocess.run(["openssl", "pkeyutl", "-sign", "-inkey", key_path,
+                        "-rawin", "-in", msg_path, "-out", sig_path],
+                       check=True, capture_output=True, timeout=30)
+        with open(sig_path, "rb") as fh:
+            return base64.b64encode(fh.read()).decode()
+
+
+def _identity_ensure():
+    """Load (or create) this bee's keypair. Returns
+    {"priv": PEM bytes, "pub": b64, "principal": hivv_...} or None when key
+    material cannot be obtained — callers treat identity as OPTIONAL."""
+    try:
+        IDENTITY_DIR.mkdir(parents=True, exist_ok=True)
+        try:
+            os.chmod(str(IDENTITY_DIR), 0o700)
+        except OSError:
+            pass
+        priv = pub = None
+        if IDENTITY_KEY.exists() and IDENTITY_PUB.exists():
+            try:
+                cand = IDENTITY_KEY.read_bytes()
+                cand_pub = IDENTITY_PUB.read_text().strip()
+                if cand.startswith(b"-----BEGIN") and \
+                        len(base64.b64decode(cand_pub)) == 32:
+                    priv, pub = cand, cand_pub
+            except Exception:
+                priv = pub = None      # corrupt -> regenerate below
+        if priv is None:
+            priv, raw = _identity_generate()
+            pub = base64.b64encode(raw).decode()
+            _identity_write(priv, pub)
+        return {"priv": priv, "pub": pub,
+                "principal": _principal_from_pub(pub)}
+    except Exception:
+        return None
+
+
+def _identity_write(priv_pem: bytes, pub_b64: str) -> None:
+    """Atomically replace the local keypair — private half 0600, written
+    before any hub interaction so a failed rotation still converges (the
+    heartbeat mismatch path rebinds with legacy proof)."""
+    IDENTITY_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = IDENTITY_KEY.with_name(IDENTITY_KEY.name + ".tmp")
+    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, priv_pem)
+    finally:
+        os.close(fd)
+    os.replace(str(tmp), str(IDENTITY_KEY))
+    IDENTITY_PUB.write_text(pub_b64 + "\n")
+
+
+def _operator_ensure():
+    """The OPERATOR keypair (Phase 4): used for endorsements, never for a
+    bee's own statements. Returns {"priv","pub","principal"} or None."""
+    try:
+        IDENTITY_DIR.mkdir(parents=True, exist_ok=True)
+        priv = pub = None
+        if OPERATOR_KEY.exists() and OPERATOR_PUB.exists():
+            try:
+                cand = OPERATOR_KEY.read_bytes()
+                cand_pub = OPERATOR_PUB.read_text().strip()
+                if cand.startswith(b"-----BEGIN") and \
+                        len(base64.b64decode(cand_pub)) == 32:
+                    priv, pub = cand, cand_pub
+            except Exception:
+                priv = pub = None
+        if priv is None:
+            priv, raw = _identity_generate()
+            pub = base64.b64encode(raw).decode()
+            tmp = OPERATOR_KEY.with_name(OPERATOR_KEY.name + ".tmp")
+            fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            try:
+                os.write(fd, priv)
+            finally:
+                os.close(fd)
+            os.replace(str(tmp), str(OPERATOR_KEY))
+            OPERATOR_PUB.write_text(pub + "\n")
+        return {"priv": priv, "pub": pub, "principal": _principal_from_pub(pub)}
+    except Exception:
+        return None
+
+
+def _identity_envelope(kind: str, node_id: str, extra: dict | None = None):
+    """Build + sign an identity block for a register/heartbeat body:
+    {"algorithm", "public_key", "statement", "signature"} where the
+    signature covers _canonical_json(statement). Returns None whenever
+    identity is unavailable — identity is ADDITIVE, it must never break
+    the agent."""
+    try:
+        if not node_id:
+            return None
+        ident = _identity_ensure()
+        if not ident:
+            return None
+        statement = {"v": 1, "kind": kind, "node_id": str(node_id),
+                     "ts": int(time.time()), "nonce": secrets.token_hex(8)}
+        if extra:
+            for k, v in extra.items():
+                if v is not None:
+                    statement[k] = v
+        canon = _canonical_json(statement).encode("utf-8")
+        sig = _identity_sign(ident["priv"], canon)
+        return {"algorithm": "ed25519", "public_key": ident["pub"],
+                "statement": statement, "signature": sig}
+    except Exception:
+        return None
+
+
+def _identity_manifest(node_id: str, *, seq: int, tools, tools_port,
+                       local_models, capabilities, volunteer):
+    """Signed capability manifest (Phase 2): the bee vouches for its own
+    advertisement with its BOUND key. seq is monotonic (state cap_seq) so
+    the hub refuses replay/reorder. ADDITIVE: None when unavailable — the
+    agent must keep working without it."""
+    try:
+        if not node_id:
+            return None
+        ident = _identity_ensure()
+        if not ident:
+            return None
+        statement = {
+            "v": 1, "kind": "capability.manifest", "node_id": str(node_id),
+            "ts": int(time.time()), "nonce": secrets.token_hex(8),
+            "seq": int(seq),
+            "tools": [str(t) for t in (tools or [])][:64],
+            "tools_port": int(tools_port or 0),
+            "local_models": list(local_models or [])[:64],
+            "capabilities": [str(c) for c in (capabilities or [])][:64],
+            "volunteer": bool(volunteer),
+        }
+        canon = _canonical_json(statement).encode("utf-8")
+        sig = _identity_sign(ident["priv"], canon)
+        return {"algorithm": "ed25519", "public_key": ident["pub"],
+                "statement": statement, "signature": sig}
+    except Exception:
+        return None
+
+
+def _identity_receipt(node_id: str, report: dict):
+    """Signed execution receipt (Phase 3): the bee's own testimony that it
+    executed <op> with result <ok>. output_sha256 binds the receipt to the
+    EXACT report content (canonical JSON, receipt excluded), so the hub can
+    detect a report edited after signing. ADDITIVE: None when unavailable."""
+    try:
+        if not node_id or not isinstance(report, dict):
+            return None
+        ident = _identity_ensure()
+        if not ident:
+            return None
+        core = {k: v for k, v in report.items()
+                if k != "receipt" and v is not None}
+        output_sha = hashlib.sha256(
+            _canonical_json(core).encode("utf-8")).hexdigest()
+        statement = {
+            "v": 1, "kind": "execution.receipt", "node_id": str(node_id),
+            "ts": int(time.time()), "nonce": secrets.token_hex(8),
+            "receipt_id": secrets.token_hex(16),
+            "op": str(report.get("op") or "repair")[:100],
+            "result": "ok" if report.get("ok") else "failed",
+            "output_sha256": output_sha,
+        }
+        if report.get("plan_id"):
+            statement["job_id"] = str(report.get("plan_id"))[:64]
+        canon = _canonical_json(statement).encode("utf-8")
+        sig = _identity_sign(ident["priv"], canon)
+        return {"algorithm": "ed25519", "public_key": ident["pub"],
+                "statement": statement, "signature": sig}
+    except Exception:
+        return None
+
+
+def cmd_identity(args) -> None:
+    """status (default): local key + hub binding · keygen: rotate local key."""
+    action = getattr(args, "action", None) or "status"
+    json_out = bool(getattr(args, "json_output", False))
+
+    if action in ("rotate", "keygen"):
+        # Rotation (Phase 2): the CURRENT key signs a statement naming its
+        # successor — the hub accepts it with NO legacy proof (holding the
+        # current key IS the proof). The new key is written BEFORE the hub
+        # call so a failed rotation still converges: the next heartbeat
+        # mismatches and the agent rebinds with legacy proof (secret+hw_id).
+        old = None
+        try:
+            if IDENTITY_KEY.exists():
+                old = _identity_ensure()
+        except Exception:
+            old = None
+        try:
+            new_priv, new_raw = _identity_generate()
+        except Exception as e:
+            die(f"could not create a new keypair (openssl missing? state dir unwritable?): {e}")
+        new_pub = base64.b64encode(new_raw).decode()
+        new_principal = _principal_from_pub(new_pub)
+
+        st = read_state() or {}
+        node_id = st.get("node_id")
+        rotation = None
+        if old and node_id:
+            rstmt = {"v": 1, "kind": "identity.rotate", "node_id": str(node_id),
+                     "ts": int(time.time()), "nonce": secrets.token_hex(8),
+                     "new_public_key": new_pub}
+            try:
+                rsig = _identity_sign(old["priv"], _canonical_json(rstmt).encode("utf-8"))
+                rotation = {"algorithm": "ed25519", "public_key": old["pub"],
+                            "statement": rstmt, "signature": rsig}
+            except Exception:
+                rotation = None
+
+        _identity_write(new_priv, new_pub)
+        print(f"  new key: {new_principal}  ({IDENTITY_KEY})")
+        if old and old.get("principal") != new_principal:
+            print(f"  old key: {old['principal']} -> superseded")
+
+        if rotation and node_id:
+            code, payload = http("POST", "/api/identity/rotate",
+                                 body={"node_id": node_id, "rotation": rotation})
+            if code == 200 and isinstance(payload, dict) and payload.get("ok"):
+                print(f"  hub    : rotated ✓ — bound to {node_id} with NO legacy proof")
+                return
+            print(f"  hub    : rotate refused (http {code}: {str(payload)[:140]})")
+            print("  fallback: the agent rebinds on the next heartbeat")
+            print("           (mismatch -> legacy proof: node secret + hw_id)")
+            return
+        if node_id:
+            print("  hub    : binds on the next heartbeat (legacy proof if the key differs)")
+        else:
+            print("  hub    : no node_id yet — binds on first register")
+        return
+
+    if action == "revoke":
+        # Phase 4: put THIS key on the public CRL — signed by the key itself
+        # (holding it is the proof), then mint a fresh key so the agent can
+        # rebind with legacy proof on the next heartbeat.
+        reason = (getattr(args, "reason", None) or "").strip()
+        if not reason:
+            die('hivv identity revoke --reason "..." — say WHY (it goes on the public CRL)')
+        st = read_state() or {}
+        node_id = st.get("node_id")
+        ident = _identity_ensure()
+        if not ident:
+            die("no local key to revoke")
+        if not node_id:
+            die("no node_id — a CRL entry needs a binding to revoke against")
+        rstmt = {"v": 1, "kind": "identity.revoke", "node_id": str(node_id),
+                 "ts": int(time.time()), "nonce": secrets.token_hex(8),
+                 "principal": ident["principal"], "reason": reason[:200]}
+        try:
+            rsig = _identity_sign(ident["priv"], _canonical_json(rstmt).encode("utf-8"))
+        except Exception as e:
+            die(f"could not sign the revocation: {e}")
+        rev = {"algorithm": "ed25519", "public_key": ident["pub"],
+               "statement": rstmt, "signature": rsig}
+        code, payload = http("POST", "/api/identity/revoke",
+                             body={"node_id": node_id, "revocation": rev})
+        if code != 200 or not (isinstance(payload, dict) and payload.get("ok")):
+            die(f"revocation refused (http {code}: {str(payload)[:200]})")
+        print(f"  REVOKED : {ident['principal']}")
+        print(f"  reason  : {reason[:200]}")
+        print("  the old key can never authenticate again (public CRL)")
+        try:
+            _np, _nr = _identity_generate()
+            _new_pub = base64.b64encode(_nr).decode()
+            _identity_write(_np, _new_pub)
+            print(f"  fresh   : {_principal_from_pub(_new_pub)}")
+            print("  the agent rebinds with legacy proof on the next heartbeat")
+        except Exception as e:
+            print(f"  WARN    : fresh-key mint failed ({e}) — run: {APP} identity rotate")
+        return
+
+    if action == "operator":
+        op = _operator_ensure()
+        if not op:
+            die("could not create an operator key (openssl missing? state dir unwritable?)")
+        if json_out:
+            print(json.dumps({"operator_principal": op["principal"],
+                              "key_file": str(OPERATOR_KEY)}, indent=2))
+            return
+        print(f"  operator principal : {op['principal']}")
+        print(f"  key file           : {OPERATOR_KEY} (0600)")
+        print("  endorsements are signed with THIS key — never with a bee key")
+        return
+
+    if action == "endorse":
+        target = getattr(args, "target", None)
+        if not target:
+            die(f"usage: {APP} identity endorse <node_id> [--role owner]")
+        role = (getattr(args, "role", None) or "owner")[:32]
+        op = _operator_ensure()
+        if not op:
+            die("could not create an operator key (openssl missing? state dir unwritable?)")
+        st = read_state() or {}
+        estmt = {"v": 1, "kind": "operator.endorse",
+                 "ts": int(time.time()), "nonce": secrets.token_hex(8),
+                 "operator_principal": op["principal"],
+                 "node_id": str(target), "role": role}
+        # endorsing OURSELVES: include our node principal for the hub's
+        # binding cross-check (it must match the hub's record)
+        if str(st.get("node_id")) == str(target):
+            _mine = _identity_ensure()
+            if _mine:
+                estmt["node_principal"] = _mine["principal"]
+        try:
+            esig = _identity_sign(op["priv"], _canonical_json(estmt).encode("utf-8"))
+        except Exception as e:
+            die(f"could not sign the endorsement: {e}")
+        env = {"algorithm": "ed25519", "public_key": op["pub"],
+               "statement": estmt, "signature": esig}
+        code, payload = http("POST", "/api/identity/endorse",
+                             body={"endorsement": env})
+        if code != 200 or not (isinstance(payload, dict) and payload.get("ok")):
+            die(f"endorsement refused (http {code}: {str(payload)[:200]})")
+        print(f"  endorsed {target} as {role}")
+        print(f"  operator {op['principal']}")
+        print(f"  view: {HUB}/api/identity/endorsements?node_id={target}")
+        return
+
+    if action == "receipts":
+        # Phase 3: this bee's signed execution receipts, as the hub verifies
+        # them (every row was checked against this node's bound key).
+        st = read_state() or {}
+        node_id = st.get("node_id")
+        if not node_id:
+            die("no node_id yet — receipts appear after this bee registers")
+        limit = max(1, min(64, int(getattr(args, "limit", 20) or 20)))
+        try:
+            code, payload = http("GET", f"/api/identity/receipts/{node_id}?limit={limit}")
+        except Exception as e:
+            die(f"hub unreachable: {str(e)[:120]}")
+        if code != 200 or not isinstance(payload, dict):
+            die(f"hub returned http {code}: {str(payload)[:160]}")
+        receipts = payload.get("receipts") or []
+        if json_out:
+            print(json.dumps(payload, indent=2))
+            return
+        print(f"\033[1mexecution receipts\033[0m — {node_id} ({len(receipts)} shown)")
+        print()
+        if not receipts:
+            print("  none yet — receipts ride repair/selftest outcomes")
+            return
+        for r in receipts:
+            when = time.strftime("%m-%d %H:%M", time.localtime(r.get("ts") or 0))
+            mark = ("\033[32mok\033[0m" if r.get("result") == "ok"
+                    else "\033[31mfailed\033[0m")
+            rid = (r.get("receipt_id") or "")[:12]
+            print(f"  {when}  {str(r.get('op', '?')):<16} {mark}  {rid}…")
+        return
+
+    ident = _identity_ensure()
+    st = read_state() or {}
+    node_id = st.get("node_id")
+    hub = None
+    hub_err = None
+    if node_id:
+        try:
+            code, payload = http("GET", f"/api/identity/{node_id}")
+            if code == 200 and isinstance(payload, dict):
+                hub = payload
+            elif code == 404:
+                hub = {"status": "unbound"}
+            else:
+                hub_err = f"http {code}"
+        except Exception as e:
+            hub_err = str(e)[:80]
+
+    # local self-test: Ed25519 is deterministic, so signing the same probe
+    # twice must yield the identical signature (works with AND without the
+    # cryptography package — the openssl fallback signs deterministically too)
+    selftest = "skipped (no key)"
+    if ident:
+        try:
+            probe = _canonical_json({"probe": 1, "ts": 0}).encode()
+            a = _identity_sign(ident["priv"], probe)
+            b = _identity_sign(ident["priv"], probe)
+            selftest = "deterministic sign OK" if a == b else "SIGN UNSTABLE"
+        except Exception as e:
+            selftest = f"failed: {str(e)[:60]}"
+
+    out = {
+        "algorithm": "ed25519",
+        "principal": ident["principal"] if ident else None,
+        "key_file": str(IDENTITY_KEY),
+        "key_exists": IDENTITY_KEY.exists(),
+        "node_id": node_id,
+        "selftest": selftest,
+        "hub": hub,
+        "hub_error": hub_err,
+    }
+    if json_out:
+        print(json.dumps(out, indent=2))
+        return
+
+    print("\033[1mhivv identity\033[0m — this bee's Ed25519 key")
+    print()
+    if not ident:
+        print("  local key     : UNAVAILABLE (no openssl/cryptography, or unwritable state)")
+        print("                  the agent keeps working — identity is additive")
+    else:
+        print(f"  principal     : \033[32m{ident['principal']}\033[0m")
+        print(f"  key file      : {IDENTITY_KEY} (0600, private key never leaves this box)")
+        print(f"  self-test     : {selftest}")
+    print(f"  node_id       : {node_id or '(not registered yet)'}")
+    if hub_err:
+        print(f"  hub binding   : unreachable ({hub_err})")
+    elif hub is None:
+        print("  hub binding   : (no node_id — binds on first register)")
+    elif hub.get("status") == "unbound":
+        print("  hub binding   : unbound — binds on the next heartbeat")
+    elif hub.get("status") == "mismatch":
+        print("  hub binding   : \033[33mMISMATCH\033[0m — hub holds a different key;")
+        print("                  the agent rebinds automatically (legacy proof)")
+    elif hub.get("principal") and ident and hub["principal"] != ident["principal"]:
+        print(f"  hub binding   : \033[33mDIFFERENT\033[0m — hub: {hub['principal']}")
+    else:
+        since = hub.get("bound_at")
+        when = time.strftime("%Y-%m-%d", time.localtime(since)) if since else "?"
+        print(f"  hub binding   : \033[32mbound ✓\033[0m (since {when}, via {hub.get('bound_via', '?')})")
+        if hub.get("last_fail"):
+            print(f"  last failure  : {hub['last_fail'].get('reason', '')[:80]}")
+
+
 # ── HTTP helper ────────────────────────────────────────────────────────
 def _auth_rejected() -> bool:
     """Has this hub already told us it doesn't want Authorization headers?
@@ -785,7 +1345,8 @@ def _mark_auth_rejected(v: bool = True) -> None:
 
 def http(method: str, path: str, *, body=None, token: str | None = None,
          timeout: float = 15.0, sign: bool = True,
-         base_url: str | None = None) -> tuple[int, dict | str]:
+         base_url: str | None = None,
+         with_headers: bool = False) -> tuple[int, dict | str] | tuple[int, dict | str, dict]:
     """Make an authenticated, signed request to the hub.
 
     Auto-degrades:
@@ -843,17 +1404,24 @@ def http(method: str, path: str, *, body=None, token: str | None = None,
         headers["authorization"] = f"Bearer {token}"
         headers.update(_signed_headers(method, path, data, token))
 
+    # Response headers, captured for callers that ask (with_headers=True) —
+    # the eval harness reads X-Hivv-Answered-By / X-Hivv-Policy receipts.
+    _hdrs: dict = {}
+
     def _do() -> tuple[int, dict | str]:
+        _hdrs.clear()
         req = urllib.request.Request(url, data=data, method=method, headers=headers)
         try:
             with urllib.request.urlopen(req, timeout=timeout) as r:
                 raw = r.read().decode("utf-8", errors="replace")
+                _hdrs.update(dict(r.headers))
                 try:
                     return r.status, json.loads(raw)
                 except json.JSONDecodeError:
                     return r.status, raw
         except urllib.error.HTTPError as e:
             raw = e.read().decode("utf-8", errors="replace") if e.fp else ""
+            _hdrs.update(dict(e.headers or {}))
             try:
                 return e.code, json.loads(raw)
             except json.JSONDecodeError:
@@ -870,8 +1438,10 @@ def http(method: str, path: str, *, body=None, token: str | None = None,
         for h in ("X-Auth-Timestamp", "X-Auth-Nonce", "X-Auth-Signature"):
             headers.pop(h, None)
         log("hub rejected Authorization headers — falling back to legacy mode")
-        return _do()
+        code, payload = _do()
 
+    if with_headers:
+        return code, payload, dict(_hdrs)
     return code, payload
 
 
@@ -3657,7 +4227,7 @@ WantedBy=default.target
     if system == "Linux":
         _ul = Path.home() / ".config" / "systemd" / "user"
         for _up in (_ul / "hivv-agent.service", _ul / "llama.service",
-                    _ul / "llama-server.service",
+                    _ul / "llama-server.service", _ul / "hivv-dial.service",
                     Path("/etc/systemd/system/hivv-agent.service"),
                     Path("/etc/systemd/system/llama.service"),
                     Path("/etc/systemd/system/llama-server.service")):
@@ -3902,12 +4472,27 @@ def cmd_agent(stop_event) -> None:
         print(f"[{time.strftime('%H:%M:%S')}] resuming as {_known_node_id} "
               f"(no re-register needed)", file=log_path)
     else:
-        code, payload = http("POST", "/api/nodes/register", body=body)
+        # Attach a FRESH signed identity block (nonce+ts are per-attempt —
+        # a stale envelope from an earlier try would be a replay).
+        reg_body = body
+        _ident_extra = {"client": f"{APP}/{VERSION}"}
+        if hw_id:
+            _ident_extra["hw_id_sha256"] = hashlib.sha256(hw_id.encode()).hexdigest()
+        _ident_reg = _identity_envelope("node.register", stable_id, _ident_extra)
+        if _ident_reg:
+            reg_body = dict(body)
+            reg_body["identity"] = _ident_reg
+        code, payload = http("POST", "/api/nodes/register", body=reg_body)
         st = read_state()
         if code == 200 and isinstance(payload, dict):
             nid = payload.get("node_id") or stable_id
             st["node_id"] = nid
             st["hw_id"] = hw_id
+            _idb = payload.get("identity")
+            if isinstance(_idb, dict):
+                st["identity_status"] = _idb.get("status")
+                if _idb.get("principal"):
+                    st["identity_principal"] = _idb["principal"]
             # Adopt the (possibly RE-ISSUED) inbox secret here too — this is
             # the path a freshly restarted agent takes, and without it a bee
             # that lost its secret receives the hub's recovery issuance and
@@ -3952,7 +4537,10 @@ def cmd_agent(stop_event) -> None:
             "local_cost": st.get("local_cost") or 0.0,
         }
         write_state(st)
-        if node_id:
+        # An armed identity REBIND skips the heartbeat for one cycle and
+        # re-registers instead (legacy proof rotates the key hub-side).
+        force_rebind = bool(st.get("_identity_rebind"))
+        if node_id and not force_rebind:
             try:
                 _vol_on = bool(_volunteer_load().get("share_cpu"))
             except Exception:
@@ -3961,8 +4549,7 @@ def cmd_agent(stop_event) -> None:
                 _tools_hb = _shared_tools()
             except Exception:
                 _tools_hb = []
-            code, payload = http("POST", f"/api/nodes/{node_id}/heartbeat",
-                                 body={"hostname": hostname, "version": VERSION,
+            hb_body = {"hostname": hostname, "version": VERSION,
                                        "ts": int(time.time()),
                                        "capabilities": capabilities,
                                        "metrics": _collect_metrics(),
@@ -3980,13 +4567,64 @@ def cmd_agent(stop_event) -> None:
                                                       "tokens_processed": st.get("tokens_processed") or 0},
                                        "stats": stats_delta,
                                        # piggyback the last repair outcome; hub logs it as [REPAIR]
-                                       "repair_report": st.get("repair_report") or None})
+                                       "repair_report": st.get("repair_report") or None}
+            # Fresh signed identity block — additive: the agent works fine
+            # when key material is unavailable (envelope returns None).
+            _ident_hb = _identity_envelope("node.heartbeat", node_id)
+            if _ident_hb:
+                hb_body["identity"] = _ident_hb
+            # Signed capability manifest (Phase 2): seq bumps every heartbeat
+            # and is state-persisted so it stays monotonic across restarts
+            # (the hub accepts only seq > last — gaps are fine).
+            st["cap_seq"] = int(st.get("cap_seq") or 0) + 1
+            _mf = _identity_manifest(node_id, seq=st["cap_seq"],
+                                     tools=_tools_hb,
+                                     tools_port=TOOLS_PORT if _tools_hb else 0,
+                                     local_models=hb_body.get("local_models"),
+                                     capabilities=capabilities, volunteer=_vol_on)
+            if _mf:
+                hb_body["capability_manifest"] = _mf
+                write_state(st)
+            # Signed execution receipt (Phase 3): a repair outcome rides out
+            # as the bee's own signed testimony, bound to the exact report.
+            _rr = hb_body.get("repair_report")
+            if isinstance(_rr, dict):
+                _rcpt = _identity_receipt(node_id, _rr)
+                if _rcpt:
+                    _rr = dict(_rr)
+                    _rr["receipt"] = _rcpt
+                    hb_body["repair_report"] = _rr
+            code, payload = http("POST", f"/api/nodes/{node_id}/heartbeat",
+                                 body=hb_body)
         else:
-            code, payload = http("POST", "/api/nodes/register", body=body)
+            # Re-register path: state wiped (claim stable_id), or a bounded
+            # identity REBIND (node_id known — claim IT, rotate the key with
+            # legacy proof: node secret + hw_id, same anchor as key recovery).
+            _claim_id = node_id or stable_id
+            reg_body = dict(body)
+            if node_id and node_id != stable_id:
+                reg_body["id"] = node_id
+                reg_body["token"] = node_id
+            _ident_extra = {"client": f"{APP}/{VERSION}"}
+            if hw_id:
+                _ident_extra["hw_id_sha256"] = hashlib.sha256(hw_id.encode()).hexdigest()
+            _ident_reg = _identity_envelope("node.register", _claim_id, _ident_extra)
+            if _ident_reg:
+                reg_body["identity"] = _ident_reg
+            code, payload = http("POST", "/api/nodes/register", body=reg_body)
             if code == 200 and isinstance(payload, dict):
                 body["metrics"] = _collect_metrics()
                 st = read_state() or {}
                 st["node_id"] = payload.get("node_id") or stable_id
+                st.pop("_identity_rebind", None)
+                st.pop("_identity_rebind_tries", None)
+                write_state(st)
+            elif force_rebind:
+                tries = int(st.get("_identity_rebind_tries") or 0) + 1
+                st["_identity_rebind_tries"] = tries
+                if tries >= 3:
+                    st.pop("_identity_rebind", None)
+                    print(f"[{time.strftime('%H:%M:%S')}] identity rebind gave up after {tries} tries (stays advisory)", file=log_path)
                 write_state(st)
 
         st = read_state() or {}
@@ -4004,6 +4642,31 @@ def cmd_agent(stop_event) -> None:
         if isinstance(payload, dict) and payload.get("node_secret"):
             if payload["node_secret"] != st.get("node_secret"):
                 st["node_secret"] = payload["node_secret"]
+        # Identity: record the hub's verdict. A MISMATCH (the hub holds a
+        # different key) arms a BOUNDED one-shot re-register that rotates
+        # our key with legacy proof — see force_rebind above.
+        if isinstance(payload, dict) and isinstance(payload.get("identity"), dict):
+            _idb = payload["identity"]
+            st["identity_status"] = _idb.get("status")
+            if _idb.get("principal"):
+                st["identity_principal"] = _idb["principal"]
+            if _idb.get("status") in ("mismatch", "revoked") \
+                    and not st.get("_identity_rebind") \
+                    and int(st.get("_identity_rebind_tries") or 0) < 3:
+                st["_identity_rebind"] = True
+                if _idb.get("status") == "revoked":
+                    # Our key is on the CRL — mint a fresh one NOW so the
+                    # rebind register presents a key the hub will accept
+                    # (legacy proof rotates it in; the old principal stays
+                    # revoked forever).
+                    try:
+                        _np, _nr = _identity_generate()
+                        _identity_write(_np, base64.b64encode(_nr).decode())
+                        print(f"[{time.strftime('%H:%M:%S')}] identity REVOKED — minted a fresh key for rebind", file=log_path)
+                    except Exception as _e:
+                        print(f"[{time.strftime('%H:%M:%S')}] identity revoked, fresh-key mint failed: {_e}", file=log_path)
+                else:
+                    print(f"[{time.strftime('%H:%M:%S')}] identity MISMATCH — rebinding with legacy proof", file=log_path)
         if code == 200 and st.get("repair_report"):
             st.pop("repair_report", None)   # delivered on this heartbeat
         write_state(st)
@@ -4376,6 +5039,7 @@ def _repair_cli_update(log_path, plan_id: str = "?", force: bool = False) -> str
         try:
             st = read_state() or {}
             st["repair_report"] = {"plan_id": plan_id, "ok": True,
+                                   "op": "cli_update",
                                    "result": f"update applied (force={force}) → {msg}",
                                    "ts": int(time.time())}
             write_state(st)
@@ -4403,7 +5067,10 @@ def _apply_repair(payload: dict, log_path) -> None:
     def _done(ok: bool, result: str) -> None:
         try:
             st = read_state() or {}
+            _op = str(((payload.get("ops") or [{}])[0] or {}).get("op")
+                      or "repair")[:100]
             st["repair_report"] = {"plan_id": plan_id, "ok": bool(ok),
+                                   "op": _op,
                                    "result": result[:400], "ts": int(time.time())}
             write_state(st)
         except OSError:
@@ -6617,12 +7284,45 @@ def cmd_route(args) -> None:
     print(f"\n\033[1mhivv route — mode={resp.get('mode')} capability={resp.get('capability')}\033[0m")
     print(f"  policy: {c}{str(pol.get('verdict','?')).upper()}\033[0m (rule {pol.get('rule','?')} · risk {pol.get('risk',0)})")
     print(f"  transports allowed: {' → '.join(resp.get('order', []))}")
+    # ── the scoring vector (HIVV_ROUTING_PLAN §7) ──────────────────────────
+    # A score nobody can argue with is a number, not an explanation: print the
+    # formula, the weights that produced it, and per-candidate factor values.
+    rt = resp.get("routing") or {}
+    wts = {k: v for k, v in (rt.get("weights") or {}).items()
+           if isinstance(v, (int, float)) and v > 0}
+    top3 = [k for k, _ in sorted(wts.items(), key=lambda kv: -kv[1])[:3]]
+    if rt:
+        geo = str(rt.get("hub_location", "?"))
+        geo_s = ("\033[2munknown — geography is neutral for every bee now\033[0m"
+                 if geo == "unknown" else geo)
+        print(f"  scoring: {rt.get('score','?')} · total weight {rt.get('weight_total','?')} · hub geo: {geo_s}")
+        if top3:
+            shown = " · ".join(f"{k} {wts[k]:g}" for k in top3)
+            more = " …" if len(wts) > len(top3) else ""
+            print(f"  weights: {shown}{more}   (override with gateway_config.routing.weights)")
+        if rt.get("unapplied_weights"):
+            # A flat weights map predates the factor vector and would silently
+            # rewrite modes if we guessed at it — say so instead.
+            print(f"  \033[33m\u26a0 unapplied: {json.dumps(rt['unapplied_weights'])}"
+                  f" — {rt.get('unapplied_note') or 'rekey as routing.weights.<mode>.<factor>'}\033[0m")
     t = resp.get("transports") or {}
     direct = t.get("direct") or []
     if direct:
-        print(f"  \033[2m{'NODE':<14} {'MODEL':<24} {'T/S':<6} {'LAT':<8} {'SCORE':<7}\033[0m")
+        # Short labels for the top-3 weighted factors — the column exists to be
+        # COMPARED row by row, so it must not truncate mid-word.
+        short = {"latency": "lat", "speed": "tps", "capacity": "cap", "queue": "que",
+                 "reliability": "rel", "quality": "qual", "cost": "cost", "privacy": "priv",
+                 "geography": "geo", "capability": "need", "trust": "trust"}
+        print(f"  \033[2m{'NODE':<14} {'MODEL':<22} {'T/S':<5} {'LAT':<7} {'TTFT':<7} {'SCORE':<7} {'TOP FACTORS':<28}\033[0m")
         for d in direct[:6]:
-            print(f"  {str(d.get('node',''))[:13]:<14} {str(d.get('model',''))[:23]:<24} {d.get('tps',0):<6} {str(d.get('latency_ms',''))+'ms':<8} {d.get('score',0)}")
+            tt = d.get("ttfb_ms")
+            ttft = f"{tt}ms" if isinstance(tt, (int, float)) else "—"
+            fac = d.get("factors") or {}
+            why = " ".join(f"{short.get(k, k[:3])}.{fac[k]:.2f}" for k in top3
+                           if isinstance(fac.get(k), (int, float)))
+            print(f"  {str(d.get('node',''))[:13]:<14} {str(d.get('model',''))[:21]:<22} "
+                  f"{d.get('tps',0):<5} {str(d.get('latency_ms',''))+'ms':<7} {ttft:<7} "
+                  f"{d.get('score',0):<7} {why[:28]:<28}")
     else:
         print("  \033[2mdirect: none reachable right now\033[0m")
     relay = t.get("relay") or []
@@ -7201,8 +7901,10 @@ def _control_token() -> str:
     tok = os.environ.get("HIVV_CONTROL_TOKEN", "").strip()
     if tok:
         return tok
+    # The first candidate resolves against wherever THIS FILE lives, so a
+    # clone at a new path finds its own hub's token with no configuration.
     for p in (Path(__file__).resolve().parents[1] / "api" / ".control-token",
-              Path("/var/www/vhosts/hivv.org/api/.control-token")):
+              Path(__file__).resolve().parent.parent / "api" / ".control-token"):
         try:
             t = p.read_text().strip()
             if t:
@@ -7269,6 +7971,36 @@ def cmd_repair(args) -> None:
     if args.reason:
         print(f"  reason: {args.reason}")
     print(f"  outcome arrives on the bee's next heartbeat — watch the hub log for [REPAIR]")
+
+
+def _p2p_nudge(paths=None) -> bool:
+    """One line after a successful `hivv update` when an OpenCode config
+    still points at a HUB endpoint — the natural migration door for people
+    who never re-run setup. TTY-only: the 5-min auto-update loop captures
+    output and must not spam logs. Bulletproof: a nudge must never break an
+    update. Returns True when it printed."""
+    try:
+        if not sys.stdout.isatty():
+            return False
+        for p in (paths or (Path.cwd() / "opencode.jsonc",
+                            Path.home() / ".config" / "opencode"
+                            / "opencode.jsonc")):
+            try:
+                data = json.loads(_jsonc_to_json(
+                    Path(p).read_text(encoding="utf-8", errors="replace")))
+                bu = data["providers"]["hivv"]["settings"]["baseURL"]
+            except Exception:
+                continue
+            # only a HUB endpoint is a migration candidate — the shim URL
+            # means P2P is already on, anything else is the user's own
+            if bu == f"{HUB}/v1" or str(bu).startswith(
+                    ("http://hivv.org", "https://hivv.org")):
+                print(f"  P2P mode available: run `{APP} setup --write` — "
+                      f"direct-to-bee via the local dial shim")
+                return True
+    except Exception:
+        return False
+    return False
 
 
 def cmd_update(args) -> None:
@@ -7338,6 +8070,7 @@ def cmd_update(args) -> None:
                     cmd_stop(args); cmd_start(args)
                 else:
                     print(f"  \033[33m!\033[0m agent not running — start it with: {APP} start")
+            _p2p_nudge()
             return
     # Running from a git checkout: the file we would overwrite is the user's
     # SOURCE, not an install. Only reached when the content actually DIFFERS
@@ -7459,6 +8192,7 @@ def cmd_update(args) -> None:
     if read_pid() or _systemd_agent_state() is not None:
         log("restarting agent to pick up new code")
         cmd_stop(args); cmd_start(args)
+    _p2p_nudge()
 
 def cmd_dev(args) -> None:
     """Toggle or show dev mode. Dev mode blocks auto-update to protect local development."""
@@ -14159,9 +14893,16 @@ def _test_toolkit() -> int:
         names = {t.get("name") for t in cat["tools"]}
         for must in ("calculator", "current_time", "timezone_convert", "text_parser"):
             _chk("catalog has %s" % must, must in names)
-        _chk("web search is NOT advertised by default",
-             not cat.get("web_search_enabled", False),
-             "HIVV_ENABLE_WEB_SEARCH=0 (expected)")
+        # The posture changed 2026-11-24: the flag is ON by default now
+        # (responsibly: robots.txt + per-host floor ship with it), but the
+        # INVARIANT is what matters — the schema is advertised if and only
+        # if the flag is on, for either configuration.
+        _web_ad = "web_search" in set(cat.get("advertised") or [])
+        _web_on = bool(cat.get("web_search_enabled", False))
+        _chk("web search advertisement matches its flag",
+             _web_ad == _web_on,
+             "HIVV_ENABLE_WEB_SEARCH=1 (advertised)" if _web_on
+             else "HIVV_ENABLE_WEB_SEARCH=0 (not advertised)")
     else:
         _chk("hub catalog reachable", False, str(cat.get("error", "no response")))
     print()
@@ -15393,7 +16134,7 @@ def _llm_which(cmd: str):
     found = shutil.which(cmd)
     if found:
         return found
-    home = os.path.expanduser("~")
+    home = _LLM_HOME   # sudo-aware: the same home every llama.cpp path uses
     for extra in (
         os.path.join(home, "llama.cpp", "build", "bin"),
         "/usr/local/llama.cpp/build/bin",
@@ -15729,7 +16470,7 @@ def _gguf_for_tag(tag: str):
     cands = [k for k in _GGUF_MODELS if k.split(":")[0] == fam]
     return sorted(cands)[0] if cands else None
 
-_LLAMA_CPP_DIR  = os.path.join(os.path.expanduser("~"), "llama.cpp")
+_LLAMA_CPP_DIR  = os.path.join(_LLM_HOME, "llama.cpp")   # sudo-aware: the INVOKING user's home
 _LLAMA_CPP_BIN = os.path.join(_LLAMA_CPP_DIR, "build", "bin")
 _LLAMA_CPP_MODELS = os.path.join(_LLAMA_CPP_DIR, "models")
 _MODELS_INDEX = os.path.join(STATE_DIR, "models", "index.json")
@@ -16514,28 +17255,81 @@ def _build_tool_install_cmd(pm: str, tools: list) -> list:
     return []
 
 
-def _build_tool_run_privileged(cmd: list) -> bool:
-    """Run a package-manager command as root when possible.
+def _can_prompt_sudo() -> bool:
+    """True when a HUMAN is watching this command — safe to let sudo ask
+    for their password.
 
-    NEVER prompts for a password (`sudo -n`) — a prompt would hang CI and
-    unattended installs. When no passwordless root is available we do NOT
-    run the command at all: `apt-get install` as a normal user is a
-    guaranteed failure, and its error output is noise the user cannot act on.
+    Unattended runs (CI, cron, piped, the test suite) have nobody behind
+    them: a password prompt with nobody to answer hangs forever, so those
+    keep `sudo -n`. `HIVV_NO_SUDO_PROMPT=1` forces that behaviour even
+    at a real terminal.
     """
+    if os.environ.get("HIVV_NO_SUDO_PROMPT"):
+        return False
+    if os.environ.get("CI"):
+        return False
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return False        # the suite drives this code — never hang it
+    try:
+        return bool(sys.stdin.isatty())
+    except (AttributeError, OSError, ValueError):
+        return False
+
+
+def _sudo_passwordless() -> bool:
+    """True when `sudo -n true` succeeds — root without a password."""
     import subprocess as _sp
     try:
-        is_root = (os.geteuid() == 0) if hasattr(os, "geteuid") else False
-        sudo = ""
-        if not is_root:
-            if not shutil.which("sudo"):
-                return False
-            if _sp.call(["sudo", "-n", "true"],
-                        stdout=_sp.DEVNULL,
-                        stderr=_sp.DEVNULL) != 0:
-                return False
-            sudo = "sudo"
-        full = ([sudo] if sudo else []) + cmd
-        return _sp.call(full) == 0
+        return _sp.call(["sudo", "-n", "true"],
+                        stdout=_sp.DEVNULL, stderr=_sp.DEVNULL) == 0
+    except OSError:
+        return False
+
+
+def _build_tool_sudo_mode(pm: str) -> str:
+    """How (or whether) we may run a package-manager command as root.
+
+    "root"         we ARE root — run it directly
+    "direct"       the manager needs no root at all (brew) — run as user
+    "passwordless" `sudo -n` works (servers, CI, docker) — never prompts
+    "prompt"       a human is at the terminal: plain `sudo`, which asks
+                   THEM for the password — exactly what apt/dnf do
+    ""             no way to escalate — the caller prints the exact command
+    """
+    if pm == "brew":
+        return "direct"
+    if (os.geteuid() == 0) if hasattr(os, "geteuid") else False:
+        return "root"
+    if not shutil.which("sudo"):
+        return ""
+    if _sudo_passwordless():
+        return "passwordless"
+    if _can_prompt_sudo():
+        return "prompt"
+    return ""
+
+
+def _build_tool_run_privileged(cmd: list, mode: str, quiet: bool = False) -> bool:
+    """Run `cmd` with the privilege `mode` allows (see _build_tool_sudo_mode).
+
+    mode "prompt" runs plain `sudo` — the password prompt goes to /dev/tty
+    (never our streams), so it stays visible even under `quiet`, and with
+    no tty at all sudo fails fast instead of hanging.
+    """
+    import subprocess as _sp
+    if mode in ("root", "direct"):
+        prefix = []
+    elif mode == "passwordless":
+        prefix = ["sudo", "-n"]
+    elif mode == "prompt":
+        prefix = ["sudo"]
+    else:
+        return False
+    try:
+        if quiet:
+            return _sp.call(prefix + cmd,
+                            stdout=_sp.DEVNULL, stderr=_sp.DEVNULL) == 0
+        return _sp.call(prefix + cmd) == 0
     except OSError:
         return False
 
@@ -16543,7 +17337,8 @@ def _build_tool_run_privileged(cmd: list) -> bool:
 def _ensure_build_tools(tools: list) -> bool:
     """Guarantee the build tools exist. Returns True when all are present.
 
-    Auto-installs via the OS package manager when possible; otherwise prints
+    Auto-installs when we CAN escalate (root / passwordless sudo / a human
+    who can type a password — the normal desktop case); otherwise prints
     the exact command to run and returns False — the caller then exits
     CLEANLY (no traceback).
     """
@@ -16552,22 +17347,19 @@ def _ensure_build_tools(tools: list) -> bool:
         return True
 
     pm = _build_tool_pkg_manager()
-    if pm:
-        print(f"  \033[33m→\033[0m installing build tools: {', '.join(missing)} (via {pm})…")
-        # apt needs its index fresh or "Unable to locate package" is common.
-        # Use sudo ONLY when we are not already root (sudo may not exist).
+    mode = _build_tool_sudo_mode(pm) if pm else ""
+    if pm and mode:
+        # Only claim an install we can actually attempt: the old code
+        # printed "→ installing…" first and THEN discovered sudo needed a
+        # password, so users saw "installing…" immediately followed by
+        # "✗ missing" (wahi 2026-11-24).
+        note = " — sudo will ask for your password" if mode == "prompt" else ""
+        print(f"  \033[33m→\033[0m installing build tools: {', '.join(missing)} (via {pm}){note}…")
         if pm == "apt":
-            try:
-                import subprocess as _sp
-                is_root = (os.geteuid() == 0) if hasattr(os, "geteuid") else False
-                refresh = ["apt-get", "update"]
-                if not is_root:
-                    refresh = ["sudo", "-n"] + refresh
-                _sp.call(refresh, stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
-            except OSError:
-                pass
+            # apt needs its index fresh or "Unable to locate package" is common.
+            _build_tool_run_privileged(["apt-get", "update"], mode, quiet=True)
         cmd = _build_tool_install_cmd(pm, missing)
-        if cmd and _build_tool_run_privileged(cmd):
+        if cmd and _build_tool_run_privileged(cmd, mode):
             still = [t for t in missing if not shutil.which(t)]
             if not still:
                 print(f"  \033[32m✓\033[0m installed: {', '.join(missing)}")
@@ -16587,11 +17379,130 @@ def _ensure_build_tools(tools: list) -> bool:
     return False
 
 
+def _llama_tree_state(path: str) -> str:
+    """What's ACTUALLY at the llama.cpp path — never trust the directory name.
+
+    missing   — nothing there yet
+    partial   — a clone that died mid-pack (empty, or only .git/): RE-CLONE
+    source    — CMakeLists.txt present: a checkout OR a tarball tree
+    built     — llama-server already executable
+    occupied  — something else entirely: never delete it, the user decides
+    """
+    if not os.path.isdir(path):
+        return "missing"
+    if os.access(os.path.join(path, "build", "bin", "llama-server"), os.X_OK):
+        return "built"
+    if os.path.isfile(os.path.join(path, "CMakeLists.txt")):
+        return "source"
+    try:
+        entries = set(os.listdir(path))
+    except OSError:
+        return "occupied"
+    if entries <= {".git"}:
+        return "partial"
+    return "occupied"
+
+
+def _llama_tarball_fetch() -> bool:
+    """Last resort when git's sideband keeps dying: ONE tarball.
+
+    Same bytes as the clone, no pack protocol to fall over — and curl
+    resumes where git cannot. The tree has no .git, which is fine: hivv
+    never git-pulls it (CMakeLists.txt is the truth)."""
+    import subprocess as _sp
+    fetcher = "curl" if shutil.which("curl") else ("wget" if shutil.which("wget") else None)
+    if not fetcher or not shutil.which("tar"):
+        return False
+    url = "https://codeload.github.com/ggerganov/llama.cpp/tar.gz/refs/heads/master"
+    print(f"  \033[33m→\033[0m git clone kept failing — trying the tarball instead (~60 MB)")
+    tmp = tempfile.mkdtemp(prefix="hivv-llama-")
+    try:
+        tgz = os.path.join(tmp, "llama.tar.gz")
+        if fetcher == "curl":
+            get = ["curl", "-fL", "--retry", "3", "--connect-timeout", "20",
+                   "-o", tgz, url]
+        else:
+            get = ["wget", "-q", "--tries=3", "-O", tgz, url]
+        try:
+            if _sp.call(get) != 0:
+                return False
+        except OSError:
+            return False
+        try:
+            if _sp.call(["tar", "-xzf", tgz, "-C", tmp]) != 0:
+                return False
+        except OSError:
+            return False
+        src = os.path.join(tmp, "llama.cpp-master")
+        if not os.path.isfile(os.path.join(src, "CMakeLists.txt")):
+            return False
+        if os.path.isdir(_LLAMA_CPP_DIR):
+            shutil.rmtree(_LLAMA_CPP_DIR, ignore_errors=True)
+        shutil.move(src, _LLAMA_CPP_DIR)   # cross-device safe (tmp -> $HOME)
+        _llm_hand_back(_LLAMA_CPP_DIR)
+        return True
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _llm_hand_back(path: str) -> None:
+    """Hand a root-built tree back to the user who asked for it (via sudo)."""
+    if not (_LLM_HOME_OWNER and hasattr(os, "chown")
+            and hasattr(os, "geteuid") and os.geteuid() == 0):
+        return
+    try:
+        import pwd
+        pw = pwd.getpwnam(_LLM_HOME_OWNER)
+    except Exception:
+        return
+    for root, dirs, files in os.walk(path):
+        for name in (root, *dirs, *files):
+            if name != root and os.path.islink(name):
+                continue          # never chown THROUGH a symlink
+            try:
+                os.chown(name, pw.pw_uid, pw.pw_gid)
+            except OSError:
+                pass
+
+
+def _llm_rc_path() -> str:
+    """The shell rc PATH advice should touch — the TARGET user's, right shell.
+
+    The old advice hard-coded ~/.bashrc: under sudo that is ROOT's shell
+    config, and zsh users do not read .bashrc anyway."""
+    shell = (os.environ.get("SHELL") or "").lower()
+    if _LLM_HOME_OWNER:
+        try:
+            import pwd
+            shell = (pwd.getpwnam(_LLM_HOME_OWNER).pw_shell or "").lower()
+        except Exception:
+            pass
+    name = ".zshrc" if shell.endswith("zsh") else ".bashrc"
+    return os.path.join(_LLM_HOME, name)
+
+
+def _llm_path_advice() -> str:
+    """One correct, idempotent PATH line — or "" when there's nothing to say."""
+    if shutil.which("llama-server"):
+        return ""
+    rc = _llm_rc_path()
+    line = f'export PATH="{_LLAMA_CPP_BIN}:$PATH"'
+    try:
+        with open(rc, encoding="utf-8", errors="replace") as f:
+            if line in f.read():
+                return f"  \033[2mPATH: {rc} already has it — open a new shell\033[0m"
+    except OSError:
+        pass
+    as_owner = f"   # run as {_LLM_HOME_OWNER}, not root" if _LLM_HOME_OWNER else ""
+    return (f"  \033[1mNow add llama.cpp to your PATH:\033[0m\n"
+            f"    echo '{line}' >> {rc}{as_owner}\n"
+            f"    source {rc}")
+
+
 def cmd_llm_install_llama(args):
     """Print (and optionally run) the steps to build llama.cpp from source."""
     import subprocess as _sp
     do_auto = bool(getattr(args, "auto", False))
-    home    = os.path.expanduser("~")
     git_url = "https://github.com/ggerganov/llama.cpp.git"
     build_cmd = ["cmake", "-B", "build", "-DCMAKE_BUILD_TYPE=Release", "-DLLAMA_SERVER_VERBOSE=ON"]
     compile_cmd = ["cmake", "--build", "build", "--config", "Release", "-j", str(os.cpu_count() or 4)]
@@ -16599,31 +17510,38 @@ def cmd_llm_install_llama(args):
     print(f"\033[1m{APP} llm install-llama\033[0m — build llama.cpp from source")
     print(f"  git  : {git_url}")
     print(f"  dir  : {_LLAMA_CPP_DIR}")
+    if _LLM_HOME_OWNER:
+        print(f"  \033[33mvia sudo — installing for {_LLM_HOME_OWNER} ({_LLM_HOME}), not root\033[0m")
     print()
-    print("  \033[1mstep 1 — clone:\033[0m")
-    print(f"    cd ~")
-    print(f"    git clone {git_url}")
-    print()
-    print("  \033[1mstep 2 — configure:\033[0m")
-    print(f"    cd llama.cpp")
-    print(f"    {' '.join(build_cmd)}")
-    print()
-    print("  \033[1mstep 3 — compile:\033[0m")
-    print(f"    {' '.join(compile_cmd)}")
-    print()
-    print("  \033[1mstep 4 — verify:\033[0m")
-    print(f"    ls {_LLAMA_CPP_BIN}/llama-server")
-    print()
-    print("  \033[1mstep 5 — add to PATH:\033[0m")
-    print(f'    echo \'export PATH="$HOME/llama.cpp/build/bin:$PATH"\' >> ~/.bashrc')
-    print(f"    source ~/.bashrc")
-    print(f"    llama-cli --help   # verify it works")
-    print()
-    print("  \033[1mstep 6 — model + server (the hivv part):\033[0m")
-    print(f"    {APP} llm pull-gguf gemma-4:e2b      # ~2.9 GB (gemma-4 — latest, proven in-hive)")
-    print(f"    {APP} llm serve-llama gemma-4:e2b   # launch the API on :8080")
-    print()
+
     if not do_auto:
+        # The walkthrough — printed ONLY when we are not about to run it.
+        # The auto path used to print all six steps and then execute them
+        # anyway, so a dead clone looked like a wall of copy-paste
+        # instructions ending in a random git error (asher@wahi 2026-11-24).
+        rc_file = _llm_rc_path()
+        print("  \033[1mstep 1 — clone:\033[0m")
+        print(f"    git clone --depth 1 {git_url} {_LLAMA_CPP_DIR}")
+        print()
+        print("  \033[1mstep 2 — configure:\033[0m")
+        print(f"    cd {_LLAMA_CPP_DIR}")
+        print(f"    {' '.join(build_cmd)}")
+        print()
+        print("  \033[1mstep 3 — compile:\033[0m")
+        print(f"    {' '.join(compile_cmd)}")
+        print()
+        print("  \033[1mstep 4 — verify:\033[0m")
+        print(f"    ls {_LLAMA_CPP_BIN}/llama-server")
+        print()
+        print("  \033[1mstep 5 — add to PATH:\033[0m")
+        print(f'    echo \'export PATH="{_LLAMA_CPP_BIN}:$PATH"\' >> {rc_file}')
+        print(f"    source {rc_file}")
+        print(f"    llama-cli --help   # verify it works")
+        print()
+        print("  \033[1mstep 6 — model + server (the hivv part):\033[0m")
+        print(f"    {APP} llm pull-gguf gemma-4:e2b      # ~2.9 GB (gemma-4 — latest, proven in-hive)")
+        print(f"    {APP} llm serve-llama gemma-4:e2b   # launch the API on :8080")
+        print()
         print("  Run \033[1m--auto\033[0m to execute steps automatically:")
         print(f"    {APP} llm install-llama --auto")
         return
@@ -16635,17 +17553,54 @@ def cmd_llm_install_llama(args):
     if not _ensure_build_tools(["git", "cmake"]):
         die("cannot build llama.cpp without git and cmake — see the command above")
 
-    if os.path.isdir(_LLAMA_CPP_DIR):
-        print(f"  \033[33m~/{'llama.cpp'}\033[0m already exists — skipping clone")
+    # What is actually at the path? A clone that died mid-pack leaves
+    # ~/llama.cpp behind, and the old "already exists — skipping clone"
+    # turned the NEXT run into a baffling cmake failure. And NEVER delete
+    # something that isn't ours.
+    state = _llama_tree_state(_LLAMA_CPP_DIR)
+    probe = _LLAMA_CPP_DIR if state != "missing" else os.path.dirname(_LLAMA_CPP_DIR)
+    if not os.access(probe, os.W_OK):
+        # A root/sudo run left a tree this user cannot write. Name the fix.
+        die(f"{probe} isn't writable by you — likely left behind by a root/sudo run\n"
+            f"    fix: sudo chown -R $USER {probe}\n"
+            f"    then re-run: {APP} llm install-llama --auto")
+    if state == "occupied":
+        die(f"{_LLAMA_CPP_DIR} exists but isn't a llama.cpp checkout — move it aside:\n"
+            f"    mv {_LLAMA_CPP_DIR} {_LLAMA_CPP_DIR}.bak\n"
+            f"    then re-run: {APP} llm install-llama --auto")
+    if state == "partial":
+        print(f"  \033[33m…\033[0m partial clone from an earlier failed run — cleaning up")
+        shutil.rmtree(_LLAMA_CPP_DIR, ignore_errors=True)
+        state = "missing"
+    if state in ("source", "built"):
+        print(f"  \033[33m…\033[0m source already at {_LLAMA_CPP_DIR} — skipping clone")
     else:
-        print(f"  \033[1m[1/3]\033[0m cloning…")
-        try:
-            rc = _sp.call(["git", "clone", git_url, _LLAMA_CPP_DIR])
-        except (OSError, FileNotFoundError) as e:
-            die(f"git clone could not start: {e}\n"
-                f"    install git, then re-run: {APP} llm install-llama --auto")
-        if rc != 0:
-            die(f"git clone failed (rc={rc})")
+        # Shallow + retries: a FULL clone pulls ~169k objects of history and
+        # dies mid-pack on any flaky link — "RPC failed; curl 56 … early
+        # EOF" (asher@wahi 2026-11-24). --depth 1 is ~60 MB instead of
+        # ~400 MB; install-hivv.sh has cloned this way all along.
+        last_rc = None
+        for attempt in range(1, 4):
+            if os.path.isdir(_LLAMA_CPP_DIR):
+                shutil.rmtree(_LLAMA_CPP_DIR, ignore_errors=True)   # attempt N-1's leftovers
+            print(f"  \033[1m[1/3]\033[0m cloning… (attempt {attempt}/3, shallow)")
+            try:
+                rc = _sp.call(["git", "-c", "http.version=HTTP/1.1", "clone",
+                               "--depth", "1", git_url, _LLAMA_CPP_DIR])
+            except (OSError, FileNotFoundError) as e:
+                die(f"git clone could not start: {e}\n"
+                    f"    install git, then re-run: {APP} llm install-llama --auto")
+            if rc == 0 and os.path.isfile(os.path.join(_LLAMA_CPP_DIR, "CMakeLists.txt")):
+                last_rc = None
+                break
+            last_rc = rc if rc != 0 else 1
+        if last_rc is not None:
+            # Last resort: the tarball — same bytes, no sideband protocol.
+            if not _llama_tarball_fetch():
+                die(f"git clone failed (rc={last_rc}) after 3 attempts\n"
+                    f"    manual: git clone --depth 1 {git_url} {_LLAMA_CPP_DIR}\n"
+                    f"    check the network, then re-run: {APP} llm install-llama --auto")
+        _llm_hand_back(_LLAMA_CPP_DIR)
 
     print(f"  \033[1m[2/3]\033[0m configuring…")
     try:
@@ -16667,11 +17622,12 @@ def cmd_llm_install_llama(args):
 
     bin_path = os.path.join(_LLAMA_CPP_BIN, "llama-server")
     if os.access(bin_path, os.X_OK):
+        _llm_hand_back(_LLAMA_CPP_DIR)
         print(f"  \033[32m✓\033[0m built successfully: {bin_path}")
-        print()
-        print(f"  \033[1mNow add it to your PATH:\033[0m")
-        print(f'    echo \'export PATH="$HOME/llama.cpp/build/bin:$PATH"\' >> ~/.bashrc')
-        print(f"    source ~/.bashrc")
+        advice = _llm_path_advice()
+        if advice:
+            print()
+            print(advice)
         print()
         print(f"  \033[1m→ next: grab a model, then serve it:\033[0m")
         print(f"    {APP} llm pull-gguf gemma-4:e2b      # ~2.9 GB (gemma-4 — latest)")
@@ -16992,6 +17948,7 @@ def cmd_llm_pull_gguf(args):
     if os.path.exists(out_path):
         sz = os.path.getsize(out_path) / (1024**3)
         print(f"  \033[32m✓\033[0m already downloaded ({sz:.1f} GB) — skipping")
+        _llm_hand_back(out_dir)   # a sudo run may have left it root-owned
         _llm_next_after_pull(model_key)
         return
 
@@ -17003,6 +17960,7 @@ def cmd_llm_pull_gguf(args):
         rc = _sp.call([hf_cli, "download", repo, fname, "--local-dir", out_dir])
         if rc == 0 and _gguf_ok(out_path):
             print(f"  \033[32m✓\033[0m saved to {out_path}")
+            _llm_hand_back(out_dir)
             _write_models_index(model_key, info)
             _llm_next_after_pull(model_key)
             return
@@ -17028,6 +17986,7 @@ def cmd_llm_pull_gguf(args):
     if size_reason:
         die(f"{size_reason}\n    re-run `{APP} llm pull-gguf {model_key}` — curl resumes the missing bytes")
     print(f"  \033[32m✓\033[0m saved to {out_path}")
+    _llm_hand_back(out_dir)
     _write_models_index(model_key, info)
     _llm_next_after_pull(model_key)
 
@@ -17156,6 +18115,13 @@ def _llm_boot_enable(model: str, port: int, host: str, ctx: int) -> tuple[bool, 
     the port, and a second spawn would fight it for the bind. The unit name is
     `llama.service` on purpose — start/stop/restart already know these names
     (one owner, both directions). Refuses to touch a system-scope unit."""
+    if _LLM_HOME_OWNER:
+        # A "sudo hivv llm setup" run reaches here at the boot question: a
+        # root shell has no --user session for the logged-in user, so
+        # systemctl --user fails with a mystery error. Say exactly what
+        # to run instead.
+        return False, (f"boot auto-start must run as {_LLM_HOME_OWNER} — a root "
+                       f"shell has no user systemd session; run: {APP} llm boot on")
     import shlex
     state, existing = _llm_boot_probe()
     if state == "unsupported":
@@ -17414,6 +18380,8 @@ def cmd_llm_setup(args) -> None:
             return False
 
     print(f"\033[1m{APP} llm setup\033[0m — one-shot local LLM ({model} via llama.cpp)")
+    if _LLM_HOME_OWNER:
+        print(f"  \033[33mvia sudo — everything installs for {_LLM_HOME_OWNER} ({_LLM_HOME}), not root\033[0m")
     print(f"  \033[2mchoices (<3B): {_gguf_menu(compact=True)}\033[0m")
     if sys.platform == "darwin" and _llm_config().get("ngl") in (None, ""):
         print(f"  \033[2mnote: default is Metal offload (-ngl 99) — if replies come back as"
@@ -17469,12 +18437,22 @@ def cmd_llm_setup(args) -> None:
             die(g_msg)
         if g_msg:
             warn(g_msg)
+        # A root-owned llama-server is a server the logged-in user cannot
+        # stop. We were invoked via sudo FOR them — run it AS them.
+        spawn_as = {}
+        if _LLM_HOME_OWNER and os.geteuid() == 0:
+            try:
+                import pwd
+                _pw = pwd.getpwnam(_LLM_HOME_OWNER)
+                spawn_as = {"user": _pw.pw_uid, "group": _pw.pw_gid}
+            except Exception:
+                spawn_as = {}
         try:
             STATE_DIR.mkdir(parents=True, exist_ok=True)
             log_path = STATE_DIR / "llama-setup.log"
             logf = open(log_path, "ab")
             proc = subprocess.Popen(cmd, stdout=logf, stderr=subprocess.STDOUT,
-                                    start_new_session=True)
+                                    start_new_session=True, **spawn_as)
         except OSError as e:
             die(f"could not start llama-server: {e}")
         print(f"  \033[1m[3/3]\033[0m starting llama-server on :{port} (pid {proc.pid}, log {log_path})")
@@ -17542,6 +18520,246 @@ def cmd_llm_setup(args) -> None:
         print()
     print(f"  manage:  {APP} stop llm · {APP} restart llm · {APP} llm boot on|off|status")
     print(f"  foreground: {APP} stop llm && {APP} llm serve-llama {model}   (stop the background one first)")
+
+
+# ── eval: the study bench — golden questions × route modes, scored ──────────
+# "various tests that are helpful that we can study with the AI"
+# (2026-11-25): run a FIXED set of cases across route modes, score the
+# answers deterministically, keep the X-Hivv-Answered-By receipts, and save
+# every run under STATE_DIR/evals/ so results are comparable over time.
+# Change one thing (mode, model, prompt, web search on/off) and watch the
+# pass rate move. Deliberately NO model-as-judge in v1: a study bench whose
+# scores drift with the judge is not a study bench.
+
+def _eval_builtin_suite() -> dict:
+    """The default golden set — deterministic, model-agnostic, forever-green
+    prompts (no dates, no randomness). Each case targets one capability:
+    instruction-following, arithmetic, percent, a classic logic trap,
+    structured output, and tool use."""
+    return {
+        "name": "builtin",
+        "cases": [
+            {"id": "instruction-canary",
+             "prompt": "Reply with exactly this text and nothing else: HIVE-CANARY",
+             "expect": {"type": "contains", "value": "HIVE-CANARY"}},
+            {"id": "math-basic",
+             "prompt": "What is 17 * 23? Reply with ONLY the number, no prose.",
+             "expect": {"type": "regex", "pattern": r"\b391\b"}},
+            {"id": "percent",
+             "prompt": "What is 15% of 240? Reply with ONLY the number, no prose.",
+             "expect": {"type": "numeric", "value": 36, "tolerance": 0.001}},
+            {"id": "logic-ball-bat",
+             "prompt": ("A bat and a ball cost $1.10 in total. The bat costs $1.00 "
+                        "more than the ball. How much does the ball cost? "
+                        "Reply with ONLY the number."),
+             "expect": {"type": "numeric", "value": 0.05, "tolerance": 0.001}},
+            {"id": "json-shape",
+             "prompt": 'Reply with ONLY a JSON object in the exact shape {"answer": 42} — no prose, no code fences.',
+             "expect": {"type": "json"}},
+            {"id": "tool-date",
+             "prompt": "What is today's date? Use the current_time tool, then answer in YYYY-MM-DD format.",
+             "expect": {"type": "regex", "pattern": r"20\d{2}-\d{2}-\d{2}"}},
+        ],
+    }
+
+
+def _eval_score(expect: dict, answer: str) -> tuple[bool, str]:
+    """(passed, detail) — deterministic scoring for one case."""
+    etype = str((expect or {}).get("type") or "contains").lower()
+    text = answer or ""
+    if etype == "contains":
+        want = str(expect.get("value", ""))
+        return (want.lower() in text.lower()), f"want {want!r}"
+    if etype == "not_contains":
+        want = str(expect.get("value", ""))
+        return (want.lower() not in text.lower()), f"must not contain {want!r}"
+    if etype == "exact":
+        want = str(expect.get("value", "")).strip()
+        return (text.strip().lower() == want.lower()), f"want exactly {want!r}"
+    if etype == "regex":
+        pat = str(expect.get("pattern", ""))
+        try:
+            ok = re.search(pat, text, re.I | re.S) is not None
+        except re.error as e:
+            return False, f"suite bug — bad pattern {pat!r}: {e}"
+        return ok, f"want /{pat}/"
+    if etype == "numeric":
+        try:
+            want = float(expect.get("value"))
+        except (TypeError, ValueError):
+            return False, "suite bug — numeric expect needs a number 'value'"
+        tol = float(expect.get("tolerance") or 0)
+        got_all = []
+        for n in re.findall(r"-?\d[\d,]*(?:\.\d+)?", text):
+            try:
+                got_all.append(float(n.replace(",", "")))
+            except ValueError:
+                continue
+        for v in got_all:
+            if v == want or abs(v - want) <= tol:
+                return True, f"got {v} (want {want})"
+        return False, f"got {got_all[:4] or 'no number'} (want {want})"
+    if etype == "json":
+        m = re.search(r"\{.*\}", text, re.S)
+        if not m:
+            return False, "no JSON object in the answer"
+        try:
+            json.loads(m.group(0))
+            return True, "json parses"
+        except ValueError as e:
+            return False, f"unparseable JSON: {e}"
+    return False, f"suite bug — unknown expect type {etype!r}"
+
+
+def _eval_load_suite(path: str | None) -> dict:
+    """Builtin suite, or a JSON file: {"name": ..., "cases": [{id, prompt,
+    expect: {type, ...}}]}. Bad input dies CLEANLY with what's wrong."""
+    if not path:
+        return _eval_builtin_suite()
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError) as e:
+        die(f"cannot read suite {path}: {e}")
+    if not isinstance(data, dict) or not isinstance(data.get("cases"), list) or not data["cases"]:
+        die(f"suite {path} must be a JSON object with a non-empty 'cases' list")
+    for i, c in enumerate(data["cases"]):
+        if not isinstance(c, dict) or not isinstance(c.get("prompt"), str) or not c["prompt"].strip():
+            die(f"suite {path}: case #{i + 1} needs a non-empty string 'prompt'")
+        if not isinstance(c.get("expect"), dict) or not c["expect"]:
+            die(f"suite {path}: case #{i + 1} ({c.get('id') or '?'}) needs an 'expect' object")
+        if not c.get("id"):
+            c["id"] = f"case-{i + 1}"
+    if not data.get("name"):
+        data["name"] = os.path.splitext(os.path.basename(path))[0]
+    return data
+
+
+def cmd_eval(args) -> None:
+    """Bare 'hivv eval' — the chooser. Never a chat message."""
+    print(f"\033[1m{APP} eval\033[0m — the study bench: golden questions × route modes, scored")
+    print()
+    print(f"  {APP} eval run [--modes smart,fast] [--repeat N] [--suite FILE]")
+    print(f"      run every case across each mode — pass rate, latency, receipts")
+    print(f"  {APP} eval cases [--suite FILE]")
+    print(f"      print the cases a suite would run")
+    print()
+    print(f"  flags: --json (machine output)  --no-save  --strict (exit 1 on any fail)")
+    print(f"  suite file: JSON with name + cases[] (id, prompt, expect)")
+    print(f"  saved runs: {STATE_DIR}/evals/")
+
+
+def cmd_eval_cases(args) -> None:
+    suite = _eval_load_suite(getattr(args, "suite", None))
+    print(f"\033[1m{APP} eval cases\033[0m — suite {suite['name']} ({len(suite['cases'])} cases)")
+    for c in suite["cases"]:
+        et = c["expect"].get("type", "contains")
+        print(f"  {c['id']:<20} [{et}] {c['prompt'][:70]}")
+
+
+def cmd_eval_run(args) -> None:
+    """hivv eval run — one suite × N route modes, scored, receipts, saved."""
+    suite = _eval_load_suite(getattr(args, "suite", None))
+    modes: list[str] = []
+    for m in str(getattr(args, "modes", None) or "smart").split(","):
+        m = m.strip()
+        if not m:
+            continue
+        m = _ROUTE_ALIASES.get(m, m)
+        if m not in modes:
+            modes.append(m)
+    if not modes:
+        die("no modes given — try --modes smart,fast")
+    repeat = max(1, int(getattr(args, "repeat", 1) or 1))
+    timeout = float(getattr(args, "timeout", 120) or 120)
+    as_json = bool(getattr(args, "json", False))
+    pin = str(getattr(args, "model", None) or "").strip() or None
+    cases = suite["cases"]
+
+    if not as_json:
+        print(f"\033[1m{APP} eval run\033[0m — suite {suite['name']} · {len(cases)} cases · "
+              f"modes: {', '.join(modes)}" + (f" · ×{repeat}" if repeat > 1 else "")
+              + (f" · model={pin}" if pin else ""))
+        print()
+
+    results = []
+    t_start = time.time()
+    for mode in modes:
+        for rep in range(repeat):
+            for case in cases:
+                cid = case["id"] if repeat == 1 else f"{case['id']}#{rep + 1}"
+                t0 = time.time()
+                answer, hdrs, err = "", {}, ""
+                req_body = {"message": case["prompt"], "stream": False,
+                            "route": {"mode": mode}}
+                if pin:
+                    req_body["model"] = pin   # router preferredModel pin
+                try:
+                    code, resp, hdrs = http(
+                        "POST", "/api/chat",
+                        body=req_body,
+                        timeout=timeout, with_headers=True)
+                except Exception as e:   # noqa: BLE001 — a study bench must not crash
+                    code, resp, err = 0, {}, str(e)[:120]
+                ms = int((time.time() - t0) * 1000)
+                if code == 200 and isinstance(resp, dict):
+                    answer = ((resp.get("choices") or [{}])[0]
+                              .get("message", {}).get("content") or "")
+                    ok, why = _eval_score(case.get("expect") or {}, answer)
+                else:
+                    ok, why = False, (err or f"HTTP {code}: {str(resp)[:80]}")
+                by = str(hdrs.get("X-Hivv-Answered-By")
+                         or hdrs.get("x-hivv-answered-by") or "")
+                results.append({"mode": mode, "id": cid, "pass": bool(ok),
+                                "ms": ms, "answered_by": by, "detail": why,
+                                "answer": (answer or "")[:500]})
+                if not as_json:
+                    mark = "\033[32m✓\033[0m" if ok else "\033[31m✗\033[0m"
+                    note = by if ok else why
+                    if not ok and answer:
+                        note += f" · ans: {answer[:40]!r}"
+                    print(f"  {mode:<8} {cid:<22} {ms:>6}ms  {mark}  {note[:110]}")
+
+    # ── summary + save ──
+    summary = {}
+    for mode in modes:
+        rows = [r for r in results if r["mode"] == mode]
+        passed = sum(1 for r in rows if r["pass"])
+        avg = int(sum(r["ms"] for r in rows) / len(rows)) if rows else 0
+        summary[mode] = {"pass": passed, "total": len(rows),
+                         "pass_rate": round(passed / len(rows), 3) if rows else 0.0,
+                         "avg_ms": avg}
+    out = {"suite": suite["name"], "modes": modes, "repeat": repeat,
+           "model_pin": pin,
+           "started": datetime.fromtimestamp(t_start).isoformat(timespec="seconds"),
+           "duration_ms": int((time.time() - t_start) * 1000),
+           "summary": summary, "results": results}
+    saved = None
+    if not bool(getattr(args, "no_save", False)):
+        try:
+            ev_dir = STATE_DIR / "evals"
+            ev_dir.mkdir(parents=True, exist_ok=True)
+            stamp = datetime.fromtimestamp(t_start).strftime("%Y%m%d-%H%M%S")
+            saved = ev_dir / f"{stamp}-{suite['name']}.json"
+            saved.write_text(json.dumps(out, indent=2), encoding="utf-8")
+        except OSError:
+            saved = None
+    out["saved"] = str(saved) if saved else None
+
+    if as_json:
+        print(json.dumps(out, indent=2))
+    else:
+        print()
+        print("  \033[1m── summary ──\033[0m")
+        for mode, s in summary.items():
+            pct = int(s["pass_rate"] * 100)
+            print(f"  {mode:<8} {s['pass']}/{s['total']} ({pct}%)  avg {s['avg_ms']}ms")
+        if saved:
+            print(f"  saved: {saved}")
+        print(f"  compare runs: {APP} eval run --modes smart,fast --repeat 3")
+
+    if bool(getattr(args, "strict", False)) and any(not r["pass"] for r in results):
+        sys.exit(1)
 
 
 # ── arg parser ─────────────────────────────────────────────────────────
@@ -17807,6 +19025,368 @@ def build_opencode_config(plan: dict | None = None,
     }
 
 
+# ── the dial shim endpoint: P2P by default, hub as the honest fallback ──────
+# `hivv setup` writes baseURL=http://127.0.0.1:3911/v1 so requests go
+# direct-to-bee and hivv.org is only dialed for route picks + telemetry.
+# These helpers decide that endpoint, start the shim, keep it alive across
+# reboots — and FALL BACK to https://hivv.org/v1 with a recorded reason
+# whenever the shim cannot run, so a config is never written against a dead
+# URL. Opt-outs: `hivv dial off` (marker file), HIVV_DIAL_OFF=1, --no-shim.
+
+DIAL_PORT_DEFAULT = 3911
+
+
+def _dial_port() -> int:
+    """The shim port: --port wins at the call site; HIVV_DIAL_PORT overrides
+    the default (tests and port-conflict users)."""
+    try:
+        return int(os.environ.get("HIVV_DIAL_PORT") or DIAL_PORT_DEFAULT)
+    except ValueError:
+        return DIAL_PORT_DEFAULT
+
+
+def _dial_url(port: int | None = None) -> str:
+    return f"http://127.0.0.1:{port or _dial_port()}/v1"
+
+
+def _dial_off_marker() -> Path:
+    """`hivv dial off` leaves this file; `hivv dial on` removes it.
+    While it exists setup must NOT auto-start the shim (the user said no)."""
+    return STATE_DIR / "dial.off"
+
+
+def _dial_disabled() -> bool:
+    if os.environ.get("HIVV_DIAL_OFF", "").lower() in ("1", "true", "yes", "on"):
+        return True
+    try:
+        return _dial_off_marker().exists()
+    except OSError:
+        return False
+
+
+def _dial_health(port: int | None = None, timeout: float = 1.0) -> dict | None:
+    """GET /healthz — OUR shim's dict if it answers, else None.
+    Checks the `shim` marker so a foreign app squatting the port is never
+    mistaken for the shim."""
+    port = port or _dial_port()
+    try:
+        req = urllib.request.Request(f"http://127.0.0.1:{port}/healthz")
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            data = json.loads(r.read().decode("utf-8", "replace"))
+        if isinstance(data, dict) and data.get("shim") == "hivv-dial":
+            return data
+    except Exception:
+        return None
+    return None
+
+
+def _dial_port_state(port: int | None = None) -> str:
+    """'ours' (our shim answers) | 'foreign' (something else listens) | 'free'."""
+    if _dial_health(port, timeout=0.6):
+        return "ours"
+    port = port or _dial_port()
+    try:
+        s = socket.create_connection(("127.0.0.1", port), timeout=0.4)
+        s.close()
+        return "foreign"
+    except OSError:
+        return "free"
+
+
+def _dial_unit_text(port: int, hub: str | None = None, pin: str = "") -> str:
+    """systemd user unit for the shim (pure — tests pin the content)."""
+    arg_parts = f"dial --port {port}"
+    if hub:
+        arg_parts += f" --hub {hub}"
+    if pin:
+        arg_parts += f" --pin {pin}"
+    if _is_frozen():
+        exec_start = f"{sys.executable} {arg_parts}"
+    else:
+        exec_start = f"{sys.executable} {Path(__file__).resolve()} {arg_parts}"
+    log = STATE_DIR / "dial.log"
+    return f"""[Unit]
+Description=hivv dial shim (local OpenAI proxy → direct-to-bee)
+After=network.target
+# crash-loop bound: 3 starts / 5 min then failed, not an endless restart storm
+StartLimitIntervalSec=300
+StartLimitBurst=3
+
+[Service]
+Type=simple
+ExecStart={exec_start}
+Restart=always
+RestartSec=10
+StandardOutput=append:{log}
+StandardError=append:{log}
+
+[Install]
+WantedBy=default.target
+"""
+
+
+def _dial_plist_text(port: int, hub: str | None = None, pin: str = "") -> str:
+    """macOS LaunchAgent for the shim (pure — tests pin the content)."""
+    prog = [f"<string>{sys.executable}</string>"]
+    if not _is_frozen():
+        prog.append(f"<string>{Path(__file__).resolve()}</string>")
+    prog += ["<string>dial</string>", f"<string>--port</string>",
+             f"<string>{port}</string>"]
+    if hub:
+        prog += ["<string>--hub</string>", f"<string>{hub}</string>"]
+    if pin:
+        prog += ["<string>--pin</string>", f"<string>{pin}</string>"]
+    args_xml = "\n    ".join(prog)
+    log = STATE_DIR / "dial.log"
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>org.hivv.dial</string>
+  <key>ProgramArguments</key>
+  <array>
+    {args_xml}
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>{log}</string>
+  <key>StandardErrorPath</key><string>{log}</string>
+</dict>
+</plist>
+"""
+
+
+def _dial_run(cmd: list) -> int:
+    """Run a list-form command (never a shell), return its exit code."""
+    try:
+        return subprocess.run(cmd, capture_output=True, timeout=20).returncode
+    except Exception:
+        return 1
+
+
+def _dial_argv(port: int, hub: str | None = None, pin: str = "") -> list:
+    """argv to run the shim in the FOREGROUND (service ExecStart + spawn)."""
+    argv = [sys.executable]
+    if not _is_frozen():
+        argv.append(str(Path(__file__).resolve()))
+    argv += ["dial", "--port", str(port)]
+    if hub:
+        argv += ["--hub", hub]
+    if pin:
+        argv += ["--pin", pin]
+    return argv
+
+
+def _dial_spawn(port: int, hub: str | None = None, pin: str = "") -> int | None:
+    """Detached fallback when no service manager is available (Windows, or
+    systemd/launchd refused). Returns the pid, or None."""
+    kw = {}
+    if IS_WINDOWS:
+        kw["creationflags"] = 0x00000008 | 0x00000200  # DETACHED | NEW_PROCESS_GROUP
+    else:
+        kw["start_new_session"] = True
+    log_f = None
+    try:
+        log_path = STATE_DIR / "dial.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_f = log_path.open("a")
+        p = subprocess.Popen(_dial_argv(port, hub, pin), stdout=log_f,
+                             stderr=subprocess.STDOUT,
+                             stdin=subprocess.DEVNULL, **kw)
+        return p.pid
+    except (OSError, ValueError):
+        return None
+    finally:
+        if log_f:
+            log_f.close()
+
+
+def _dial_wait(port: int | None = None, seconds: float = 4.0) -> bool:
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        if _dial_health(port, timeout=0.5):
+            return True
+        time.sleep(0.25)
+    return _dial_health(port, timeout=0.5) is not None
+
+
+def _dial_pid(port: int | None = None) -> int | None:
+    h = _dial_health(port, timeout=0.5)
+    pid = (h or {}).get("pid")
+    try:
+        return int(pid) if pid else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _dial_install_service(port: int, hub: str | None = None,
+                          pin: str = "") -> str | None:
+    """Install + enable auto-start for the shim. Returns 'systemd'|
+    'launchd'|None. Never raises — the caller falls back to a spawn."""
+    plat = platform.system()
+    if plat == "Linux" and shutil.which("systemctl"):
+        unit = Path.home() / ".config" / "systemd" / "user" / "hivv-dial.service"
+        try:
+            unit.parent.mkdir(parents=True, exist_ok=True)
+            want = _dial_unit_text(port, hub, pin)
+            if not unit.exists() or unit.read_text() != want:
+                unit.write_text(want)
+            _systemctl("--user", "daemon-reload")
+            if _systemctl("--user", "enable", "hivv-dial.service") == 0:
+                _systemctl("--user", "start", "hivv-dial.service")
+                return "systemd"
+        except OSError:
+            pass
+    if plat == "Darwin":
+        plist_dir = Path.home() / "Library" / "LaunchAgents"
+        plist_path = plist_dir / "org.hivv.dial.plist"
+        try:
+            plist_dir.mkdir(parents=True, exist_ok=True)
+            want = _dial_plist_text(port, hub, pin)
+            if not plist_path.exists() or plist_path.read_text() != want:
+                plist_path.write_text(want)
+            _dial_run(["launchctl", "bootout",
+                       f"gui/{os.getuid()}/org.hivv.dial"])
+            if _dial_run(["launchctl", "bootstrap", f"gui/{os.getuid()}",
+                          str(plist_path)]) != 0:
+                _dial_run(["launchctl", "load", "-w", str(plist_path)])
+            return "launchd"
+        except OSError:
+            pass
+    return None
+
+
+def _dial_ensure(port: int | None = None, hub: str | None = None,
+                 pin: str = "", install: bool = True) -> dict:
+    """Make sure the dial shim is running. Returns a status dict:
+    {running, port, how: already|service|spawned|failed|disabled|foreign|
+    probe-only, pid, service, error, endpoint}.
+    install=False → probe only, NO side effects (report mode, tests)."""
+    port = port or _dial_port()
+    info = {"running": False, "port": port, "how": None, "pid": None,
+            "service": None, "error": None, "endpoint": _dial_url(port)}
+    h = _dial_health(port)
+    if h:
+        info.update(running=True, how="already", pid=h.get("pid"))
+        return info
+    if _dial_disabled():
+        info["how"] = "disabled"
+        info["error"] = "opted out (hivv dial off / HIVV_DIAL_OFF)"
+        return info
+    if not install:
+        info["how"] = "probe-only"
+        return info
+    if _dial_port_state(port) == "foreign":
+        info["how"] = "foreign"
+        info["error"] = f"port {port} is in use by another app"
+        return info
+    # persistent service first (survives reboot), detached spawn as fallback
+    svc = _dial_install_service(port, hub, pin)
+    info["service"] = svc
+    if _dial_wait(port, seconds=3.0):
+        info.update(running=True, how="service", pid=_dial_pid(port))
+        return info
+    pid = _dial_spawn(port, hub, pin)
+    if _dial_wait(port, seconds=3.0):
+        info.update(running=True, how="spawned", pid=pid)
+        return info
+    info["how"] = "failed"
+    info["error"] = f"could not start the dial shim on port {port}"
+    return info
+
+
+def _dial_stop(port: int | None = None, service: bool = True) -> dict:
+    """Stop the shim: disable auto-start FIRST (so Restart=always doesn't
+    fight us), then SIGTERM any survivor. Leaves the dial.off marker so
+    setup won't auto-start it again. Returns {stopped, running, port}."""
+    port = port or _dial_port()
+    stopped = []
+    if service and shutil.which("systemctl") and _service_state("hivv-dial.service"):
+        _systemctl("--user", "disable", "hivv-dial.service")
+        _systemctl("--user", "stop", "hivv-dial.service")
+        stopped.append("systemd")
+    if service and platform.system() == "Darwin":
+        plist = Path.home() / "Library" / "LaunchAgents" / "org.hivv.dial.plist"
+        if plist.exists():
+            _dial_run(["launchctl", "bootout",
+                       f"gui/{os.getuid()}/org.hivv.dial"])
+            try:
+                plist.unlink()
+            except OSError:
+                pass
+            stopped.append("launchd")
+    pid = _dial_pid(port)
+    if pid:
+        try:
+            os.kill(pid, signal.SIGTERM)
+            stopped.append(f"pid {pid}")
+        except (OSError, PermissionError):
+            pass
+        time.sleep(0.4)
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        _dial_off_marker().write_text(
+            f"off at {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+    except OSError:
+        pass
+    return {"stopped": stopped, "running": _dial_health(port) is not None,
+            "port": port}
+
+
+def _p2p_endpoint(want: bool = True, install: bool = True,
+                  port: int | None = None, hub: str | None = None,
+                  pin: str = "") -> tuple[str, dict]:
+    """(base_url, dial_info) — THE endpoint decision for OpenCode configs.
+
+    P2P default: the local dial shim (127.0.0.1:PORT/v1). Falls back to
+    https://hivv.org/v1 — reason recorded — whenever the shim cannot run,
+    so a config is NEVER written against a dead URL. install=False is
+    probe-only (report mode): it says what --write WOULD do."""
+    port = port or _dial_port()
+    base = {"enabled": True, "running": False, "port": port, "pid": None,
+            "service": None, "error": None, "endpoint": _dial_url(port)}
+    if not want or _dial_disabled():
+        return f"{HUB}/v1", {**base, "enabled": False, "how": "disabled",
+                             "endpoint": None,
+                             "error": "opted out (--no-shim / dial off / HIVV_DIAL_OFF)"}
+    h = _dial_health(port)
+    if h:
+        return base["endpoint"], {**base, "running": True, "how": "already",
+                                  "pid": h.get("pid")}
+    state = _dial_port_state(port)
+    if state == "foreign":
+        why = f"port {port} is in use by another app"
+        return f"{HUB}/v1", {**base, "how": "foreign", "error": why,
+                             "endpoint": None, "fallback": "hub"}
+    if not install:
+        # report mode: no side effects — say what --write will do
+        return base["endpoint"], {**base, "how": "will-start"}
+    st = _dial_ensure(port=port, hub=hub, pin=pin, install=True)
+    if st["running"]:
+        return st["endpoint"], {**base, "running": True, "how": st["how"],
+                                "pid": st.get("pid"), "service": st.get("service")}
+    return f"{HUB}/v1", {**base, "how": st.get("how") or "failed",
+                         "error": st.get("error") or "could not start the shim",
+                         "endpoint": None, "fallback": "hub"}
+
+
+def _opencode_config_for(base_url: str) -> dict:
+    """OPENCODE_CONFIG with the provider pointed at base_url (deep copy —
+    the module constant must never be mutated by a caller)."""
+    cfg = json.loads(json.dumps(OPENCODE_CONFIG))  # JSON-safe deep copy
+    cfg["providers"]["hivv"]["settings"]["baseURL"] = base_url
+    return cfg
+
+
+def _hivv_owned_base_urls() -> set:
+    """baseURL values WE manage — safe to migrate on re-setup.
+    A user's own proxy URL is NOT in here and is never touched."""
+    urls = {f"{HUB}/v1", "https://hivv.org/v1", "http://hivv.org/v1"}
+    for p in {DIAL_PORT_DEFAULT, _dial_port()}:
+        urls |= {f"http://127.0.0.1:{p}/v1", f"http://localhost:{p}/v1"}
+    return urls
+
+
 def _setup_write_config(target: Path, config: dict | None = None) -> dict:
     """Merge `config` (default: OPENCODE_CONFIG) into target (JSONC-aware).
     Never overwrites without a backup: an existing file is copied to
@@ -17834,6 +19414,21 @@ def _setup_write_config(target: Path, config: dict | None = None) -> dict:
                 if isinstance(prov, dict) and "hivv" in prov and not isinstance(prov["hivv"], dict):
                     del prov["hivv"]
                 merged = _deep_merge(existing, cfg)
+                # Migrate a HIVV-owned endpoint (hub ↔ local shim) to whatever
+                # THIS run decided; a user's own baseURL is never touched.
+                # AFTER the merge on purpose: existing-wins would otherwise
+                # keep the old URL forever, and "merged == existing" must see
+                # the change so the migration actually lands on disk. The
+                # chain is rebuilt by the merge whenever cfg carries the full
+                # path (it always does), so this mutates merged, not existing.
+                try:
+                    old_bu = merged["providers"]["hivv"]["settings"]["baseURL"]
+                    new_bu = cfg["providers"]["hivv"]["settings"]["baseURL"]
+                    if old_bu != new_bu and old_bu in _hivv_owned_base_urls():
+                        merged["providers"]["hivv"]["settings"]["baseURL"] = new_bu
+                        info["migrated_base_url"] = [old_bu, new_bu]
+                except (KeyError, TypeError):
+                    pass
                 if merged == existing:
                     info["action"] = "already up to date"
                     return info
@@ -18116,10 +19711,22 @@ def cmd_opencode(args) -> None:
     raw_plan = gui_data.get("plan") or {}
     local_gw = _probe_local_gateway()
     cfg = build_opencode_config(raw_plan, local_gw)
+    # P2P default: swap a HIVV-owned endpoint (the hub) for the local dial
+    # shim when it can run. Local/gateway/user URLs are left alone.
+    # --wire actually starts the shim; a report only probes it.
+    want_shim = not bool(getattr(args, "no_shim", False))
+    base_url, dial_info = _p2p_endpoint(want=want_shim, install=do_wire,
+                                        hub=HUB)
+    settings = (cfg.get("providers", {}).get("hivv", {}) or {}).get("settings", {})
+    if settings.get("baseURL") in _hivv_owned_base_urls():
+        cfg["providers"]["hivv"]["settings"]["baseURL"] = base_url
     # The endpoint shown to the operator is the one in the CONFIG we would
     # write — not the raw plan, which may be empty when the GUI registry is
-    # unavailable.
+    # unavailable. (settings spells it baseURL; base_url kept as a fallback
+    # for plans that spell it that way.)
     base = ((cfg.get("providers", {}).get("hivv", {})
+                .get("settings", {}) or {}).get("baseURL")
+            or (cfg.get("providers", {}).get("hivv", {})
                 .get("settings", {}) or {}).get("base_url")
             or raw_plan.get("base_url")
             or f"{HUB}/v1")
@@ -18134,6 +19741,7 @@ def cmd_opencode(args) -> None:
             },
             "wired": {"project": wired_here, "global": wired_glob},
             "config": cfg,
+            "dial": dial_info,
             "install_command": _opencode_install_cmd(),
             "next_steps": _opencode_next_steps(installed, wired_here or wired_glob),
         }, indent=2))
@@ -18162,7 +19770,15 @@ def cmd_opencode(args) -> None:
 
     offline = base.startswith(("http://127.0.0.1", "http://localhost"))
     print(f"  {C}→{R} endpoint: {base}")
-    if offline:
+    if base == _dial_url():
+        print(f"  {G}  (P2P — direct to bees; hivv.org only for route dials){R}")
+        if not dial_info.get("running"):
+            if dial_info.get("error"):
+                print(f"  {Y}  {dial_info['error']}{R}")
+            else:
+                print(f"  {Y}  (shim not running — `{APP} setup --write` "
+                      f"starts it and writes this config){R}")
+    elif offline:
         print(f"  {G}  (local — works offline){R}")
     else:
         print(f"  {Y}  (needs the internet — run `{APP} setup --gui --profile local` "
@@ -18203,6 +19819,7 @@ def cmd_setup(args) -> None:
     det = _setup_detect()
     as_json = bool(getattr(args, "json_output", False))
     write_arg = getattr(args, "write", None)     # None = no --write, "" = default path
+    dry = bool(getattr(args, "dry_run", False))
     # resolve the config target (shown even without --write)
     if write_arg:
         target = Path(write_arg).expanduser()
@@ -18210,7 +19827,21 @@ def cmd_setup(args) -> None:
         target = Path.home() / ".config" / "opencode" / "opencode.jsonc"
     else:
         target = Path.cwd() / "opencode.jsonc"
-    write_info = _setup_write_config(target) if write_arg is not None else None
+    # ── THE endpoint decision: P2P (local dial shim) by default ──
+    # --write actually starts the shim; a report or dry-run only probes it.
+    # --no-shim opts out for this run (writes the hub URL instead).
+    want_shim = not bool(getattr(args, "no_shim", False))
+    will_write = write_arg is not None and not dry
+    base_url, dial_info = _p2p_endpoint(want=want_shim, install=will_write,
+                                        hub=HUB)
+    cfg = _opencode_config_for(base_url)
+    if will_write:
+        write_info = _setup_write_config(target, cfg)
+    elif write_arg is not None:
+        write_info = {"path": str(target), "action": "dry run (not written)",
+                      "backup": None, "migrated_base_url": None}
+    else:
+        write_info = None
 
     def _provider_installed(path: Path) -> bool:
         """Is the hivv provider already present in this config? (JSONC-aware)"""
@@ -18238,8 +19869,9 @@ def cmd_setup(args) -> None:
     gui = _setup_gui(args, det)
 
     if as_json:
-        print(json.dumps({"detect": det, "config": OPENCODE_CONFIG,
-                          "write": write_info, "gui": gui}, indent=2))
+        print(json.dumps({"detect": det, "config": cfg,
+                          "dial": dial_info, "write": write_info,
+                          "gui": gui}, indent=2))
         return
 
     B, R = "\033[1m", "\033[0m"
@@ -18259,10 +19891,15 @@ def cmd_setup(args) -> None:
               f" | bash{R}")
         print(f"    (npm/brew/mise: see https://opencode.ai/docs/cli)")
     if write_info:
-        color = G if write_info["action"] in ("created", "merged", "already up to date") else X
+        good = ("created", "merged", "already up to date")
+        color = G if write_info["action"] in good else (
+            Y if str(write_info["action"]).startswith("dry run") else X)
         print(f"  config: {color}{write_info['path']} — {write_info['action']}{R}")
         if write_info.get("backup"):
             print(f"          backup saved: {write_info['backup']}")
+        if write_info.get("migrated_base_url"):
+            old_bu, new_bu = write_info["migrated_base_url"]
+            print(f"          {Y}→ migrated baseURL: {old_bu} → {new_bu}{R}")
         if write_info["action"] == "merged":
             print(f"          {Y}edit, not overwrite — your existing settings were kept "
                   f"(they win over ours){R}")
@@ -18271,10 +19908,29 @@ def cmd_setup(args) -> None:
     else:
         print(f"  config: {target} {Y}(not written yet — see Next below){R}")
     print(f"  {B}canonical config{R}:")
-    print(textwrap.indent(json.dumps(OPENCODE_CONFIG, indent=2), "    "))
+    print(textwrap.indent(json.dumps(cfg, indent=2), "    "))
+    # P2P status — the whole point: is the local dial shim up?
+    if not dial_info.get("enabled"):
+        print(f"  {Y}·{R} P2P off ({dial_info.get('error') or 'opted out'}) — "
+              f"requests relay through {HUB_NAME}")
+    elif dial_info.get("running"):
+        print(f"  {G}✓{R} P2P: dial shim on 127.0.0.1:{dial_info['port']} "
+              f"(pid {dial_info.get('pid') or '?'}) — requests go direct to bees")
+        print(f"        hivv.org is only dialed for route picks + telemetry")
+    elif dial_info.get("error"):
+        print(f"  {Y}·{R} P2P unavailable — this run uses the hub instead")
+        print(f"        {Y}{dial_info['error']}{R}")
+    elif will_write:
+        print(f"  {Y}·{R} P2P: starting the dial shim now")
+    else:
+        print(f"  {Y}·{R} P2P: shim not running — `{APP} setup --write` starts it")
     print(f"  {Y}note{R}: HIVV_API_KEY is optional — anonymous tier works (rate-limited)")
-    print(f"        the hivv provider routes every request through the hive")
-    print(f"        (local LLM → volunteer relay → cloud)")
+    if base_url.startswith(("http://127.0.0.1", "http://localhost")):
+        print(f"        P2P: requests go direct to bees via the local dial shim;")
+        print(f"        hivv.org only picks the route + receives telemetry")
+    else:
+        print(f"        the hivv provider routes every request through the hive")
+        print(f"        (local LLM → volunteer relay → cloud)")
     print()
 
     # ── 2. VS Code ────────────────────────────────────────────────
@@ -18342,6 +19998,8 @@ def cmd_setup(args) -> None:
     # ── 4. Verify ─────────────────────────────────────────────────
     print(f"{B}── Verify {R}{'─' * 49}")
     print(f"  curl -s {HUB}/v1/models")
+    if base_url.startswith(("http://127.0.0.1", "http://localhost")):
+        print(f"  curl -s http://127.0.0.1:{dial_info['port']}/healthz")
     print(f'  {APP} chat "ping" --mode=fast')
     print()
 
@@ -18359,8 +20017,15 @@ def cmd_setup(args) -> None:
         print(f"  2. {B}opencode{R}                      # in any project directory")
         print(f"  3. type {B}/models{R} → pick {B}hivv/auto{R}   "
               f"# or hivv/smart · hivv/fast · hivv/cheap · hivv/private")
-        print(f"  {Y}fast path (optional): run `{APP} dial` in another terminal, then set{R}")
-        print(f"     {Y}\"baseURL\": \"http://127.0.0.1:3911/v1\"  # direct-to-bee, hub only on dial{R}")
+        if dial_info.get("running"):
+            print(f"  {G}✓{R} P2P active — OpenCode → 127.0.0.1:{dial_info['port']}/v1 "
+                  f"(direct-to-bee; hivv.org only for route dials)")
+        elif dial_info.get("enabled"):
+            print(f"  {Y}·{R} P2P: `{APP} setup --write` starts the shim → "
+                  f"127.0.0.1:{dial_info['port']}/v1")
+        else:
+            print(f"  {Y}·{R} P2P off ({dial_info.get('error') or 'opted out'}) — "
+                  f"requests relay through {HUB_NAME}")
     else:
         print(f"  {G}✓{R} hivv provider installed in {installed_path}")
         print(f"  1. {B}opencode{R}                      # in any project directory")
@@ -18368,8 +20033,15 @@ def cmd_setup(args) -> None:
               f"# or hivv/smart · hivv/fast · hivv/cheap · hivv/private")
         print(f"  3. test the loop: ask it "
               f"{Y}\"run `echo hi` in the shell and tell me its output\"{R}")
-        print(f"  {Y}fast path (optional): run `{APP} dial` in another terminal, then set{R}")
-        print(f"     {Y}\"baseURL\": \"http://127.0.0.1:3911/v1\"  # direct-to-bee, hub only on dial{R}")
+        if dial_info.get("running"):
+            print(f"  {G}✓{R} P2P active — OpenCode → 127.0.0.1:{dial_info['port']}/v1 "
+                  f"(direct-to-bee; hivv.org only for route dials)")
+        elif dial_info.get("enabled"):
+            print(f"  {Y}·{R} P2P: `{APP} setup --write` starts the shim → "
+                  f"127.0.0.1:{dial_info['port']}/v1")
+        else:
+            print(f"  {Y}·{R} P2P off ({dial_info.get('error') or 'opted out'}) — "
+                  f"requests relay through {HUB_NAME}")
     print()
 
 
@@ -18468,18 +20140,123 @@ def cmd_code(args) -> None:
 
 
 # ── hivv dial — localhost OpenAI-compatible proxy shim ─────────────────
-def cmd_dial(args) -> None:
-    """hivv dial [--port N] [--hub URL] [--pin NODE|URL] — local OpenAI proxy.
+def _dial_manage(what: str, port: int, hub: str, pin: str = "") -> None:
+    """`hivv dial on|off|status` — the lifecycle surface.
+    on: start the shim + install auto-start (survives reboot)
+    off: stop it + disable auto-start + remember the opt-out
+    status: probe and report (exit 0 running, 1 not)"""
+    G2, Y2, R2 = "\033[32m", "\033[33m", "\033[0m"
+    if what == "status":
+        h = _dial_health(port)
+        if h:
+            print(f"{APP} dial: running on 127.0.0.1:{port} "
+                  f"(pid {h.get('pid', '?')}, "
+                  f"{h.get('candidates', 0)} candidate(s), "
+                  f"cache {h.get('cache_age_s', 0)}s old)")
+            if pin:
+                print(f"  pinned: {pin}")
+            unit = (Path.home() / ".config" / "systemd" / "user"
+                    / "hivv-dial.service")
+            plist = Path.home() / "Library" / "LaunchAgents" / "org.hivv.dial.plist"
+            if unit.exists():
+                print("  auto-start: systemd user unit hivv-dial.service")
+            elif plist.exists():
+                print("  auto-start: LaunchAgent org.hivv.dial")
+            else:
+                print("  auto-start: not installed (dies at reboot/logout)")
+            sys.exit(0)
+        msg = f"{APP} dial: NOT running on 127.0.0.1:{port}"
+        if _dial_disabled():
+            msg += " — opted out (`hivv dial on` to re-enable)"
+        elif _dial_port_state(port) == "foreign":
+            msg += f" — port {port} is in use by another app"
+        print(msg)
+        print(f"  start: {APP} dial on    stop: {APP} dial off")
+        sys.exit(1)
+    if what == "on":
+        try:
+            _dial_off_marker().unlink()
+        except OSError:
+            pass
+        info = _dial_ensure(port=port, hub=hub, pin=pin, install=True)
+        if info["running"]:
+            how = {"already": "already running",
+                   "service": "started (auto-start installed)",
+                   "spawned": "started (background process)"}.get(
+                       info["how"], info["how"])
+            print(f"{APP} dial: {how} on 127.0.0.1:{port} "
+                  f"(pid {info.get('pid') or '?'})")
+            print(f"  endpoint: {info['endpoint']}")
+            if info.get("service") == "systemd":
+                print("  auto-start: hivv-dial.service (survives reboot)")
+            elif info.get("service") == "launchd":
+                print("  auto-start: org.hivv.dial (survives reboot)")
+            elif info["how"] == "spawned":
+                print(f"  {Y2}note: no service manager here — it will NOT "
+                      f"survive a reboot{R2}")
+            return
+        die(f"dial: could not start on port {port} — "
+            f"{info.get('error') or 'unknown error'}")
+    # what == "off"
+    res = _dial_stop(port, service=True)
+    if res["running"]:
+        die(f"dial: still answering on port {port} — "
+            f"try: pkill -f 'dial --port {port}'")
+    if res["stopped"]:
+        print(f"{APP} dial: stopped ({', '.join(res['stopped'])})")
+    else:
+        print(f"{APP} dial: was not running "
+              f"(opt-out marker left — setup won't auto-start it)")
+    print(f"  OpenCode configs pointing at 127.0.0.1:{port} will fail —")
+    print(f"    run `{APP} setup --write --no-shim` to repoint them at the hub")
 
-    The connection STICKS to a specific bee/model: the hub is consulted only
-    for the first dial (or in the BACKGROUND afterwards) — the data plane is
-    direct-to-bee, hivv.org stays a quick control plane (selection, speed/
-    quality telemetry, distribution, failover). --pin locks one bee (or a raw
-    endpoint URL) with no rotation and no hub fallback."""
-    port = int(getattr(args, "port", 0) or 3911)
+
+# Model names that are HIVV aliases (or unknown placeholders), NOT a real
+# model a bee can be asked for by name.
+_DIAL_ALIAS_MODELS = {"auto", "smart", "fast", "cheap", "private",
+                      "local", "pinned"}
+
+
+def _fwd_payload(raw: bytes, body: dict, cand: dict) -> bytes:
+    """The bytes to forward for THIS candidate. Verbatim by default; a DIRECT
+    candidate with a real model name gets the model field rewritten to it —
+    the hub routes aliases, a bee's llama.cpp/ollama server needs its own
+    model name (ollama 404s on "auto"; llama.cpp ignores the field, so this
+    is safe for both). Hub candidates keep the alias — THE HUB routes on it.
+    Pure: never mutates the body dict."""
+    if cand.get("transport") == "hub":
+        return raw
+    m = cand.get("model")
+    if (not isinstance(m, str) or not m
+            or m in _DIAL_ALIAS_MODELS
+            or body.get("model") == m):
+        return raw
+    try:
+        b = dict(body)
+        b["model"] = m
+        return json.dumps(b).encode()
+    except (TypeError, ValueError):
+        return raw
+
+
+def cmd_dial(args) -> None:
+    """hivv dial [run|on|off|status] [--port N] [--hub URL] [--pin NODE|URL].
+
+    run (default) = the foreground proxy: the connection STICKS to a specific
+    bee/model — the hub is consulted only for the first dial (or in the
+    BACKGROUND afterwards), the data plane is direct-to-bee, hivv.org stays a
+    quick control plane (selection, speed/quality telemetry, distribution,
+    failover). on/off = start/stop + auto-start across reboots; status =
+    probe (exit 0 running, 1 not). --pin locks one bee (or a raw endpoint
+    URL) with no rotation and no hub fallback."""
+    what = (getattr(args, "dial_cmd", None) or "run").lower()
+    port = int(getattr(args, "port", 0) or _dial_port())
     hub = (getattr(args, "hub", None) or HUB).rstrip("/")
     pin = (getattr(args, "pin", None) or "").strip() \
         or os.environ.get("HIVV_DIAL_PIN", "").strip()
+    if what in ("on", "off", "status"):
+        _dial_manage(what, port, hub, pin)
+        return
 
     # ── stable shim id: sha1(user@host)[:12], written once ────────
     shim_file = STATE_DIR / "dial-id"
@@ -18650,6 +20427,7 @@ def cmd_dial(args) -> None:
                         n = len(cache["candidates"]) or len(last_good["candidates"])
                         age = int(time.time() - cache["ts"]) if cache["ts"] else 0
                     self._send_json(200, {"ok": True, "shim": "hivv-dial",
+                                          "pid": os.getpid(),
                                           "candidates": n, "cache_age_s": age})
                     return
                 if path == "/v1/models":
@@ -18730,7 +20508,8 @@ def cmd_dial(args) -> None:
                         continue
                     fwd[k] = v.replace("\r", " ").replace("\n", " ")
                 fwd["Accept-Encoding"] = "identity"  # never buffer compressed bytes
-                fwd["Content-Length"] = str(len(raw))
+                # NB: Content-Length is per-candidate — a direct bee may get
+                # the model field rewritten (_fwd_payload), which changes size.
 
                 chosen = None
                 status = 0
@@ -18746,6 +20525,8 @@ def cmd_dial(args) -> None:
                     fwd.pop("X-Hivv-Ticket", None)   # ticket is per-candidate
                     if cand.get("ticket"):
                         fwd["X-Hivv-Ticket"] = str(cand["ticket"])
+                    payload = _fwd_payload(raw, body, cand)
+                    fwd["Content-Length"] = str(len(payload))
                     conn = None
                     try:
                         conn = (http_client.HTTPSConnection(host, pnum, timeout=5)
@@ -18753,7 +20534,7 @@ def cmd_dial(args) -> None:
                         conn.connect()
                         if conn.sock is not None:
                             conn.sock.settimeout(300)   # read timeout (spec: min(300000 ms, …))
-                        conn.request("POST", upath, body=raw, headers=fwd)
+                        conn.request("POST", upath, body=payload, headers=fwd)
                         resp = conn.getresponse()
                         if resp.status >= 500:
                             continue   # bee-side failure → rotate to next candidate
@@ -18852,6 +20633,12 @@ def cmd_dial(args) -> None:
     try:
         srv = DialServer(("127.0.0.1", port), DialHandler)
     except OSError as e:
+        # OUR shim already there vs a foreign app on the port — say which
+        h = _dial_health(port, timeout=0.5)
+        if h:
+            die(f"dial: already running on 127.0.0.1:{port} "
+                f"(pid {h.get('pid', '?')}) — `{APP} dial status` to inspect, "
+                f"`{APP} dial off` to stop")
         die(f"dial: cannot bind http://127.0.0.1:{port} — {e}")
 
     print(f"[{APP}] dial ready — OpenCode/any OpenAI client → "
@@ -19022,6 +20809,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp_oc.add_argument("--json", dest="json_output", action="store_true", help="output raw JSON")
     sp_oc.add_argument("--wire", action="store_true", help="write the hivv provider into opencode.jsonc")
     sp_oc.add_argument("--why", action="store_true", help="explain why OpenCode is recommended")
+    sp_oc.add_argument("--no-shim", dest="no_shim", action="store_true",
+                       help="point straight at the hub instead of the local dial shim")
     sp_tl = sub.add_parser("capabilities", help="what can this HIVV instance do? (capability discovery)")
     sp_tl.add_argument("--json", dest="json_output", action="store_true", help="output raw JSON")
     sp_pb = sub.add_parser("problems", help="what is breaking globally? (error log + incidents)")
@@ -19172,6 +20961,23 @@ def build_parser() -> argparse.ArgumentParser:
                         help="check locally but don't send the report to the hub")
     sp_sec.add_argument("--json", dest="json_output", action="store_true", help="machine-readable output (pure JSON on stdout)")
 
+    sp_id = sub.add_parser("identity",
+                           help="this bee's Ed25519 identity: key, principal, hub binding")
+    sp_id.add_argument("action", nargs="?", default="status",
+                       choices=["status", "show", "rotate", "keygen", "receipts",
+                                "revoke", "endorse", "operator"],
+                       help="status (default) · rotate = new key + instant handover · receipts · revoke = put this key on the public CRL · endorse <node> = sign an operator endorsement · operator = this operator's key")
+    sp_id.add_argument("target", nargs="?", default=None,
+                       help="endorse: the node id to endorse")
+    sp_id.add_argument("--json", dest="json_output", action="store_true",
+                       help="machine-readable output (pure JSON on stdout)")
+    sp_id.add_argument("--limit", type=int, default=20,
+                       help="receipts: how many to show (default 20, max 64)")
+    sp_id.add_argument("--role", default="owner",
+                       help="endorse: role to assert (default owner)")
+    sp_id.add_argument("--reason", default=None,
+                       help="revoke: why — recorded on the public CRL")
+
     sp_st = sub.add_parser("selftest",
                            help="full node health battery — local, or REMOTELY on a bee (signed op, result via heartbeat)")
     sp_st.add_argument("node", nargs="?", default=None, help="bee to test remotely (omit = this machine)")
@@ -19185,6 +20991,24 @@ def build_parser() -> argparse.ArgumentParser:
     sp_t.add_argument("scope", nargs="?", default="all",
                       choices=["all", "everything", "tools"],
                       help="all/everything = the whole suite · tools = just the toolkit (default: all)")
+
+    # eval — the study bench: golden questions × route modes, scored
+    sp_ev = sub.add_parser("eval", help="study bench: golden questions × route modes, scored")
+    ev_sub = sp_ev.add_subparsers(dest="eval_action")
+    sp_er = ev_sub.add_parser("run", help="run a suite across route modes and score the answers")
+    sp_er.add_argument("--suite", default=None, help="path to a suite JSON (default: builtin)")
+    sp_er.add_argument("--modes", default="smart",
+                       help="comma list: smart,fast,cheap,private,quality,balanced (default: smart)")
+    sp_er.add_argument("--model", default=None,
+                       help="pin the answering model, substring match (e.g. gemma-4, qwen)")
+    sp_er.add_argument("--repeat", type=int, default=1, help="run the whole suite N times (default 1)")
+    sp_er.add_argument("--timeout", type=float, default=120, help="per-case timeout seconds (default 120)")
+    sp_er.add_argument("--json", action="store_true", help="machine output: one JSON document")
+    sp_er.add_argument("--no-save", action="store_true", help="do not write the run under STATE_DIR/evals/")
+    sp_er.add_argument("--strict", action="store_true", help="exit 1 if any case fails")
+    sp_ec = ev_sub.add_parser("cases", help="print the cases a suite would run")
+    sp_ec.add_argument("--suite", default=None, help="path to a suite JSON (default: builtin)")
+
     sp_v = sub.add_parser("volunteer", help="relay jobs — ON by default; on|off|status (opt out: volunteer off)")
     sp_v.add_argument("action", nargs="?", choices=["on", "off", "status"], default="status")
     sp_sh = sub.add_parser("share", help="broadcast what you're working on to the hive 🐝")
@@ -19300,6 +21124,9 @@ def build_parser() -> argparse.ArgumentParser:
                        help="also write the GUI tool configs (VS Code, JetBrains, Zed, …)")
     sp_su.add_argument("--dry-run", dest="dry_run", action="store_true",
                        help="show what would be written without writing anything")
+    sp_su.add_argument("--no-shim", dest="no_shim", action="store_true",
+                       help="point straight at the hub instead of the local "
+                            "dial shim (default: P2P when the shim can run)")
     sp_su.add_argument("--hub", default=None, metavar="URL",
                        help="the HIVV hub to point at (default: the public hive)")
 
@@ -19314,7 +21141,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     # local OpenAI-compatible proxy shim: hub dials once, then direct-to-bee
     sp_dl = sub.add_parser("dial", help="local OpenAI proxy shim — dial once, then talk straight to a specific bee")
-    sp_dl.add_argument("--port", type=int, default=3911, help="listen port (default 3911)")
+    sp_dl.add_argument("dial_cmd", nargs="?", default="run",
+                       choices=("run", "on", "off", "status"),
+                       help="run (default) = foreground proxy · on/off = start/stop + auto-start · status = probe (exit 0/1)")
+    sp_dl.add_argument("--port", type=int, default=None,
+                       help="listen port (default 3911 or $HIVV_DIAL_PORT)")
     sp_dl.add_argument("--pin", default="", help="stick to ONE bee: node id (e.g. masjid) or a full endpoint URL — no rotation, no hub fallback")
     add_common(sp_dl)
 
@@ -19487,6 +21318,9 @@ COMMANDS = _resolve_cmds({
     "help":            "cmd_help",
     "up":              "cmd_up",
     "speed":           "cmd_speed",
+    "eval":            "cmd_eval",
+    "eval run":        "cmd_eval_run",
+    "eval cases":      "cmd_eval_cases",
     "commands":        "cmd_commands",
     "speeds":          "cmd_speeds",
     "exam":            "cmd_exam",
@@ -19494,6 +21328,7 @@ COMMANDS = _resolve_cmds({
     "rate":            "cmd_rate",
     "quarantine":      "cmd_quarantine",
     "security":        "cmd_security",
+    "identity":        "cmd_identity",
     "history":         "cmd_history",
     "selftest":        "cmd_selftest",
     "test":            "cmd_test",
@@ -19617,6 +21452,18 @@ def main(argv: list[str]) -> None:
             print(f"  {APP} llm setup --help   every option (--model, --port, --yes, --fg)")
             print(f"  {APP} itself:            curl -sSL {HUB}/install-hivv.sh | bash")
             return
+
+    # `hivv eval …` is the study bench — never let it fall through to the
+    # smart-default and get SENT TO THE MODEL as a chat message ("eval").
+    if cmd_name == "eval":
+        if len(argv) > 1 and argv[1] == "help":
+            _print_sub_help("eval")
+            return
+        if len(argv) > 1 and not argv[1].startswith("-"):
+            if argv[1] in ("run", "cases"):
+                cmd_name = "eval " + argv[1]
+            else:
+                die(f"unknown eval action {argv[1]!r} — try: {APP} eval run · {APP} eval cases")
 
     # Feedback aliases — an AI studying the hive must be able to REPORT/SUGGEST
     # without falling into the chat smart-default (bare `hivv report ...` used
@@ -19866,6 +21713,7 @@ hub = {HUB}   version = {VERSION}
   firewall           check firewall + binding + tailscale status
   doctor --fix     auto-fix bindings + create system services
   firewall --apply   apply firewall rules (--mode lan|tailscale|open)
+  identity [rotate]  this bee's Ed25519 key + hub binding (cryptographic identity)
 
 \033[1mOne-shot subcommands (talk to {HUB_NAME}):\033[0m
    health             GET /api/health
@@ -19969,6 +21817,9 @@ def _print_sub_help(cmd: str) -> None:
         "completions":"POST /v1/chat/completions (OpenAI-compatible)\n  usage: hivv completions 'hello world'",
         "whoami":    "GET /api/control/health (cheap liveness check)",
         "doctor":    "one-glance health report (install + hub + agent + bee + version)\n  output is pasteable for support",
+        "eval":      "study bench: golden questions × route modes, scored\n  usage: hivv eval run [--modes smart,fast] [--repeat N] [--suite FILE]\n  cases: hivv eval cases [--suite FILE]",
+        "eval run":  "run a suite across route modes and score the answers\n  flags: --modes a,b,c · --model PIN (gemma-4, qwen…) · --suite FILE · --repeat N · --timeout S · --json · --no-save · --strict",
+        "eval cases": "print the cases in a suite (default: builtin)\n  usage: hivv eval cases [--suite FILE]",
         "speed":     "latency benchmark (DNS, TCP, hub ping x3, chat TTFB, CPU/RAM/disk)",
         "speeds":    "request speed log — full-reply time, first-token, tok/s per user & bee\n  usage: hivv speeds [--days N] [--limit N] [--json]",
         "commands":  "self-describing index of every command + flags (introspected from the parser)\n  usage: hivv commands [--json]   ← AI agents: fetch THIS first, then any --json",
@@ -19976,6 +21827,7 @@ def _print_sub_help(cmd: str) -> None:
         "iq":        "intelligence + personality index for THIS brain\n  usage: hivv iq [--show] [--board] [--no-judge]\n  --board = public leaderboard (IQ · score · AI judges · human votes)",
         "rate":      "rank a bee as a HUMAN — human votes weigh more than model opinions\n  usage: hivv rate <bee> <1-10> [--note \"...\"]",
         "quarantine":"network-side STOP for a bad/crash-looping node — release is human-only\n  usage: hivv quarantine <bee> [--release] [--reason \"...\"]\n  auto-fires on ≥5 re-registers/10min (hub-side)",
+        "identity":  "this bee's Ed25519 identity — key, self-certifying principal, hub binding\n  usage: hivv identity [status] [--json]  ·  hivv identity rotate (new key, instant handover)\n  receipts: hivv identity receipts [--limit N] (signed execution receipts, Phase 3)\n  the private key never leaves ~/.local/share/hivv/identity/ (0600)\n  rotate = old key signs the successor (no legacy proof) · keygen = alias\n  lost key? the agent rebinds on the next heartbeat (secret + hw_id)",
         "security":  "local network security check — score + findings, reported to the hub\n  usage: hivv security [--no-report]",
         "history":   "recent hive activity — requests (who answered, how long, tok/s)\n  usage: hivv history [--limit N] [--json]",
         "report":    "alias: send a problem report to the hub → hivv_feedback (humans read these)\n  usage: hivv report \"<what's wrong>\" [--subject S] [--json]",
@@ -19994,7 +21846,7 @@ def _print_sub_help(cmd: str) -> None:
         "request":   "request a feature\n  usage: hivv request \"<what you want>\" [--subject S] [--json]",
         "flag":      "flag something another node/user is doing\n  usage: hivv flag <target> \"<what they are doing>\" [--severity L] [--evidence T] [--json]\n  target is a node name, principal id, or content reference",
         "code":      "ask a coder bee to do a task in a git repo\n  usage: hivv code \"<task>\" --repo <git-url> [--ref BR] [--timeout S] [--wait] [--json]",
-        "dial":      "local OpenAI-compatible proxy shim — hub dials once, then forwards straight to the bee\n  usage: hivv dial [--port N] [--hub URL]   (default port 3911)\n  point OpenCode at http://127.0.0.1:3911/v1 — hub only on dial + report",
+        "dial":      "local OpenAI-compatible proxy shim — hub dials once, then forwards straight to the bee\n  usage: hivv dial [run|on|off|status] [--port N] [--hub URL]   (default port 3911)\n  on = start + auto-start · off = stop + opt out · status = probe (exit 0/1)\n  point OpenCode at http://127.0.0.1:3911/v1 — hub only on dial + report",
         "panic":     "emergency help — diagnostics + how to report a bug (paste this in support)",
         "help-bang": "alias for `panic` (the name `help!` is reserved by bash history expansion)",
         "hi":        "friendly greeter — quick chat round-trip + examples",
