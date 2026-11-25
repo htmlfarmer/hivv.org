@@ -4104,6 +4104,36 @@ def _harden_unit_file(path: Path, scope: str) -> tuple[bool, str] | None:
     return (True, f"{path}: crash-loop bound added (3 starts/5 min → failed)")
 
 
+def _unit_broken(is_daemon_exec: bool, has_fork: bool, has_pidfile: bool) -> bool:
+    """Is this agent systemd unit going to restart-loop?
+
+    Extracted so the truth table can be tested directly (the inline expression
+    it replaces was unreadable enough that nobody noticed it missed yalla's
+    exact configuration).
+
+    Valid combos:
+      * foreground `ExecStart=... _agent` + Type=simple            -> OK
+      * `ExecStart=... start` + Type=forking + PIDFile=             -> OK
+
+    Broken:
+      * daemon exec without BOTH forking and a PIDFile
+      * Type=forking with a FOREGROUND exec - systemd waits for a PIDFile
+        the process never writes, times out ("start operation timed out."),
+        and restarts forever. yalla: restart counter 1422, 1639 timeouts in
+        two days, and _self_repair (cycle%10) / auto-update (cycle%5) never
+        ran because the agent died around 90s - before cycle 5.
+
+    The old predicate was
+        (is_daemon_exec and not (has_fork and has_pidfile)) or (has_fork and not has_pidfile)
+    which reads yalla's (False, True, True) as HEALTHY: the second clause is
+    `True and not True` = False and the first is False. Verified against all
+    8 combinations - adding `has_fork and not is_daemon_exec` flips ONLY the
+    yalla case and leaves the other seven byte-identical.
+    """
+    return ((is_daemon_exec and not (has_fork and has_pidfile))
+            or (has_fork and not is_daemon_exec))
+
+
 def _self_repair(log_path) -> list:
     """Run automatic self-healing checks. Returns list of (fixed, message).
     Includes crash-loop circuit breaker: max 3 restarts per 5 minutes, then stops."""
@@ -4226,8 +4256,24 @@ WantedBy=default.target
             is_daemon_exec = exec_line.rstrip().endswith(" start") or f"/{APP} start" in exec_line
             has_fork = "Type=forking" in svc_text
             has_pidfile = "PIDFile=" in svc_text
-            broken = (is_daemon_exec and not (has_fork and has_pidfile)) or \
-                     (has_fork and not has_pidfile)
+            # Type=forking means systemd expects ExecStart to FORK and exit,
+            # leaving a PIDFile behind. A FOREGROUND exec (`_agent`) never
+            # forks, so systemd waits for the PIDFile, times out ("start
+            # operation timed out. Terminating."), and restarts - forever.
+            #
+            # yalla ran exactly that: ExecStart=... _agent + Type=forking +
+            # PIDFile=. The old predicate read it as HEALTHY because
+            #   (has_fork and not has_pidfile)  ->  True and not True  ->  False
+            #   (is_daemon_exec and ...)        ->  False
+            # so the unit validator waved through a unit that had restarted
+            # 1422 times with 1639 timeouts in two days - which is also why
+            # _self_repair (every 10th cycle) and the auto-update (every 5th)
+            # NEVER ran: the agent died at ~90s, before cycle 5.
+            #
+            # `has_fork and not is_daemon_exec` is the missing clause: forking
+            # without a daemon-style exec is broken regardless of PIDFile.
+            # Verified against all 8 combos - it flips ONLY the yalla case.
+            broken = _unit_broken(is_daemon_exec, has_fork, has_pidfile)
             if broken and svc_text:
                 home = str(Path.home())
                 share = f"{home}/.local/share/{APP}"
@@ -9437,6 +9483,43 @@ def _rederive_lan_status(payload: dict) -> None:
 
 _LOCAL_GW = "http://127.0.0.1:3011"
 
+# Hub GETs that are safe to remember briefly.
+#
+# `_do_chat` made THREE sequential hub round-trips before a model ever saw
+# the prompt - /api/control/nodes + /api/hive/perf + /api/tools/catalog -
+# measured at 502 + 241 + 128 = 871ms of a 1387ms chat on the hub box, and
+# 456ms of 836ms (55%) on yalla. All of it is Cloudflare + TLS + Caddy for
+# data whose own refresh rate is a 60s heartbeat at the very fastest; the
+# same three calls through the local gateway total 11ms.
+#
+# Deliberately NOT a "use localhost when HUB is hivv.org" shortcut: a bee
+# running its own local-first gateway would then answer from the WRONG
+# registry (its own nodes instead of the hive's). The existing offline
+# ladder in `_fetch_nodes` is hub-first for exactly this reason. A memo
+# keeps the source honest and still removes the repeated cost.
+#
+# Failures are never memoized, so a blip is retried on the next chat.
+_HUB_MEMO: dict = {}
+
+
+def _hub_get(path: str, timeout: float = 5.0, sign: bool = True,
+             ttl: float = 30.0):
+    """GET from the hub, remembering a 200 for `ttl` seconds.
+
+    Returns the same (code, payload) tuple `http()` does, so call sites
+    change by one word. Chosen ttl: 30s is half a heartbeat, so a node
+    joining or leaving is visible well before a human notices, while a
+    burst of chats pays for the hub trip exactly once.
+    """
+    key = (path, sign)
+    hit = _HUB_MEMO.get(key)
+    if hit is not None and (time.time() - hit[1]) < ttl:
+        return 200, hit[0]
+    code, payload = http("GET", path, timeout=timeout, sign=sign)
+    if code == 200:
+        _HUB_MEMO[key] = (payload, time.time())
+    return code, payload
+
 def _fetch_nodes(timeout: float = 5.0) -> tuple[int, dict | str, str]:
     """GET the node roster with an offline ladder.
 
@@ -10305,7 +10388,33 @@ def cmd_node_chat(args) -> None:
         # has no access to real-time information.
         _ask_tools = _tool_schemas()
         if _ask_tools:
-            payload_dict["tools"] = _ask_tools
+            # CONTEXT PRE-FLIGHT — the same rule `hivv chat` already applies.
+            # llama-server REFUSES an oversized prompt with HTTP 400
+            #   {"type":"exceed_context_size_error","n_ctx":1024}
+            # and never truncates (llama.cpp #17284: "context truncation is the
+            # job of the client, not the server"); --context-shift only covers
+            # GENERATION past the end, never an oversized PROMPT. So the client
+            # must measure first.
+            #
+            # This is why `hivv ask yalla` used to fail outright: yalla runs
+            # -c 4096 -np 4 → 1024 tokens/slot, the auto-attached toolkit is
+            # ~2100 tokens, so the direct path 400'd every time and only the
+            # relay saved it. Dropping the toolkit costs the model its clock;
+            # sending it costs the whole request.
+            _slot_raw = _ctx_size(ip, port, margin=0)
+            _tool_tok = _tool_tokens(ip, port, _ask_tools)
+            _max_out = int(payload_dict.get("max_tokens") or 500)
+            # + the message (~4 chars/token) + slack for the chat template.
+            _need = _tool_tok + (len(msg) // 4) + _max_out + 64
+            if _slot_raw and _need > _slot_raw:
+                print(
+                    f"\033[33m⚠ {label}:{port} slot is {_slot_raw} tokens; this "
+                    f"request needs ~{_need} (tools alone ~{_tool_tok}) — sending "
+                    f"WITHOUT tools so it can succeed instead of HTTP 400. On that "
+                    f"bee: hivv llm config --set np=1 && hivv restart llm\033[0m",
+                    file=sys.stderr)
+            else:
+                payload_dict["tools"] = _ask_tools
         payload = json.dumps(payload_dict)
 
         if show_ui:
@@ -11777,8 +11886,15 @@ def _http_err_hint(code: int) -> str:
     (repetition loop)': that mislabel sends users hunting for a bad model when
     it's slot/context config (Stuarts-iMac, 2026-11-18)."""
     if code == 400:
-        return ("→ context/slot config — run: hivv llm doctor (check n_ctx_slot); "
-                "fix: hivv llm config --set np=2 (or raise ctx) && hivv restart llm")
+        # THE OLD HINT DID NOT FIX ANYTHING. `np=2` halves the slot: with
+        # ctx=4096 that yields 2048 tokens/slot, still under the ~2100-token
+        # auto-attached toolkit, so following the printed advice kept 400ing.
+        # np=1 hands every slot the WHOLE context (llama-server only divides
+        # -c by -np when -np is given explicitly).
+        return ("→ context/slot config — the slot is too small for the "
+                "prompt/toolkit; run: hivv llm doctor (check n_ctx_slot) · "
+                "fix: hivv llm config --set np=1 && hivv restart llm "
+                "(np=2 still halves ctx and keeps 400ing)")
     if code == 401:
         return "→ api-key required (server is locked)"
     if code == 404:
@@ -12659,6 +12775,89 @@ def cmd_history(args) -> None:
     print(f"  \033[2mfull ledger: {APP} speeds · board: {APP} iq --board\033[0m\n")
 
 
+def _ctx_size(ip, port, margin=512):
+    """The REAL per-slot context of an endpoint, from llama-server's /props.
+
+    MODULE LEVEL ON PURPOSE: `_do_chat` (hivv chat) and `cmd_node_chat`
+    (hivv ask) both need it, and nested copies drift apart.
+
+    llama.cpp nests n_ctx under default_generation_settings - there is NO
+    top-level `n_ctx` key on /props. Reading only the top level always fell
+    through to the 8192 fallback, so the CLI never learned that yalla's slots
+    were 1024 tokens (4096 ctx / -np 4): too small for the ~2100-token
+    toolkit, which is why every tool request there died with HTTP 400
+    "request (2127 tokens) exceeds the available context size (1024 tokens)".
+
+    margin=0 returns the RAW slot size, for 'will this fit?' - the default 512
+    leaves headroom for the answer itself. Cached 5 minutes (a slot size only
+    changes when the server restarts); a FAILED probe is never cached, so a
+    blip cannot pin the fallback.
+    """
+    key = (ip, port, margin)
+    hit = _CTX_CACHE.get(key)
+    if hit is not None and (time.time() - hit[1]) < 300:
+        return hit[0]
+    val = 8192  # safe default when the server doesn't expose ctx size
+    try:
+        # NOTE: Request() takes NO `timeout` kwarg - that belongs on urlopen().
+        # The original line passed timeout=3 here, which raised TypeError on
+        # EVERY call, so this function silently returned the 8192 fallback no
+        # matter what the server said (the old comment blamed an unbound closure
+        # cell; the kwarg was the actual bug). The CLI could therefore never
+        # learn a slot was too small.
+        req = urllib.request.Request(f"http://{ip}:{port}/props",
+                                     headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=3) as r:
+            d = json.loads(r.read().decode("utf-8", errors="replace"))
+        gen = d.get("default_generation_settings") or {}
+        n_ctx = int(d.get("n_ctx") or gen.get("n_ctx") or 0)
+        if n_ctx > 0:
+            val = (min(max(n_ctx - margin, 128), 32768) if margin
+                   else min(n_ctx, 32768))
+    except Exception:
+        return 8192
+    _CTX_CACHE[key] = (val, time.time())
+    return val
+
+
+def _tool_tokens(ip, port, tools):
+    """Token cost of the tool schemas AS THIS SERVER counts them.
+
+    llama-server exposes POST /tokenize - one call, cached per endpoint, since
+    the toolkit is identical every request. A server without it falls back to a
+    bytes/4 estimate, measured on llama.cpp: an 8626-byte tool catalog
+    tokenized to 2123. Failures are cached too, so a missing endpoint cannot
+    cost a 4s timeout on every chat.
+    """
+    key = (ip, port)
+    hit = _TOOL_TOK_CACHE.get(key)
+    if hit is not None:
+        return hit
+    n = 0
+    try:
+        body = json.dumps({"content": json.dumps(tools)}).encode()
+        # Same trap as _ctx_size: Request() rejects a timeout kwarg.
+        req = urllib.request.Request(f"http://{ip}:{port}/tokenize", data=body,
+                                     headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=4) as r:
+            d = json.loads(r.read().decode("utf-8", errors="replace"))
+        n = len(d.get("tokens") or [])
+    except Exception:
+        n = 0
+    if not n:
+        # No /tokenize (or it failed): estimate from the serialized size.
+        # CONSERVATIVE on purpose - dropping the toolkit one request early
+        # costs the model its clock; sending it one late costs an HTTP 400
+        # and a blacklisted bee.
+        n = max(1, len(json.dumps(tools)) // 4)
+    _TOOL_TOK_CACHE[key] = n
+    return n
+
+
+_CTX_CACHE: dict = {}
+_TOOL_TOK_CACHE: dict = {}
+
+
 def _do_chat(msg: str, stream: bool = True, mode: str | None = None,
              local: bool = False) -> None:
     """Talk to a bee (node) directly. Falls back to hub only if no direct connection works.
@@ -12692,7 +12891,7 @@ def _do_chat(msg: str, stream: bool = True, mode: str | None = None,
         me_name, me_ip = "", ""
 
     # ── Step 1: Try direct connection to a node (bypass hub) ─────────
-    code, nodes_resp = http("GET", "/api/control/nodes", timeout=5)
+    code, nodes_resp = _hub_get("/api/control/nodes", timeout=5)
     if code == 200 and isinstance(nodes_resp, dict):
         nodes = nodes_resp.get("nodes", [])
         online_nodes = [n for n in nodes if n.get("status") == "online" and (n.get("lan_ip") or n.get("ip"))]
@@ -12712,7 +12911,7 @@ def _do_chat(msg: str, stream: bool = True, mode: str | None = None,
             node_tps = {}
             node_direct = set()
             try:
-                pc, perf_resp = http("GET", "/api/hive/perf", timeout=5, sign=False)
+                pc, perf_resp = _hub_get("/api/hive/perf", timeout=5, sign=False)
                 if pc == 200 and isinstance(perf_resp, dict):
                     for sm in perf_resp.get("samples", []):
                         nid = sm.get("node_id") or ""
@@ -12746,24 +12945,22 @@ def _do_chat(msg: str, stream: bool = True, mode: str | None = None,
             else:
                 random.shuffle(online_nodes)
 
-            # Probe context window size per (ip, port) so we can fill the context
-            def _ctx_size(ip, port):
-                # Import HERE, not in the enclosing scope: `_do_chat` does
-                # `import urllib.request` further down, which makes `urllib`
-                # a LOCAL of _do_chat — the closure here then read an
-                # unbound cell and every probe silently fell back to 8192.
-                import urllib.request
-                try:
-                    req = urllib.request.Request(f"http://{ip}:{port}/props",
-                        headers={"Content-Type": "application/json"}, timeout=3)
-                    with urllib.request.urlopen(req, timeout=3) as r:
-                        d = json.loads(r.read().decode("utf-8", errors="replace"))
-                        n_ctx = int(d.get("n_ctx", 0) or 0)
-                        if n_ctx > 0:
-                            return min(max(n_ctx - 512, 512), 32768)
-                except Exception:
-                    pass
-                return 8192  # safe default when server doesn't expose ctx size
+
+            # One warning per bee per process: the message is important, but
+            # repeating it on every request would drown the answer.
+            _tool_fit_warned: set = set()
+
+            def _warn_tool_fit(name, port, slot, need, tool_tok):
+                k = (name, port)
+                if k in _tool_fit_warned:
+                    return
+                _tool_fit_warned.add(k)
+                print(
+                    f"\n\033[33m⚠ {name}:{port} slot is {slot} tokens; this request "
+                    f"needs ~{need} (tools alone ~{tool_tok}). Sending WITHOUT tools "
+                    f"so it can succeed instead of HTTP 400. On that bee run: "
+                    f"hivv llm config --set np=1 (or raise ctx) && hivv restart llm"
+                    f"\033[0m", file=sys.stderr)
 
             # The toolkit the model is offered. Fetched ONCE: it comes from
             # the HUB's catalog, so the CLI can never offer a tool the hive
@@ -12822,7 +13019,37 @@ def _do_chat(msg: str, stream: bool = True, mode: str | None = None,
                         if think_off:
                             payload_dict["chat_template_kwargs"] = {"enable_thinking": False}
                         if _tool_schemas_list:
-                            payload_dict["tools"] = _tool_schemas_list
+                            # CONTEXT PRE-FLIGHT - the Ollama rule, applied here.
+                            #
+                            # llama-server REFUSES an oversized prompt with HTTP 400
+                            #   {"type":"exceed_context_size_error",
+                            #    "n_prompt_tokens":4119,"n_ctx":4096}
+                            # and never truncates: upstream closed the request to
+                            # change that as "context truncation is the job of the
+                            # client, not the server" (llama.cpp #17284), and
+                            # --context-shift does NOT help - it only covers
+                            # GENERATION running past the end, never an oversized
+                            # PROMPT. Ollama never 400s because Ollama trims FIRST
+                            # (drop whole messages from the front, always keep the
+                            # system prompt and the last message).
+                            #
+                            # So we are the client: measure, and never send a
+                            # request we know will die. Dropping the toolkit costs
+                            # the model its clock; sending it costs this bee an
+                            # error EVERY time - yalla sat at ok 8 / err 35 (81%)
+                            # purely because 2123 tool tokens cannot fit a 1024-
+                            # token slot (4096 ctx / -np 4).
+                            _slot_raw = _ctx_size(ip, port, margin=0)
+                            _tool_tok = _tool_tokens(ip, port, _tool_schemas_list)
+                            _max_out = int(payload_dict.get("max_tokens") or 512)
+                            # + the message (~4 chars/token) + slack for the chat
+                            # template that wraps both.
+                            _need = _tool_tok + (len(msg) // 4) + _max_out + 64
+                            if _slot_raw and _need > _slot_raw:
+                                payload_dict.pop("tools", None)
+                                _warn_tool_fit(name, port, _slot_raw, _need, _tool_tok)
+                            else:
+                                payload_dict["tools"] = _tool_schemas_list
                         payload = json.dumps(payload_dict)
                         # NO `import urllib.request` here: the module already
                         # imports it, and a function-level import made
@@ -16749,10 +16976,31 @@ def cmd_llm_doctor(args) -> None:
             if isinstance(_slots, list) and _slots:
                 _ns, _nc = len(_slots), int(_slots[0].get("n_ctx") or 0)
                 _eff = int(cfg.get("ctx") or (st.get("llm") or {}).get("ctx") or 4096)
-                if _nc and _nc < min(512, max(_eff // 2, 1)):
-                    print(f"  ✗ slots: {_ns} × n_ctx_slot {_nc} — TOO SMALL (requests 400!)")
-                    problems.append(f"slot context {_nc} ≪ ctx {_eff} — {APP} llm config --set np=2"
-                                    f" (or raise ctx) && {APP} restart llm")
+                # THE BAR IS THE TOOLKIT, not an arbitrary 512.
+                #
+                # The old test was `_nc < min(512, ...)` — a ceiling of 512,
+                # which sits BELOW the ~2100 tokens the auto-attached tool
+                # catalog costs. So yalla's 4 × 1024 slots printed
+                #   ✓ slots: 4 × n_ctx_slot 1024   ✓ the local LLM looks healthy
+                # while EVERY tool request died with HTTP 400 and the bee ran
+                # at ok 8 / err 35 (an 81% error rate). A green light that
+                # cannot serve a single real request is the worst possible
+                # failure mode — the whole point of this check.
+                try:
+                    _tl = _tool_schemas()
+                    _tool_cost = ((max(1, len(json.dumps(_tl)) // 4) + 512)
+                                 if _tl else 1500)
+                except Exception:
+                    _tool_cost = 3000   # conservative when we cannot measure
+                _floor = max(512, _tool_cost)
+                if _nc and _nc < _floor:
+                    _np_now = max(1, round(_eff / _nc)) if _nc else 1
+                    print(f"  ✗ slots: {_ns} × n_ctx_slot {_nc} — TOO SMALL for the "
+                          f"toolkit (need ~{_floor}) — tool requests WILL 400!")
+                    problems.append(
+                        f"slot context {_nc} < {_floor} — {APP} llm config --set np=1 "
+                        f"(→ {_eff}/slot) or --set ctx={max(_eff, _floor * _np_now)} "
+                        f"&& {APP} restart llm")
                 else:
                     print(f"  ✓ slots: {_ns} × n_ctx_slot {_nc}   (hivv config ctx: -c{_eff})")
             else:
