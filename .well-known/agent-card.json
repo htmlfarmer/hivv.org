@@ -1,0 +1,146 @@
+{
+  "protocolVersion": "1.0.0",
+  "name": "HIVV — The People's Distributed AI Network",
+  "description": "A distributed AI network: a hive of volunteer machines and peer hives that answers questions, runs tools, and writes code. Policy-gated by humans (YES / MAYBE / NO).",
+  "version": "2.0.0",
+  "url": "https://hivv.org",
+  "preferredTransport": "JSONRPC",
+  "additionalInterfaces": [
+    {
+      "url": "https://hivv.org/api/a2a",
+      "transport": "JSONRPC"
+    },
+    {
+      "url": "https://hivv.org/api/a2a/message:send",
+      "transport": "HTTP+JSON"
+    }
+  ],
+  "capabilities": {
+    "streaming": true,
+    "pushNotifications": false,
+    "stateTransitionHistory": true,
+    "extensions": [
+      {
+        "uri": "https://hivv.org/extensions/telemetry/v1",
+        "description": "Deeper telemetry — spans, histograms, SLOs and a Prometheus exposition.",
+        "params": {
+          "endpoint": "/api/telemetry"
+        }
+      },
+      {
+        "uri": "https://hivv.org/extensions/open-hives/v1",
+        "description": "Hive-to-hive task submission (open-hives/0.1).",
+        "params": {
+          "endpoint": "/api/bridge/requests"
+        }
+      }
+    ]
+  },
+  "defaultInputModes": [
+    "text/plain"
+  ],
+  "defaultOutputModes": [
+    "text/plain"
+  ],
+  "skills": [
+    {
+      "id": "hive-chat",
+      "name": "Ask the hive",
+      "description": "Send a question to the distributed AI network. The hive routes it to whichever bee can answer best — a local model on a volunteer machine, a peer hive, or a cloud model.",
+      "tags": [
+        "chat",
+        "reasoning",
+        "distributed"
+      ],
+      "examples": [
+        "Summarise the tradeoffs of leases versus locks in a job queue.",
+        "What is the capital of Bhutan?"
+      ],
+      "inputModes": [
+        "text/plain"
+      ],
+      "outputModes": [
+        "text/plain"
+      ]
+    },
+    {
+      "id": "hive-tools",
+      "name": "Use the hive toolkit",
+      "description": "The twelve tools every bee carries: web search, calculator, clock, timezones, text parsing, translation, memory, file read, and more — all behind the same policy gate.",
+      "tags": [
+        "tools",
+        "search",
+        "compute"
+      ],
+      "examples": [
+        "What time is it in Karachi right now?",
+        "Convert 3.5 GB to MiB."
+      ],
+      "inputModes": [
+        "text/plain"
+      ],
+      "outputModes": [
+        "text/plain"
+      ]
+    },
+    {
+      "id": "hive-code",
+      "name": "Coder bees",
+      "description": "Hand a repository and a task to a coder bee: it clones to a scratch worktree, runs OpenCode headless, and returns a patch with a summary.",
+      "tags": [
+        "code",
+        "patch",
+        "review"
+      ],
+      "examples": [
+        "Add a --json flag to the parser and return the patch."
+      ],
+      "inputModes": [
+        "text/plain"
+      ],
+      "outputModes": [
+        "text/plain"
+      ]
+    },
+    {
+      "id": "hive-network",
+      "name": "Inspect the network",
+      "description": "The live roster: which bees are online, what they can do, how fast they are, and how busy the hive is right now.",
+      "tags": [
+        "network",
+        "status",
+        "telemetry"
+      ],
+      "examples": [
+        "How busy is the hive?",
+        "Which bee is the fastest right now?"
+      ],
+      "inputModes": [
+        "text/plain"
+      ],
+      "outputModes": [
+        "text/plain"
+      ]
+    }
+  ],
+  "securitySchemes": {
+    "apiKey": {
+      "type": "apiKey",
+      "in": "header",
+      "name": "Authorization",
+      "description": "Bearer <hivv api key>. Absent → anonymous visitor tier (still rate-limited and still policy-gated)."
+    }
+  },
+  "security": [
+    {
+      "apiKey": []
+    }
+  ],
+  "supportsAuthenticatedExtendedCard": false,
+  "x-hivv": {
+    "hive": "hivv.org",
+    "protocol": "open-hives/0.1",
+    "mcp": "https://hivv.org/mcp",
+    "telemetry": "https://hivv.org/api/telemetry/overview"
+  }
+}
