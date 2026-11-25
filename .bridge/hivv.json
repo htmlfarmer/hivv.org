@@ -21,7 +21,8 @@
     "mcp": "https://hivv.org/mcp"
   },
   "auth": {
-    "scheme": "bearer+hmac",
+    "scheme": "bearer-optional",
+    "peer_identity": "Authorization: Bearer hive:<name>, or the bare form hive:<name> — names the calling hive for accounting. Not required: the doorbell answers anonymous requests too.",
     "docs": "https://hivv.org/api.html#auth"
   },
   "limits": {
