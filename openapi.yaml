@@ -954,6 +954,33 @@ paths:
         '404':
           description: "No identity bound yet (status: unbound)"
 
+  /api/identity/hub-key:
+    get:
+      tags: [Identity]
+      summary: The hub's public key for signed route receipts (X-Hivv-Receipt)
+      description: |
+        Every chat response may carry an `X-Hivv-Receipt` header: base64 of
+        {`statement`, `signature`, `public_key`} where the statement is
+        `{v, kind: route.receipt, ts, nonce, answered_by, transport,
+        [answer_sha256], [duration_ms]}`, signed by this key. Verify by
+        POSTing the decoded receipt to /api/identity/verify and checking the
+        returned principal equals this one. Non-streaming answers include
+        `answer_sha256` — hash the response body you received and match it;
+        streaming answers attest attribution only (the body did not exist
+        when the header went out).
+      responses:
+        '200':
+          description: The hub key
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  principal: { type: string, example: hivv_7d2ecf4c5573cbc987c8f78c638614aa }
+                  public_key: { type: string, description: base64 raw 32-byte Ed25519 key }
+                  algorithm: { type: string, example: ed25519 }
+                  schema: { type: string, example: hivv.identity.route-receipt.v1 }
+
   /api/identity/verify:
     post:
       tags: [Identity]
@@ -962,6 +989,10 @@ paths:
         Checks statement + signature against a presented public key. Verifies the
         signature AND that the claimed principal derives from the key. Never binds,
         never consumes a nonce — safe for third parties.
+        CLI: `hivv identity verify <file|->` or a pasted base64 X-Hivv-Receipt.
+        Enforcement: with `HIVV_IDENTITY_ENFORCE=1` on the gateway, register AND
+        heartbeat require an identity block (403 IDENTITY_REQUIRED); the default
+        is advisory (legacy CLIs untouched).
       requestBody:
         content:
           application/json:

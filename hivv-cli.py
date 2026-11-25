@@ -1221,6 +1221,62 @@ def cmd_identity(args) -> None:
         print(f"  view: {HUB}/api/identity/endorsements?node_id={target}")
         return
 
+    if action == "verify":
+        # Third-party verification: check a receipt/statement someone gave
+        # you (or a pasted X-Hivv-Receipt header) against the hub's keys.
+        # Input: a file path, '-' or nothing = stdin, or the base64 header
+        # itself as the target argument.
+        target = getattr(args, "target", None)
+        raw = None
+        if target and target != "-":
+            t = str(target).strip()
+            if t.startswith("eyJ"):          # base64 receipt pasted directly
+                raw = base64.b64decode(t + "=" * (-len(t) % 4)).decode("utf-8", "replace")
+            else:
+                try:
+                    raw = open(t, "r", encoding="utf-8").read()
+                except OSError as e:
+                    die(f"cannot read {t}: {e}")
+        else:
+            raw = sys.stdin.read()
+        try:
+            payload = json.loads(raw)
+        except Exception as e:
+            die(f"input is not valid JSON (or a base64 receipt): {e}")
+        if isinstance(payload, dict) and "statement" not in payload \
+                and payload.get("receipt"):
+            payload = payload["receipt"]     # accept a wrapped receipt too
+        if not isinstance(payload, dict) or "statement" not in payload \
+                or "signature" not in payload:
+            die("expected {statement, signature, public_key} — a signed receipt/statement")
+        code, out = http("POST", "/api/identity/verify", body=payload)
+        # A failed VERIFICATION comes back as HTTP 400 with {ok:false,
+        # problems:[…]} — that is a verdict, not a transport error (dying
+        # there would bury the actual reason under the support footer).
+        if not (isinstance(out, dict) and "ok" in out):
+            die(f"hub returned http {code}: {str(out)[:200]}")
+        if json_out:
+            print(json.dumps(out, indent=2))
+            if not out.get("ok"):
+                sys.exit(1)
+            return
+        st = payload.get("statement") or {}
+        if out.get("ok"):
+            print(f"  \033[32mVALID\033[0m — signed by {out.get('principal', '?')}")
+            print(f"  kind      : {st.get('kind', '?')}")
+            if st.get("node_id"):
+                print(f"  node_id   : {st.get('node_id')}")
+            if st.get("answered_by"):
+                print(f"  answered  : {st.get('answered_by')}")
+            if st.get("answer_sha256"):
+                print(f"  answer sha: {st.get('answer_sha256')[:16]}…")
+            if st.get("ts"):
+                print(f"  signed at : {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(st['ts']))}")
+        else:
+            print(f"  \033[31mINVALID\033[0m — {'; '.join(out.get('problems') or ['unknown'])}")
+            sys.exit(1)
+        return
+
     if action == "receipts":
         # Phase 3: this bee's signed execution receipts, as the hub verifies
         # them (every row was checked against this node's bound key).
@@ -9758,7 +9814,26 @@ def cmd_node(args) -> None:
             print(f"  {n.get('id', '?')} ({n.get('name', '?')}) — {n.get('status', '?')}")
         sys.exit(1)
 
+    # Cryptographic identity + measured trust (identity layer Phases 1+5) —
+    # BEST-EFFORT: an older hub without these endpoints, or a dead one, must
+    # never break `hivv node` (the core fields print regardless).
+    ident = trust_blk = None
+    try:
+        _nid = match.get("id", "")
+        _ic, _ip = http("GET", f"/api/identity/{_nid}")
+        if _ic == 200 and isinstance(_ip, dict):
+            ident = _ip
+        _tc, _tp = http("GET", f"/api/identity/trust/{_nid}")
+        if _tc == 200 and isinstance(_tp, dict):
+            trust_blk = _tp
+    except Exception:
+        ident = trust_blk = None
+
     if getattr(args, "json_output", False):
+        if ident:
+            match["identity"] = ident
+        if trust_blk:
+            match["trust"] = trust_blk
         print(json.dumps(match, indent=2))
         return
 
@@ -9779,6 +9854,34 @@ def cmd_node(args) -> None:
     print(f"  status:     {n.get('status', '?')}")
     print(f"  version:    {n.get('version', '?')}")
     print(f"  heartbeat:  {hb_str}")
+
+    # Identity + trust lines (Phases 1 + 5)
+    if ident and ident.get("principal"):
+        _rev = "  \033[31m\u26a0 REVOKED — on the public CRL\033[0m" if ident.get("revoked") else ""
+        print(f"  identity:   {ident['principal']} "
+              f"({ident.get('status', '?')}, via {ident.get('bound_via', '?')}){_rev}")
+        _mf = ident.get("manifest")
+        if isinstance(_mf, dict) and _mf.get("seq") is not None:
+            print(f"  manifest:   seq {_mf.get('seq')} — signed "
+                  f"{len(_mf.get('tools') or [])} tool(s), "
+                  f"{len(_mf.get('local_models') or [])} model(s)")
+        _endo = ident.get("endorsements") or []
+        if _endo:
+            roles = ", ".join(sorted({str(e.get('role', '?')) for e in _endo}))
+            print(f"  endorsed:   by {len(_endo)} operator statement(s) ({roles})")
+    elif ident and ident.get("status") == "unbound":
+        print("  identity:   unbound — no key yet (binds on the next identity-bearing heartbeat)")
+    if trust_blk and trust_blk.get("known"):
+        dims = trust_blk.get("dimensions") or {}
+
+        def _d(k):
+            v = dims.get(k)
+            return "\033[2m—\033[0m" if v is None else str(v)
+
+        print(f"  trust:      {trust_blk.get('score')}/6 "
+              f"(overall {trust_blk.get('overall')})  "
+              f"id {_d('identity')} \u00b7 rel {_d('reliability')} "
+              f"\u00b7 hist {_d('history')} \u00b7 receipts {_d('receipts')}")
 
     # Hardware details
     cpu = n.get("cpu_model", "?")
@@ -17196,25 +17299,48 @@ def cmd_llm_serve(args):
 #
 # `cmake` matters as much as `git`: the build needs it, and a box with git but
 # no cmake fails one step later with the same ugly traceback.
+# The FULL toolchain a source build needs — wahi 2026-11-25: git+cmake
+# passed the gate, then configure died with "No CMAKE_CXX_COMPILER could be
+# found", because a compiler (and the make that runs right after) was never
+# checked. "cxx" is a VIRTUAL key: present when ANY of g++/c++/clang++
+# exists; the package name differs per manager (g++ / gcc-c++ / gcc).
 _BUILD_TOOL_PKGS = {
-    "apt":    {"git": "git", "cmake": "cmake"},
-    "dnf":    {"git": "git", "cmake": "cmake"},
-    "yum":    {"git": "git", "cmake": "cmake"},
-    "pacman": {"git": "git", "cmake": "cmake"},
-    "apk":    {"git": "git", "cmake": "cmake"},
-    "zypper": {"git": "git", "cmake": "cmake"},
-    "brew":   {"git": "git", "cmake": "cmake"},
+    "apt":    {"git": "git", "cmake": "cmake", "cxx": "g++",     "make": "make"},
+    "dnf":    {"git": "git", "cmake": "cmake", "cxx": "gcc-c++", "make": "make"},
+    "yum":    {"git": "git", "cmake": "cmake", "cxx": "gcc-c++", "make": "make"},
+    "pacman": {"git": "git", "cmake": "cmake", "cxx": "gcc",     "make": "make"},
+    "apk":    {"git": "git", "cmake": "cmake", "cxx": "g++",     "make": "make"},
+    "zypper": {"git": "git", "cmake": "cmake", "cxx": "gcc-c++", "make": "make"},
+    "brew":   {"git": "git", "cmake": "cmake", "cxx": "gcc",     "make": "make"},
 }
 
 _BUILD_TOOL_HINTS = {
-    "apt":    "sudo apt-get update && sudo apt-get install -y git cmake",
-    "dnf":    "sudo dnf install -y git cmake",
-    "yum":    "sudo yum install -y git cmake",
-    "pacman": "sudo pacman -S --noconfirm git cmake",
-    "apk":    "sudo apk add git cmake",
-    "zypper": "sudo zypper --non-interactive install git cmake",
+    "apt":    "sudo apt-get update && sudo apt-get install -y git cmake g++ make",
+    "dnf":    "sudo dnf install -y git cmake gcc-c++ make",
+    "yum":    "sudo yum install -y git cmake gcc-c++ make",
+    "pacman": "sudo pacman -S --noconfirm git cmake gcc make",
+    "apk":    "sudo apk add git cmake g++ make",
+    "zypper": "sudo zypper --non-interactive install git cmake gcc-c++ make",
     "brew":   "brew install git cmake",
 }
+
+_BUILD_TOOL_LABELS = {"cxx": "c++ compiler"}
+
+
+def _build_tool_label(tool: str) -> str:
+    """Human name for a tool key (cxx -> "c++ compiler")."""
+    return _BUILD_TOOL_LABELS.get(tool, tool)
+
+
+def _build_tool_present(tool: str) -> bool:
+    """True when the tool exists. "cxx" = ANY C++ compiler: g++/c++/clang++.
+
+    A clang-only box has a perfectly working compiler; only the package
+    name would differ, so probe the binaries, not one spelling.
+    """
+    if tool == "cxx":
+        return any(shutil.which(c) for c in ("g++", "c++", "clang++"))
+    return bool(shutil.which(tool))
 
 
 def _build_tool_pkg_manager() -> str:
@@ -17342,9 +17468,10 @@ def _ensure_build_tools(tools: list) -> bool:
     the exact command to run and returns False — the caller then exits
     CLEANLY (no traceback).
     """
-    missing = [t for t in tools if not shutil.which(t)]
+    missing = [t for t in tools if not _build_tool_present(t)]
     if not missing:
         return True
+    names = [_build_tool_label(t) for t in missing]
 
     pm = _build_tool_pkg_manager()
     mode = _build_tool_sudo_mode(pm) if pm else ""
@@ -17354,24 +17481,24 @@ def _ensure_build_tools(tools: list) -> bool:
         # password, so users saw "installing…" immediately followed by
         # "✗ missing" (wahi 2026-11-24).
         note = " — sudo will ask for your password" if mode == "prompt" else ""
-        print(f"  \033[33m→\033[0m installing build tools: {', '.join(missing)} (via {pm}){note}…")
+        print(f"  \033[33m→\033[0m installing build tools: {', '.join(names)} (via {pm}){note}…")
         if pm == "apt":
             # apt needs its index fresh or "Unable to locate package" is common.
             _build_tool_run_privileged(["apt-get", "update"], mode, quiet=True)
         cmd = _build_tool_install_cmd(pm, missing)
         if cmd and _build_tool_run_privileged(cmd, mode):
-            still = [t for t in missing if not shutil.which(t)]
+            still = [t for t in missing if not _build_tool_present(t)]
             if not still:
-                print(f"  \033[32m✓\033[0m installed: {', '.join(missing)}")
+                print(f"  \033[32m✓\033[0m installed: {', '.join(names)}")
                 return True
 
     # Could not auto-install — print the EXACT command (never a traceback).
     hint = _BUILD_TOOL_HINTS.get(pm, "")
     if not hint:
-        hint = ("install git and cmake with your package manager, then re-run "
-                f"`{APP} llm install-llama --auto`")
+        hint = ("install git, cmake, a C++ compiler and make with your package "
+                f"manager, then re-run `{APP} llm install-llama --auto`")
     print()
-    print(f"  \033[1;31m✗\033[0m missing build tool(s): {', '.join(missing)}", file=sys.stderr)
+    print(f"  \033[1;31m✗\033[0m missing build tool(s): {', '.join(names)}", file=sys.stderr)
     print(f"  \033[1m→\033[0m install them and re-run:", file=sys.stderr)
     print(f"      {hint}", file=sys.stderr)
     print(f"      {APP} llm install-llama --auto", file=sys.stderr)
@@ -17550,8 +17677,8 @@ def cmd_llm_install_llama(args):
     # Preflight FIRST: without git/cmake the build dies one line later with a
     # raw FileNotFoundError traceback (asher@wahi 2026-11-21). Check BEFORE
     # printing "[1/3] cloning…" so the user sees the real blocker.
-    if not _ensure_build_tools(["git", "cmake"]):
-        die("cannot build llama.cpp without git and cmake — see the command above")
+    if not _ensure_build_tools(["git", "cmake", "cxx", "make"]):
+        die("cannot build llama.cpp without git/cmake/C++ compiler/make — see the command above")
 
     # What is actually at the path? A clone that died mid-pack leaves
     # ~/llama.cpp behind, and the old "already exists — skipping clone"
@@ -18397,8 +18524,8 @@ def cmd_llm_setup(args) -> None:
         # yes that cannot possibly work is a trap (asher@wahi 2026-11-21:
         # "build llama.cpp now? y" → FileNotFoundError: 'git').
         print(f"  \033[1m[1/3]\033[0m llama.cpp not built — compiling from source takes a few minutes")
-        if not _ensure_build_tools(["git", "cmake"]):
-            die("cannot build llama.cpp without git and cmake — see the command above")
+        if not _ensure_build_tools(["git", "cmake", "cxx", "make"]):
+            die("cannot build llama.cpp without git/cmake/C++ compiler/make — see the command above")
         if not _confirm("build llama.cpp now?"):
             die(f"stopped — run `{APP} llm install-llama --auto` when you're ready")
         cmd_llm_install_llama(_ArgNamespace(auto=True))
@@ -20965,10 +21092,10 @@ def build_parser() -> argparse.ArgumentParser:
                            help="this bee's Ed25519 identity: key, principal, hub binding")
     sp_id.add_argument("action", nargs="?", default="status",
                        choices=["status", "show", "rotate", "keygen", "receipts",
-                                "revoke", "endorse", "operator"],
-                       help="status (default) · rotate = new key + instant handover · receipts · revoke = put this key on the public CRL · endorse <node> = sign an operator endorsement · operator = this operator's key")
+                                "revoke", "endorse", "operator", "verify"],
+                       help="status (default) · rotate = new key + instant handover · receipts · revoke = put this key on the public CRL · endorse <node> = sign an operator endorsement · operator = this operator's key · verify FILE|<b64> = check a signed receipt/statement")
     sp_id.add_argument("target", nargs="?", default=None,
-                       help="endorse: the node id to endorse")
+                       help="endorse: the node id to endorse · verify: file path, '-' for stdin, or a pasted base64 receipt")
     sp_id.add_argument("--json", dest="json_output", action="store_true",
                        help="machine-readable output (pure JSON on stdout)")
     sp_id.add_argument("--limit", type=int, default=20,
@@ -21827,7 +21954,7 @@ def _print_sub_help(cmd: str) -> None:
         "iq":        "intelligence + personality index for THIS brain\n  usage: hivv iq [--show] [--board] [--no-judge]\n  --board = public leaderboard (IQ · score · AI judges · human votes)",
         "rate":      "rank a bee as a HUMAN — human votes weigh more than model opinions\n  usage: hivv rate <bee> <1-10> [--note \"...\"]",
         "quarantine":"network-side STOP for a bad/crash-looping node — release is human-only\n  usage: hivv quarantine <bee> [--release] [--reason \"...\"]\n  auto-fires on ≥5 re-registers/10min (hub-side)",
-        "identity":  "this bee's Ed25519 identity — key, self-certifying principal, hub binding\n  usage: hivv identity [status] [--json]  ·  hivv identity rotate (new key, instant handover)\n  receipts: hivv identity receipts [--limit N] (signed execution receipts, Phase 3)\n  the private key never leaves ~/.local/share/hivv/identity/ (0600)\n  rotate = old key signs the successor (no legacy proof) · keygen = alias\n  lost key? the agent rebinds on the next heartbeat (secret + hw_id)",
+        "identity":  "this bee's Ed25519 identity — key, self-certifying principal, hub binding\n  usage: hivv identity [status] [--json]  ·  hivv identity rotate (new key, instant handover)\n  receipts: hivv identity receipts [--limit N] (signed execution receipts)\n  verify:   hivv identity verify <file|->  or  hivv identity verify '<base64 receipt>'\n            check ANY signed receipt/statement (e.g. an X-Hivv-Receipt header)\n  the private key never leaves ~/.local/share/hivv/identity/ (0600)\n  rotate = old key signs the successor (no legacy proof) · keygen = alias\n  lost key? the agent rebinds on the next heartbeat (secret + hw_id)",
         "security":  "local network security check — score + findings, reported to the hub\n  usage: hivv security [--no-report]",
         "history":   "recent hive activity — requests (who answered, how long, tok/s)\n  usage: hivv history [--limit N] [--json]",
         "report":    "alias: send a problem report to the hub → hivv_feedback (humans read these)\n  usage: hivv report \"<what's wrong>\" [--subject S] [--json]",

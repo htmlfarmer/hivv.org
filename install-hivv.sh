@@ -356,7 +356,33 @@ _spin() {
 }
 
 # ── uninstall path ────────────────────────────────────────────────────
-need() { command -v "$1" >/dev/null 2>&1; }
+# need <tool> — is it on PATH? "cxx" is VIRTUAL: ANY C++ compiler counts
+# (g++/c++/clang++), because the PACKAGE differs per manager while the
+# ability to compile does not (wahi 2026-11-25: configure died with
+# "No CMAKE_CXX_COMPILER could be found" — git+cmake had passed the gate).
+need() {
+    case "$1" in
+        cxx) command -v g++ >/dev/null 2>&1 || command -v c++ >/dev/null 2>&1 \
+             || command -v clang++ >/dev/null 2>&1 ;;
+        *)   command -v "$1" >/dev/null 2>&1 ;;
+    esac
+}
+
+# _pkg_of <pm> <tool> — package name for a tool key on this manager
+_pkg_of() {
+    if [[ "$2" == "cxx" ]]; then
+        case "$1" in
+            dnf|yum|zypper) echo "gcc-c++" ;;
+            pacman|brew)    echo "gcc" ;;
+            *)              echo "g++" ;;
+        esac
+    else
+        echo "$2"
+    fi
+}
+
+# _tool_label <tool> — human name for a tool key
+_tool_label() { if [[ "$1" == "cxx" ]]; then echo "c++ compiler"; else echo "$1"; fi; }
 _can_sudo() { sudo -n true 2>/dev/null; }
 
 # _can_ask_sudo — a HUMAN is watching this install: safe to let sudo ask
@@ -428,13 +454,24 @@ _pkg_manual_hint() {
 #   Auto-installs via the detected package manager; on failure prints the
 #   EXACT command to run and returns 1. NEVER exits, NEVER hangs.
 ensure_build_tools() {
-    local missing=() t pm cmd hint sudo_cmd="" note="" attempt=0
+    local missing=() pkgs=() names=() all_pkgs=() t pm cmd hint sudo_cmd="" note="" attempt=0
     for t in "$@"; do
         need "$t" || missing+=("$t")
     done
     [[ ${#missing[@]} -eq 0 ]] && return 0
 
     pm="$(_pkg_mgr)"
+    # tool keys -> package names (cxx: g++/gcc-c++/gcc) and -> human labels
+    # (cxx: "c++ compiler") — the user is told what's missing in words, and
+    # the package manager in ITS spelling (wahi 2026-11-25: configure died
+    # with "No CMAKE_CXX_COMPILER could be found" — git+cmake had passed).
+    for t in "${missing[@]}"; do
+        pkgs+=("$(_pkg_of "$pm" "$t")")
+        names+=("$(_tool_label "$t")")
+    done
+    for t in "$@"; do
+        all_pkgs+=("$(_pkg_of "$pm" "$t")")
+    done
     if [[ "$pm" != "none" ]]; then
         # escalation ladder — decided BEFORE printing "installing…", so the
         # claim and the attempt can never disagree (wahi 2026-11-24: the old
@@ -450,9 +487,9 @@ ensure_build_tools() {
         fi
 
         if [[ "$attempt" -eq 1 ]]; then
-            printf '  %s→%s installing build tools: %s (via %s)%s…\n' "$BLU" "$RST" "${missing[*]}" "$pm" "$note"
+            printf '  %s→%s installing build tools: %s (via %s)%s…\n' "$BLU" "$RST" "${names[*]}" "$pm" "$note"
             if [[ "$pm" == "apt" ]]; then $sudo_cmd apt-get update >/dev/null 2>&1 || true; fi
-            cmd="$(_pkg_install_cmd "$pm" "${missing[@]}")"
+            cmd="$(_pkg_install_cmd "$pm" "${pkgs[@]}")"
             if [[ -n "$cmd" ]]; then
                 if $sudo_cmd $cmd >/dev/null 2>&1; then
                     missing=()
@@ -466,12 +503,12 @@ ensure_build_tools() {
         fi
     fi
 
-    hint="$(_pkg_manual_hint "$pm" "$@")"
-    printf '  %s!%s missing build tool(s): %s\n' "$YLW" "$RST" "${missing[*]}" >&2
+    hint="$(_pkg_manual_hint "$pm" "${all_pkgs[@]}")"
+    printf '  %s!%s missing build tool(s): %s\n' "$YLW" "$RST" "${names[*]}" >&2
     if [[ -n "$hint" ]]; then
         printf '    %sinstall them:%s %s\n' "$DIM" "$RST" "$hint" >&2
     else
-        printf '    %sinstall %s with your package manager, then re-run this command%s\n' "$DIM" "$*" "$RST" >&2
+        printf '    %sinstall %s with your package manager, then re-run this command%s\n' "$DIM" "${names[*]}" "$RST" >&2
     fi
     return 1
 }
@@ -1224,10 +1261,12 @@ if should_install_llm; then
     # the CLI expects the binary at ~/llama.cpp/build/bin/llama-server.
 
     # ── build tools first ────────────────────────────────────────────
-    # No git/cmake → the build dies with a raw traceback (asher@wahi
-    # 2026-11-21). Install them NOW or print the exact command.
-    if ! ensure_build_tools git cmake; then
-      printf '  %s!%s cannot build llama.cpp without git and cmake — skipping the local LLM\n' "$YLW" "$RST" >&2
+    # No git/cmake/C++ compiler/make → the build dies with a raw
+    # traceback (asher@wahi 2026-11-21) or mid-configure with
+    # "No CMAKE_CXX_COMPILER could be found" (2026-11-25). Install them
+    # NOW or print the exact command.
+    if ! ensure_build_tools git cmake cxx make; then
+      printf '  %s!%s cannot build llama.cpp without git/cmake/C++ compiler/make — skipping the local LLM\n' "$YLW" "$RST" >&2
       printf '    %sthe hivv node still works — it will use the API gateway%s\n' "$DIM" "$RST" >&2
       HAVE_LLAMA=0
     else
