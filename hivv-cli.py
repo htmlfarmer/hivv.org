@@ -630,7 +630,20 @@ def write_state(d: dict) -> None:
     ensure_dirs()
     payload = json.dumps(d, indent=2, sort_keys=True)
     tmp = STATE_FILE.with_name(STATE_FILE.name + ".tmp")
-    tmp.write_text(payload)
+    # state.json holds `node_secret` (48 chars) plus hw_id and the identity
+    # principal, so it must never be group- or world-readable. Path.write_text()
+    # creates with the process umask (0644 on a stock box), which is exactly
+    # what `hivv security` flagged as [medium] - on EVERY install, not just
+    # this one. os.open takes an explicit mode (masked only by umask, which
+    # never clears owner bits), and the permission is set at CREATION rather
+    # than chmod-ed afterwards, so the temp file is never briefly readable.
+    # os.replace carries tmp's mode onto the destination, so an existing
+    # world-readable state.json is repaired on the next write too.
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, payload.encode("utf-8"))
+    finally:
+        os.close(fd)
     os.replace(tmp, STATE_FILE)
 
 
@@ -12902,9 +12915,20 @@ def _security_scan() -> dict:
             f"{label} port {prt} open to the network (bind {addr})",
             "wanted (hive/LAN sharing)? keep it — else: hivv firewall --apply --mode lan")
     if fw is False:
+        # BE HONEST ABOUT WHAT THE SUGGESTED COMMAND DOES. `hivv firewall
+        # --apply` only ever runs `ufw allow ...` — there is no `ufw enable`,
+        # no `ufw default deny` and no `iptables -P INPUT` anywhere in this
+        # repo. `ufw allow` against an INACTIVE ufw stages an inert rule, so
+        # the old advice ("run --apply --mode lan") left this exact finding
+        # red forever: the remedy did not remedy. Print the sequence that
+        # actually activates protection, and put `allow 22` FIRST because a
+        # host that SSHes in from the internet (as this one does) locks itself
+        # out the moment default-deny lands without it.
         add("high" if exposed else "medium", "firewall-off",
             "host firewall is not active",
-            "hivv firewall --apply --mode lan   (or --mode tailscale)")
+            "--apply only STAGES allow-rules (ufw never gets enabled by it) · "
+            "real enable: sudo ufw allow 22/tcp && sudo ufw default deny incoming "
+            "&& sudo ufw enable — allow 22 FIRST if you SSH in from the internet")
     if not os.environ.get("HIVV_TRUSTED_FINGERPRINT"):
         add("low", "unpinned-update", "auto-update not pinned to a trusted sha",
             "export HIVV_TRUSTED_FINGERPRINT=<sha256 printed by hivv nodes>")
@@ -14797,12 +14821,28 @@ def cmd_firewall(args) -> None:
                 _run(f"sudo ufw allow 3011/tcp")
         print(f"   {ok} gateway port 3011 configured")
 
-    print(f"\n{ok} firewall configured!")
-    if mode == "lan":
-        print(f"   your LLMs are only reachable from your LAN ({lan_subnet})")
-    elif mode == "tailscale":
-        print(f"   your LLMs are only reachable via Tailscale VPN")
-        print(f"   other hivv nodes need Tailscale installed to reach you")
+    # THE OLD LINE PRINTED "firewall configured!" — untrue whenever ufw is
+    # inactive, because `--apply` never runs `ufw enable` (verified: there is
+    # no `ufw enable`, no `ufw default deny` and no `iptables -P INPUT`
+    # anywhere in this repo). Rules staged against a DISABLED ufw are inert,
+    # so the command reported success while `hivv security` kept flagging
+    # "host firewall is not active" — the remedy did not remedy. Say what
+    # actually happened, and hand over the sequence that really activates
+    # protection, with `allow 22` FIRST: a host that SSHes in from the
+    # internet locks itself out the instant default-deny lands without it.
+    if fw_tool == "ufw" and _firewall_active() is False:
+        print(f"\n   {warn} allow-rules written, but ufw is still INACTIVE — nothing is enforced yet.")
+        print(f"   to actually turn protection on (allow 22 FIRST):")
+        print(f"      sudo ufw allow 22/tcp")
+        print(f"      sudo ufw default deny incoming")
+        print(f"      sudo ufw enable")
+    else:
+        print(f"\n{ok} firewall configured!")
+        if mode == "lan":
+            print(f"   your LLMs are only reachable from your LAN ({lan_subnet})")
+        elif mode == "tailscale":
+            print(f"   your LLMs are only reachable via Tailscale VPN")
+            print(f"   other hivv nodes need Tailscale installed to reach you")
     print(f"   restart llama.cpp for changes to take effect (if binding to specific IPs)")
 
 def cmd_up(args) -> None:
