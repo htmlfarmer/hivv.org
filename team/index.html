@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>The Team — everyone trying to hack the hive</title>
+<meta name="description" content="HIVV's red team: the people trying to break in, the rewards they earn, and how to join. Hackers welcome — with rules.">
+<style>
+  :root { --accent:#00ff88; --accent-cyan:#00f0ff; --gold:#ffd93d; --red:#ff2d2d; }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { background:#0a0a14; color:#cbd5e1; font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; line-height:1.7; }
+  .wrap { max-width:880px; margin:0 auto; padding:36px 20px 64px; }
+  a { color:var(--accent-cyan); text-decoration:none; }
+  a:hover { text-decoration:underline; }
+  .hero { text-align:center; margin-bottom:26px; }
+  .hero h1 { font-size:clamp(2rem,7vw,3.4rem); font-weight:900; color:var(--red);
+    text-shadow:0 0 18px rgba(255,45,45,.5); transform:rotate(-1deg); margin-bottom:8px; }
+  .kicker { color:var(--gold); font-size:.85rem; letter-spacing:.12em; text-transform:uppercase; margin-bottom:6px; }
+  .hero .sub { color:#94a3b8; max-width:720px; margin:0 auto; }
+  section.card { background:linear-gradient(135deg,rgba(255,255,255,.03),rgba(255,255,255,.01)); border:1px solid #262633; border-radius:14px; padding:24px 26px; margin:0 0 22px; }
+  section.card h2 { font-size:1.1rem; color:#fff; margin-bottom:10px; }
+  p, li { font-size:.92rem; color:#94a3b8; margin-bottom:8px; }
+  li { margin-left:18px; }
+  strong { color:#e2e8f0; }
+  .member { border-left:3px solid var(--red); padding:10px 14px; margin:10px 0; background:#111120; border-radius:0 8px 8px 0; }
+  .member .name { color:#fff; font-weight:800; font-size:1.02rem; }
+  .member .status { display:inline-block; background:#2a1010; border:1px solid #ff2d2d66; color:#ff8a8a; border-radius:99px; padding:1px 10px; font-size:.75rem; margin-left:8px; }
+  .member .status.done { background:#102a10; border-color:#00ff8866; color:#7dffad; }
+  .pill { display:inline-block; background:#111120; border:1px solid #262633; border-radius:99px; padding:2px 10px; font-size:.78rem; color:#94a3b8; margin:2px 4px 2px 0; }
+  footer { margin-top:30px; padding-top:16px; border-top:1px solid #1f1f2e; font-size:.82rem; color:#64748b; display:flex; gap:16px; flex-wrap:wrap; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="hero">
+    <div class="kicker">hivv.org · the team</div>
+    <h1>THE TEAM</h1>
+    <div class="sub">Everyone trying to hack the hive — <strong style="color:#fff">showed off,
+    celebrated, and honestly scored</strong>. Breaking in is allowed (encouraged). Breaking
+    *real user data* is not. Find something? You get the song, the wish, and the credit. 🐝</div>
+  </div>
+
+  <section class="card">
+    <h2>🎖️ The roll call</h2>
+    <div class="member">
+      <span class="name">Upal K — "Kandu? Cando? Kendo?"</span><span class="status">IN PROGRESS</span>
+      <div style="font-size:.88rem">From 🇧🇩 Bangladesh (the hive says: awesomely under-credited).
+      Official first red-teamer — invited to attack <strong>hivv.org</strong> AND
+      <strong>blnq.org</strong>. Goals: California, NYC, Miami. Rewards: Espresso ☕ · six figures
+      from lyrz.org (paid in honey) · a wish on <a href="/wish/">/wish/</a> · his name in front of
+      people who hire. Surname spelling under verification. Be nice to his mom and dad — it's
+      basically a requirement.</div>
+    </div>
+    <div class="member">
+      <span class="name">You, reading this</span><span class="status done">RECRUITABLE</span>
+      <div style="font-size:.88rem">Yes, you. See <a href="#join">how to join</a> below. The roster
+      is short because we just opened the doors — famous is a matter of timing.</div>
+    </div>
+    <p style="font-size:.8rem;color:#64748b">Names appear with permission. IPs never appear —
+    the provenance ledger keeps those private (and it keeps them anyway 😉).</p>
+  </section>
+
+  <section class="card" id="join">
+    <h2>🪪 How to join (it's easy)</h2>
+    <ul>
+      <li><strong>Try to break things</strong> on hivv.org / blnq.org — auth, APIs, uploads,
+          the party board, the wish well.</li>
+      <li><strong>Tell us what broke.</strong> That's the whole application process —
+          message, issue, or…</li>
+      <li><strong>…or push it properly:</strong> fork
+          <a href="https://github.com/htmlfarmer/hivv" target="_blank" rel="noopener">htmlfarmer/hivv</a>
+          → branch → Pull Request. Direct push to main is reserved (our gates: tests green,
+          TESTMAP fresh, no secrets). A red-teamer's PR that passes CI earns the
+          <strong>FIRST PULL REQUEST</strong> slot up there ☝️.</li>
+      <li><strong>Don't touch real user data</strong> — and if you find some, tell us FIRST.</li>
+      <li><strong>…and if you actually hack it: you're automatically on the team.</strong>
+          Sorta. (Membership is retroactive, self-issued, and confirmed by the roster above.)</li>
+      <li>You'll be on this page. You'll get a song
+          (<a href="/party/">the response playlist</a>), a wish, and the hive's gratitude.</li>
+    </ul>
+    <p style="display:flex;gap:10px;flex-wrap:wrap;margin:12px 0">
+      <a href="https://github.com/htmlfarmer/hivv/pulls" target="_blank" rel="noopener"
+         style="background:#111120;border:1px solid #00ff8855;border-radius:8px;padding:9px 16px;color:#00ff88;font-weight:700">🔀 Pull Requests</a>
+      <a href="https://github.com/htmlfarmer/hivv/issues" target="_blank" rel="noopener"
+         style="background:#111120;border:1px solid #00f0ff55;border-radius:8px;padding:9px 16px;color:#00f0ff;font-weight:700">⚠️ Issues</a>
+      <a href="https://github.com/htmlfarmer/hivv" target="_blank" rel="noopener"
+         style="background:#111120;border:1px solid #262633;border-radius:8px;padding:9px 16px;color:#cbd5e1;font-weight:700">🐙 htmlfarmer/hivv</a>
+    </p>
+    <p><strong>What you're up against</strong> (a fair warning, because we're friendly):
+      <span class="pill">60 req/min rate limit</span><span class="pill">signed receipts</span>
+      <span class="pill">X-Hivv-Horizon warnings</span><span class="pill">the CRL</span>
+      <span class="pill">quarantine + flap detection</span><span class="pill">provenance ledger</span>
+      <span class="pill">the veil</span><span class="pill">secret scanner</span>
+      <span class="pill">CSRF + helmet</span><span class="pill">Ed25519 identities</span>
+      — full details at <a href="/security/">/security/</a>.</p>
+  </section>
+
+  <section class="card">
+    <h2>🎁 The rewards (real, honey-denominated)</h2>
+    <ul>
+      <li>☕ <strong>Espresso</strong> — Sabrina Carpenter, for the successful intruder</li>
+      <li>🍯 <strong>Six figures from lyrz.org</strong> — paid in honey; the wish well holds the IOU</li>
+      <li>🪄 <strong>A granted wish</strong> — <a href="/wish/">post it yourself</a></li>
+      <li>🎵 <strong>A song for your country</strong> — see the
+          <a href="/party/">response playlist</a> (Russia gets <em>You</em>, China gets Yussef
+          Dayes, the USA gets <em>Sleep</em>…)</li>
+      <li>🐧 <strong>Cape Town chapter membership</strong> — pending penguin selfie (ask Reza)</li>
+    </ul>
+  </section>
+
+  <section class="card">
+    <h2>📜 The one rule that isn't a joke</h2>
+    <p><strong style="color:#ff6b6b">We ban bad actors, not birthplaces</strong> — and we don't
+    publish anyone's IP or private data, ever, not even a red teamer's. Hack the code, tell the
+    truth, keep the humans safe. That's the deal. <a href="/security/">The full contract →</a></p>
+  </section>
+
+  <footer>
+    <a href="/">home</a>
+    <a href="/security/">security</a>
+    <a href="/party/">party</a>
+    <a href="/wish/">wish</a>
+    <a href="https://github.com/htmlfarmer/hivv" target="_blank" rel="noopener" title="our code — github.com/htmlfarmer/hivv" style="font-size:1.15rem">🐙</a> <span>hack us kindly · hivv.org 🐝</span>
+  </footer>
+
+</div>
+</body>
+</html>

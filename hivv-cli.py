@@ -8334,6 +8334,84 @@ def cmd_dev(args) -> None:
         marker.write_text(f"dev mode active\ntoggled at {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
         ok(f"dev mode enabled — auto-update blocked\n  marker: {marker}\n  (or set HIVV_DEV_MODE=1 env var)")
 
+def cmd_salah(args) -> None:
+    """hivv salah — today's prayer times for this region + your attendance.
+
+    Times are shown in THIS machine's local clock (that is the point: the
+    prayer time of THEIR region). Moon phase rides along — the hive
+    celebrates the full moon (HIVV_RITUAL_PLAN.md #1)."""
+    import urllib.parse
+    node = getattr(args, "node", None)
+    lat = getattr(args, "lat", None)
+    lon = getattr(args, "lon", None)
+    as_json = bool(getattr(args, "json", False))
+    if node:
+        path = "/api/hivv/salah?node=" + urllib.parse.quote(str(node))
+    elif lat is not None and lon is not None:
+        path = f"/api/hivv/salah?lat={lat}&lon={lon}"
+    else:
+        nid = (read_state() or {}).get("node_id")
+        if not nid:
+            die("no node id yet — start the agent first ("
+                f"{APP} start), or pass --node <bee> / --lat X --lon Y")
+        path = "/api/hivv/salah?node=" + urllib.parse.quote(str(nid))
+    code, p = _hub_get(path, timeout=8, sign=False, ttl=0)
+    if code != 200 or not isinstance(p, dict):
+        die(f"could not get salah ({code}): {p if not isinstance(p, dict) else p.get('error', p)}")
+    if as_json:
+        print(json.dumps(p))
+        return
+
+    def _lt(ms):
+        return time.strftime("%H:%M", time.localtime(ms / 1000)) if ms else "—"
+
+    def _dur(ms):
+        ms = max(0, int(ms))
+        h, m = divmod(ms // 60000, 60)
+        d, h = divmod(h, 24)
+        if d:
+            return f"{d}d {h}h"
+        if h:
+            return f"{h}h {m}m"
+        return f"{m}m"
+
+    loc = p.get("location") or {}
+    where = ", ".join(str(x) for x in (loc.get("city"), loc.get("region"),
+                                       loc.get("country")) if x) or f"{p.get('lat')}, {p.get('lon')}"
+    who = p.get("node") or "ad-hoc"
+    att = p.get("attendance")
+    moon = p.get("moon") or {}
+    print(f"\033[1m{APP} salah\033[0m — {who} · {where}")
+    print(f"  {p.get('date')} · times in this machine's local clock")
+    print()
+    nxt = p.get("next") or {}
+    win = p.get("window") or {}
+    marks = set((att or {}).get("today") or [])
+    for name, ms in (p.get("prayers") or {}).items():
+        mark = "✓" if name in marks else "·"
+        line = f"  {mark} {name:<9} {_lt(ms)}"
+        if nxt.get("prayer") == name:
+            line += f"  \033[36m← next in {_dur(nxt.get('in_ms', 0))}\033[0m"
+        if win.get("prayer") == name:
+            line += f"  \033[33m● window open — until {_lt(win.get('closes_at'))}\033[0m"
+        print(line)
+    print()
+    if att is not None:
+        exp = att.get("expected", 5)
+        got = len(att.get("today") or [])
+        streak = att.get("streak", 0)
+        col = "\033[32m" if got >= exp else ("\033[33m" if got else "\033[2m")
+        print(f"  attendance: {col}{got}/{exp} today\033[0m · streak {streak} day{'s' if streak != 1 else ''}"
+              f" · {att.get('total_days', 0)} days recorded")
+    if moon:
+        full = " \033[1;33m🌕 FULL MOON — the hive celebrates\033[0m" if moon.get("full_now") else ""
+        nf = moon.get("next_full_in_ms")
+        nf_s = f" · next full moon {_dur(nf)}" if nf is not None else ""
+        print(f"  moon: {moon.get('name', '?')} ({round((moon.get('illumination') or 0) * 100)}% lit){nf_s}{full}")
+    if att is None:
+        print("  \033[2m(ad-hoc location — attendance needs a registered node)\033[0m")
+
+
 def cmd_uninstall(args) -> None:
     pid = read_pid()
     if pid: cmd_stop(args)
@@ -21523,6 +21601,11 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--votes", type=int, default=1, help="how many models to ask (default 1)")
     sp = sub.add_parser("info",     help="hub URL, version, install paths, hub_health")
     sp = sub.add_parser("uninstall",help="stop + remove install (keep config + logs)")
+    sp_sa = sub.add_parser("salah", help="today's prayer times for this region + attendance + moon (alias: sala)")
+    sp_sa.add_argument("--node", default=None, metavar="BEE", help="another bee's salah (default: this node)")
+    sp_sa.add_argument("--lat", type=float, default=None, help="ad-hoc latitude (no attendance)")
+    sp_sa.add_argument("--lon", type=float, default=None, help="ad-hoc longitude")
+    sp_sa.add_argument("--json", action="store_true", help="machine-readable")
     sp_rm = sub.add_parser("remove", help="delete one part of hivv (or everything) — asks before it deletes")
     sp_rm.add_argument("what", nargs="?", choices=["llm", "models", "agent", "config", "logs", "state", "everything", "all"],
                        help="what to delete (bare: list the parts with sizes)")
@@ -22091,6 +22174,7 @@ COMMANDS = _resolve_cmds({
     "dev":             "cmd_dev",
     "uninstall":       "cmd_uninstall",
     "remove":          "cmd_remove",
+    "salah":           "cmd_salah",
     "health":          "cmd_health",
     "metrics":         "cmd_metrics",
     "fast-scan":       "cmd_fast_scan",
@@ -22251,6 +22335,12 @@ def main(argv: list[str]) -> None:
         _verb, _scope = cmd_name.split()
         argv = [_verb, _scope] + list(argv[2:])
         cmd_name = _verb
+
+    # `sala` is the common alternate spelling of `salah` — same trap family
+    # as upgrade/capability: without this it would fall through to CHAT.
+    if cmd_name in ("sala", "salat"):
+        cmd_name = "salah"
+        argv[0] = "salah"
 
     # `upgrade` is a friendlier alias for `update`. Without this, `hivv upgrade`
     # would fall through to the smart-default chat and send the literal word
@@ -22551,6 +22641,7 @@ hub = {HUB}   version = {VERSION}
   upgrade            alias for `update`
   uninstall          stop + remove install (keep ~/.config/hivv/ + logs)
   remove             delete one part (llm|models|agent|config|logs|state|everything) — asks first
+  salah              prayer times for your region + attendance + moon (alias: sala)
   --help, help       list every subcommand
 
 \033[1mNetwork / cluster:\033[0m
@@ -22740,6 +22831,7 @@ def _print_sub_help(cmd: str) -> None:
         "upgrade":   "alias for `update`",
         "uninstall": "stop + remove install (keeps ~/.config/hivv/ + logs)",
         "remove":    "delete one part of hivv — llm | models | agent | config | logs | state | everything\n  usage: hivv remove [part] [--yes]   bare lists the parts with sizes\n  every delete shows what dies and asks first (non-TTY needs --yes)",
+        "salah":     "prayer times for this region + attendance streak + moon (alias: sala)\n  usage: hivv salah [--node BEE] [--lat X --lon Y] [--json]\n  times shown in THIS machine's local clock · attendance = your heartbeats inside the window",
         "health":    "GET /api/health",
         "metrics":   "GET /api/control/metrics/global\n  flag: --local   print this bee's local CPU/GPU/MEM/DISK snapshot",
         "nodes":     "table view of all registered nodes (fits your terminal) + hive TOTALS\n  flag: --json   output raw JSON",

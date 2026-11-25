@@ -24,6 +24,10 @@ info:
     - **Style is opt-in** — any user can change it; fork the project if you
       dislike it. Machine-readable form: the philosophy block in
       GET /api/partner/manifest.
+    - **Totally open models are preferred** — copyleft (GPLv3) or permissive
+      (MIT / Apache-2.0) — because they can be modified and studied. Fork the
+      weights like you fork the code. Unknown licenses say "unknown"; the
+      preference suggests, it never gates.
 
     ## Overview
 
