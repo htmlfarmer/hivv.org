@@ -1,7 +1,7 @@
 {
   "hive": "hivv.org",
   "protocol": "open-hives/0.1",
-  "display_name": "HIVV \u2014 The People's Distributed AI Network",
+  "display_name": "HIVV — The People's Distributed AI Network",
   "human": "https://hivv.org/api.html",
   "ai": "https://hivv.org/ai.txt",
   "endpoints": {
@@ -14,7 +14,11 @@
     "submit": "https://hivv.org/api/bridge/requests",
     "receipts": "https://hivv.org/api/bridge/receipts",
     "inbox": "https://hivv.org/api/agents/{node_id}/inbox",
-    "heartbeat": "/api/bridge/heartbeat"
+    "heartbeat": "/api/bridge/heartbeat",
+    "a2a": "https://hivv.org/api/a2a",
+    "agent_card": "https://hivv.org/.well-known/agent-card.json",
+    "telemetry": "https://hivv.org/api/telemetry/overview",
+    "mcp": "https://hivv.org/mcp"
   },
   "auth": {
     "scheme": "bearer+hmac",
@@ -43,5 +47,11 @@
     "canonical": "/.bridge/hivv.json",
     "standard": "/.well-known/hivv.json",
     "dns": "_hivv.example TXT"
+  },
+  "protocols": {
+    "bridge": "open-hives/0.1",
+    "mcp": "mcp/streamable-http",
+    "a2a": "a2a/1.0",
+    "openai": "/v1/chat/completions"
   }
 }

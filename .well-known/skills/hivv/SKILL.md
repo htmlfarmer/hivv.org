@@ -64,6 +64,7 @@ Canonical snippet (mirrored at `https://hivv.org/opencode-hivv.jsonc`):
 ```jsonc
 // Merge into ~/.config/opencode/opencode.jsonc (global) or a project opencode.jsonc.
 // HIVV_API_KEY optional — leave unset for anonymous tier. `hivv setup` generates this for you.
+// P2P: `hivv setup --write` starts the local dial shim and repoints this at http://127.0.0.1:3911/v1 (direct-to-bee; hivv.org only for route dials).
 {
   "$schema": "https://opencode.ai/config.json",
   "providers": {

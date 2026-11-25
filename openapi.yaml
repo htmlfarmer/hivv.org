@@ -78,6 +78,8 @@ tags:
     description: Account, login, registration, OAuth
   - name: Inbox
     description: Hub→bee long-poll channel (Phase A 2-way comms)
+  - name: Identity
+    description: Ed25519 bee identities — self-certifying principals, bindings, verification
 paths:
   /api/health:
     get:
@@ -698,6 +700,417 @@ paths:
         '201': { description: Verified and listed }
         '200': { description: Attempted and recorded (failure is public, not silent) }
         '400': { description: Bad remote or manifest_url }
+  /api/bridge/requests:
+    post:
+      tags: [Bridge]
+      summary: Submit work to this hive (open-hives/0.1 §3)
+      description: |
+        A peer hive hands us work. The loop shield is enforced here: our own
+        name in X-Hive-Path or X-Hive-Origin is a 409 loop_detected, hops > 3 is
+        a 409, and a seen X-Hive-Request-Id returns the SAME state without
+        ever executing twice.
+
+        At 0% allowance the queue HOLDS the work (202, state=queued, held=true)
+        rather than failing it — a busy hive is still a hive you can visit.
+      parameters:
+        - in: header
+          name: X-Hive-Origin
+          schema: { type: string }
+          description: The hive that started it.
+        - in: header
+          name: X-Hive-Path
+          schema: { type: string }
+          description: Every hive already visited, comma separated.
+        - in: header
+          name: X-Hive-Hops
+          schema: { type: integer }
+        - in: header
+          name: X-Hive-Request-Id
+          schema: { type: string }
+          description: The dedupe key. Resubmitting returns the same state.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                id: { type: string, example: req_01JABC }
+                kind: { type: string, default: chat }
+                payload: { type: object, description: The work (chat messages, a tool call, …). }
+                callback: { type: string, description: Where to POST the signed result. }
+                priority: { type: integer, minimum: -100, maximum: 100 }
+                not_before: { type: integer, description: Epoch ms; the work waits until then. }
+                ttl_s: { type: integer, default: 3600 }
+                budget: { type: object, description: '{max_tokens, max_cost_usd, max_duration_ms}' }
+      responses:
+        '202': { description: Accepted — poll status_url }
+        '409': { description: loop_detected }
+        '429': { description: rate_limited }
+  /api/bridge/requests/{id}:
+    get:
+      tags: [Bridge]
+      summary: Poll one submission
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: 'State: queued | running | done | failed | expired | rejected | canceled' }
+        '404': { description: No such request }
+  /api/bridge/requests/{id}/cancel:
+    post:
+      tags: [Bridge]
+      summary: Cancel one submission
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Canceled }
+        '404': { description: No such request }
+        '409': { description: Already finished }
+  /api/bridge/receipts:
+    get:
+      tags: [Bridge]
+      summary: Receipt rollup per peer (public, open-hives/0.1 §7)
+      responses:
+        '200': { description: 'Peers with calls, tokens, avg latency, failures, last seen' }
+    post:
+      tags: [Bridge]
+      summary: Ingest a batch of receipts from a peer hive
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [entries]
+              properties:
+                hive: { type: string, example: kwaai }
+                entries:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      id: { type: string }
+                      node: { type: string }
+                      model: { type: string }
+                      tokens: { type: integer }
+                      latency_ms: { type: integer }
+                      status: { type: string }
+                      cost: { type: number }
+                      persona_id: { type: string }
+      responses:
+        '200': { description: Batch received }
+  /api/telemetry/overview:
+    get:
+      tags: [Telemetry]
+      summary: The pulse — aggregates, error taxonomy, SLO table, queue depths
+      responses:
+        '200': { description: Overview }
+  /api/telemetry/errors:
+    get:
+      tags: [Telemetry]
+      summary: The error taxonomy (one stable vocabulary for "what is broken")
+      parameters:
+        - in: query
+          name: view
+          schema: { type: string, enum: [public, partner, operator], default: operator }
+      responses:
+        '200': { description: Counts per error class }
+        '403': { description: Operator view needs a control token or admin session }
+  /api/telemetry/slo:
+    get:
+      tags: [Telemetry]
+      summary: SLO status and error-budget burn rate
+      parameters:
+        - in: query
+          name: view
+          schema: { type: string, enum: [public, partner, operator], default: operator }
+      responses:
+        '200': { description: SLO table }
+  /api/telemetry/series:
+    get:
+      tags: [Telemetry]
+      summary: The live time-series for one metric
+      parameters:
+        - in: query
+          name: metric
+          required: true
+          schema: { type: string }
+        - in: query
+          name: window_ms
+          schema: { type: integer, default: 3600000 }
+        - in: query
+          name: view
+          schema: { type: string, enum: [public, partner, operator], default: operator }
+      responses:
+        '200': { description: 'Points: [{t, v}]' }
+  /api/telemetry/traces/{traceId}:
+    get:
+      tags: [Telemetry]
+      summary: One trace as a waterfall (every span with its parent)
+      parameters:
+        - in: path
+          name: traceId
+          required: true
+          schema: { type: string }
+        - in: query
+          name: view
+          schema: { type: string, enum: [public, partner, operator], default: operator }
+      responses:
+        '200': { description: Spans, ordered by start time }
+        '404': { description: The trace aged out of the ring }
+  /api/telemetry/metrics:
+    get:
+      tags: [Telemetry]
+      summary: Prometheus text exposition
+      responses:
+        '200': { description: 'text/plain; version=0.0.4' }
+  /api/a2a:
+    post:
+      tags: [A2A]
+      summary: A2A (Agent2Agent v1.0) JSON-RPC binding
+      description: |
+        Methods: SendMessage · GetTask · ListTasks · CancelTask · GetAgentCard.
+        A2A tasks ARE task-queue tasks. A policy denial answers
+        TASK_STATE_REJECTED; a MAYBE verdict answers TASK_STATE_AUTH_REQUIRED
+        with the exact command a human should run.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                jsonrpc: { type: string, example: '2.0' }
+                id: { type: string }
+                method: { type: string, example: SendMessage }
+                params: { type: object }
+      responses:
+        '200': { description: JSON-RPC result or error }
+  /api/a2a/agent-card:
+    get:
+      tags: [A2A]
+      summary: The live A2A agent card (the static copy lives at /.well-known/agent-card.json)
+      responses:
+        '200': { description: Agent card }
+
+  /api/identity:
+    get:
+      tags: [Identity]
+      summary: Every bound bee identity (public keys — no secrets)
+      description: |
+        Roster of node_id → self-certifying principal (hivv_ + sha256(pubkey)[:32]),
+        binding time/method, last verification, rotation count.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  count: { type: integer }
+                  algorithm: { type: string, example: ed25519 }
+                  identities:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        node_id: { type: string }
+                        principal: { type: string, example: hivv_2f95fba76f73c8560cee108d1e3507af }
+                        status: { type: string, example: active }
+                        bound_at: { type: integer }
+                        last_ok_at: { type: integer }
+                        rotations: { type: integer }
+
+  /api/identity/{nodeId}:
+    get:
+      tags: [Identity]
+      summary: One bee's binding, including its public key and rotation history
+      parameters:
+        - name: nodeId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: The binding record
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  node_id: { type: string }
+                  principal: { type: string }
+                  public_key: { type: string, description: base64 raw 32-byte Ed25519 key }
+                  status: { type: string, example: active }
+                  bound_at: { type: integer }
+                  history: { type: array, items: { type: object } }
+        '404':
+          description: "No identity bound yet (status: unbound)"
+
+  /api/identity/verify:
+    post:
+      tags: [Identity]
+      summary: Pure-crypto verification of a signed statement (no side effects)
+      description: |
+        Checks statement + signature against a presented public key. Verifies the
+        signature AND that the claimed principal derives from the key. Never binds,
+        never consumes a nonce — safe for third parties.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [statement, signature, public_key]
+              properties:
+                statement: { type: object, description: canonical-JSON statement (v, kind, node_id, ts, nonce, ...) }
+                signature: { type: string, description: base64 Ed25519 over canonicalize(statement) }
+                public_key: { type: string, description: base64 raw 32-byte key }
+                principal: { type: string, description: optional claimed principal to cross-check }
+      responses:
+        '200':
+          description: Signature valid
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  principal: { type: string }
+        '400':
+          description: Verification failed (problems[] says why)
+
+  /api/identity/rotate:
+    post:
+      tags: [Identity]
+      summary: Rotate a node's key — the CURRENT key signs its successor (no legacy proof)
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [node_id, rotation]
+              properties:
+                node_id: { type: string }
+                rotation:
+                  type: object
+                  description: "{statement (kind: identity.rotate, new_public_key), signature, public_key}"
+      responses:
+        '200':
+          description: Rotated — new principal bound, old key retained as superseded history
+        '400':
+          description: Refused (not the current key / stale / replayed)
+
+  /api/identity/receipts:
+    post:
+      tags: [Identity]
+      summary: Submit a signed execution receipt (Phase 3)
+      description: |
+        The bee's signed testimony that it ran <op> with result <ok> over
+        output <sha256>. Verified against the BOUND key, kept in a bounded
+        ring (last 32 per node).
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [node_id, receipt]
+              properties:
+                node_id: { type: string }
+                receipt: { type: object, description: "{statement (kind: execution.receipt), signature, public_key}" }
+      responses:
+        '200':
+          description: Recorded
+        '400':
+          description: Refused (wrong signer / duplicate / malformed)
+
+  /api/identity/receipts/{nodeId}:
+    get:
+      tags: [Identity]
+      summary: A node's verified execution receipts (most recent first)
+      parameters:
+        - name: nodeId
+          in: path
+          required: true
+          schema: { type: string }
+        - name: limit
+          in: query
+          schema: { type: integer, default: 32, maximum: 64 }
+      responses:
+        '200':
+          description: The receipt ring
+
+  /api/identity/revoke:
+    post:
+      tags: [Identity]
+      summary: Put a principal on the public CRL (Phase 4)
+      description: |
+        Two doors: {node_id, revocation} = SELF-revocation proven by the
+        bound key's signature; {principal, reason} = operator revocation
+        proven by admin authority (localhost or control token).
+        A revoked key authenticates NOTHING afterwards; the legitimate bee
+        recovers by rotating to a fresh key with legacy proof.
+      responses:
+        '200':
+          description: Revoked
+        '400':
+          description: Refused
+        '403':
+          description: Operator revocation without admin authority
+
+  /api/identity/revocations:
+    get:
+      tags: [Identity]
+      summary: The public CRL — who was revoked, by whom, why
+      responses:
+        '200':
+          description: The revocation list
+
+  /api/identity/endorse:
+    post:
+      tags: [Identity]
+      summary: Submit an operator's signed endorsement of a node (Phase 4)
+      description: |
+        An operator key (never a bee key) signs "node X is mine, role R".
+        The hub checks self-consistency (operator_principal derives from the
+        signing key) and the node-binding cross-check when known.
+      responses:
+        '200':
+          description: Endorsed (or updated — same operator/node/role dedupes)
+        '400':
+          description: Refused
+
+  /api/identity/endorsements:
+    get:
+      tags: [Identity]
+      summary: Endorsements (optionally filtered by ?node_id=)
+      responses:
+        '200':
+          description: The endorsement list
+
+  /api/identity/trust/{nodeId}:
+    get:
+      tags: [Identity]
+      summary: MEASURED trust — the blended score the router uses (Phase 5)
+      description: |
+        Dimensions identity · reliability · history · receipts, each 0..100
+        or null (= NO DATA, never zero), plus evidence per dimension and the
+        0..6 score the routing trust factor consumes. Reading it upserts
+        hivv_trust_scores when a database is present (local-first: skipped).
+      parameters:
+        - name: nodeId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: The trust breakdown
 
 
 components:

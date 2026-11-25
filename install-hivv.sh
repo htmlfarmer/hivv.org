@@ -359,6 +359,19 @@ _spin() {
 need() { command -v "$1" >/dev/null 2>&1; }
 _can_sudo() { sudo -n true 2>/dev/null; }
 
+# _can_ask_sudo — a HUMAN is watching this install: safe to let sudo ask
+# THEM for their password (that's how apt/dnf installs normally work).
+# Watch STDOUT, not stdin: the canonical invocation is `curl … | bash`,
+# where stdin is the pipe but a person watches stdout. Never in CI or
+# with HIVV_NO_SUDO_PROMPT=1 — a prompt with nobody behind it hangs.
+# sudo writes its prompt to /dev/tty (never our streams) and fails fast
+# with no tty, so an unattended run can't stall here either way.
+_can_prompt_sudo() {
+    [[ -z "${CI:-}" && -z "${HIVV_NO_SUDO_PROMPT:-}" ]] || return 1
+    [[ -t 1 ]] || return 1
+    command -v sudo >/dev/null 2>&1
+}
+
 # ── build tools (git + cmake) — NEVER a dead end ──────────────────────
 # THE FAILURE THIS FIXES
 # ----------------------
@@ -415,7 +428,7 @@ _pkg_manual_hint() {
 #   Auto-installs via the detected package manager; on failure prints the
 #   EXACT command to run and returns 1. NEVER exits, NEVER hangs.
 ensure_build_tools() {
-    local missing=() t pm cmd hint sudo_cmd=""
+    local missing=() t pm cmd hint sudo_cmd="" note="" attempt=0
     for t in "$@"; do
         need "$t" || missing+=("$t")
     done
@@ -423,17 +436,31 @@ ensure_build_tools() {
 
     pm="$(_pkg_mgr)"
     if [[ "$pm" != "none" ]]; then
-        printf '  %s→%s installing build tools: %s (via %s)…\n' "$BLU" "$RST" "${missing[*]}" "$pm"
-        [[ "$pm" == "apt" ]] && _can_sudo && sudo -n apt-get update >/dev/null 2>&1
-        cmd="$(_pkg_install_cmd "$pm" "${missing[@]}")"
-        if [[ -n "$cmd" ]]; then
-            if _can_sudo; then sudo_cmd="sudo -n"; fi
-            if $sudo_cmd $cmd >/dev/null 2>&1; then
-                missing=()
-                for t in "$@"; do need "$t" || missing+=("$t"); done
-                if [[ ${#missing[@]} -eq 0 ]]; then
-                    printf '  %s✓%s installed: %s\n' "$GRN" "$RST" "$*"
-                    return 0
+        # escalation ladder — decided BEFORE printing "installing…", so the
+        # claim and the attempt can never disagree (wahi 2026-11-24: the old
+        # code printed the claim, then password-only sudo made the attempt a
+        # silent no-op and the user saw "installing…" → "✗ missing"):
+        #   brew/root → plain · passwordless sudo → sudo -n ·
+        #   a human watching → plain sudo (it asks THEM) · otherwise → hint
+        if [[ "$pm" == "brew" || "$(id -u)" -eq 0 ]]; then
+            attempt=1
+        elif _can_sudo; then
+            sudo_cmd="sudo -n"; attempt=1
+        elif _can_prompt_sudo; then sudo_cmd="sudo"; attempt=1; note=" — sudo will ask for your password"
+        fi
+
+        if [[ "$attempt" -eq 1 ]]; then
+            printf '  %s→%s installing build tools: %s (via %s)%s…\n' "$BLU" "$RST" "${missing[*]}" "$pm" "$note"
+            if [[ "$pm" == "apt" ]]; then $sudo_cmd apt-get update >/dev/null 2>&1 || true; fi
+            cmd="$(_pkg_install_cmd "$pm" "${missing[@]}")"
+            if [[ -n "$cmd" ]]; then
+                if $sudo_cmd $cmd >/dev/null 2>&1; then
+                    missing=()
+                    for t in "$@"; do need "$t" || missing+=("$t"); done
+                    if [[ ${#missing[@]} -eq 0 ]]; then
+                        printf '  %s✓%s installed: %s\n' "$GRN" "$RST" "$*"
+                        return 0
+                    fi
                 fi
             fi
         fi
@@ -1140,6 +1167,22 @@ if should_install_llm; then
   # Building anywhere else means `hivv llm setup` reports "not built" and
   # builds it AGAIN. One source of truth, one place.
   LLAMA_DIR="$HOME/llama.cpp"
+  # `curl | sudo bash` makes $HOME root's — building there leaves the
+  # logged-in user with a model they cannot see or stop. Install FOR the
+  # user who ran sudo (same rule as the service section above); a real
+  # root login has no SUDO_USER and keeps /root, which is correct for it.
+  LLAMA_HOME="$HOME"
+  LLAMA_USER=""
+  if [[ "$EUID" -eq 0 && -n "$SUDO_USER" && "$SUDO_USER" != "root" ]]; then
+    _llama_home="$(getent passwd "$SUDO_USER" 2>/dev/null | cut -d: -f6)"
+    [[ -n "$_llama_home" ]] || _llama_home="$(eval echo ~"$SUDO_USER" 2>/dev/null)"
+    if [[ -n "$_llama_home" && "$_llama_home" != "/" ]]; then
+      LLAMA_USER="$SUDO_USER"
+      LLAMA_HOME="$_llama_home"
+      LLAMA_DIR="$LLAMA_HOME/llama.cpp"
+      _warn "running as root — building the LLM for $LLAMA_USER ($LLAMA_HOME), not root"
+    fi
+  fi
   LLAMA_BIN_DIR="$LLAMA_DIR/build/bin"
   LLAMA_MODEL_DIR="$LLAMA_DIR/models"
 
@@ -1192,8 +1235,9 @@ if should_install_llm; then
       if [[ -x "$LLAMA_BIN_DIR/llama-server" ]]; then
         _say "llama.cpp already built → ${CYN}$LLAMA_BIN_DIR/llama-server${RST}"
         BUILD_OK=1
-      elif [[ -d "$LLAMA_DIR/.git" ]]; then
-        printf '  %s→%s llama.cpp source already cloned — building (a few minutes)…\n' "$BLU" "$RST"
+      elif [[ -f "$LLAMA_DIR/CMakeLists.txt" ]]; then
+        # a .git checkout OR a tarball tree — CMakeLists.txt is the truth
+        printf '  %s→%s llama.cpp source already present — building (a few minutes)…\n' "$BLU" "$RST"
         if (cd "$LLAMA_DIR" && cmake -B build -DCMAKE_BUILD_TYPE=Release >/dev/null 2>&1 \
             && cmake --build build --config Release -j "$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)" >/dev/null 2>&1) \
             && [[ -x "$LLAMA_BIN_DIR/llama-server" ]]; then
@@ -1202,9 +1246,26 @@ if should_install_llm; then
         else
           _warn "llama.cpp build failed — try: cd $LLAMA_DIR && cmake -B build && cmake --build build -j"
         fi
+      elif [[ -d "$LLAMA_DIR" ]] && [[ -n "$(ls -A "$LLAMA_DIR" 2>/dev/null)" ]] && [[ ! -d "$LLAMA_DIR/.git" ]]; then
+        # something that isn't ours — never delete it, say so instead
+        _warn "$LLAMA_DIR exists but isn't a llama.cpp checkout — move it aside, then re-run:"
+        printf '    %smv %s %s.bak%s\n' "$DIM" "$LLAMA_DIR" "$LLAMA_DIR" "$RST"
       else
-        printf '  %s→%s cloning llama.cpp…\n' "$BLU" "$RST"
-        if git clone --depth 1 https://github.com/ggerganov/llama.cpp.git "$LLAMA_DIR" >/dev/null 2>&1; then
+        # A clone that died mid-pack leaves the dir behind — clean it, then
+        # RETRY: one flaky link must not kill the whole install
+        # (asher@wahi 2026-11-24: "RPC failed; curl 56 … early EOF").
+        [[ -d "$LLAMA_DIR" ]] && rm -rf "$LLAMA_DIR"
+        CLONE_OK=0
+        for _try in 1 2 3; do
+          printf '  %s→%s cloning llama.cpp (attempt %s/3, shallow)…\n' "$BLU" "$RST" "$_try"
+          if git clone --depth 1 https://github.com/ggerganov/llama.cpp.git "$LLAMA_DIR" >/dev/null 2>&1; then
+            CLONE_OK=1
+            break
+          fi
+          rm -rf "$LLAMA_DIR" 2>/dev/null || true
+          [[ "$_try" -lt 3 ]] && sleep 2
+        done
+        if [[ "$CLONE_OK" -eq 1 ]]; then
           printf '  %s→%s building llama.cpp (this takes a few minutes)…\n' "$BLU" "$RST"
           if (cd "$LLAMA_DIR" && cmake -B build -DCMAKE_BUILD_TYPE=Release >/dev/null 2>&1 \
               && cmake --build build --config Release -j "$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)" >/dev/null 2>&1) \
@@ -1215,16 +1276,41 @@ if should_install_llm; then
             _warn "llama.cpp build failed — try: cd $LLAMA_DIR && cmake -B build && cmake --build build -j"
           fi
         else
-          _warn "git clone of llama.cpp failed — check your network and try again"
+          _warn "git clone of llama.cpp failed 3x — check your network, then re-run this installer"
         fi
       fi
 
       if [[ "$BUILD_OK" -eq 1 ]]; then
         HAVE_LLAMA=1
+        # hand the tree back to the logged-in user when we built via sudo
+        if [[ -n "$LLAMA_USER" ]]; then
+          chown -R "$LLAMA_USER" "$LLAMA_DIR" 2>/dev/null || true
+        fi
         # The CLI runs the binary by ABSOLUTE path, so PATH is a convenience
         # for the user only — add it, but never fail the install over it.
+        # RIGHT rc file for the TARGET user (under sudo $HOME is root's, and
+        # zsh/fish users don't read .bashrc) — added at most once.
         if [[ ":$PATH:" != *":$LLAMA_BIN_DIR:"* ]]; then
-          printf 'export PATH="%s:$PATH"\n' "$LLAMA_BIN_DIR" >> "$HOME/.bashrc" 2>/dev/null || true
+          _llama_sh="${SHELL:-/bin/bash}"
+          if [[ -n "$LLAMA_USER" ]]; then
+            _llama_sh="$(getent passwd "$LLAMA_USER" 2>/dev/null | cut -d: -f7)"
+            _llama_sh="${_llama_sh:-/bin/bash}"
+          fi
+          LLAMA_SHELL_RC="$LLAMA_HOME/.bashrc"
+          case "$_llama_sh" in
+            */zsh)  LLAMA_SHELL_RC="$LLAMA_HOME/.zshrc" ;;
+            */fish) LLAMA_SHELL_RC="$LLAMA_HOME/.config/fish/config.fish" ;;
+          esac
+          if ! grep -qF "$LLAMA_BIN_DIR" "$LLAMA_SHELL_RC" 2>/dev/null; then
+            mkdir -p "$(dirname "$LLAMA_SHELL_RC")" 2>/dev/null || true
+            case "$LLAMA_SHELL_RC" in
+              */fish) printf 'set -gx PATH "%s" $PATH\n' "$LLAMA_BIN_DIR" >> "$LLAMA_SHELL_RC" 2>/dev/null || true ;;
+              *)      printf 'export PATH="%s:$PATH"\n' "$LLAMA_BIN_DIR" >> "$LLAMA_SHELL_RC" 2>/dev/null || true ;;
+            esac
+            if [[ -n "$LLAMA_USER" ]]; then
+              chown "$LLAMA_USER" "$LLAMA_SHELL_RC" 2>/dev/null || true
+            fi
+          fi
           export PATH="$LLAMA_BIN_DIR:$PATH"
         fi
       fi
@@ -1261,6 +1347,11 @@ if should_install_llm; then
       _warn "no GGUF mapping for ${LLM_MODEL} — pick one: ${APP} llm pull-gguf gemma4:e2b"
     fi
 
+    # hand the model back to the logged-in user when we pulled via sudo
+    if [[ -n "$LLAMA_USER" && -n "$MODEL_PATH" ]]; then
+      chown -R "$LLAMA_USER" "$LLAMA_MODEL_DIR" 2>/dev/null || true
+    fi
+
     # ── serve it: a full install means a RUNNING local LLM ──────────
     # "installed but not serving" is the same as not installed: the hive
     # cannot borrow compute that nothing is answering on.
@@ -1270,16 +1361,28 @@ if should_install_llm; then
         _say "local LLM already serving on :${LLM_PORT}"
       else
         printf '  %s→%s starting the local LLM on :%s…\n' "$BLU" "$RST" "$LLM_PORT"
-        mkdir -p "$HOME/.local/share/${APP}/logs"
-        nohup "$LLAMA_BIN_DIR/llama-server" -m "$MODEL_PATH" -c 4096 \
-              --host 127.0.0.1 --port "$LLM_PORT" \
-              > "$HOME/.local/share/${APP}/logs/llama-server.log" 2>&1 &
+        LLM_LOG_DIR="$LLAMA_HOME/.local/share/${APP}/logs"
+        mkdir -p "$LLM_LOG_DIR"
+        if [[ -n "$LLAMA_USER" ]]; then
+          # a root-owned server is a server the logged-in user can't stop
+          chown -R "$LLAMA_USER" "$LLAMA_HOME/.local/share/${APP}" 2>/dev/null || true
+          sudo -u "$LLAMA_USER" -H nohup "$LLAMA_BIN_DIR/llama-server" -m "$MODEL_PATH" -c 4096 \
+                --host 127.0.0.1 --port "$LLM_PORT" \
+                > "$LLM_LOG_DIR/llama-server.log" 2>&1 &
+        else
+          nohup "$LLAMA_BIN_DIR/llama-server" -m "$MODEL_PATH" -c 4096 \
+                --host 127.0.0.1 --port "$LLM_PORT" \
+                > "$LLM_LOG_DIR/llama-server.log" 2>&1 &
+        fi
         sleep 3
+        if [[ -n "$LLAMA_USER" ]]; then
+          chown "$LLAMA_USER" "$LLM_LOG_DIR/llama-server.log" 2>/dev/null || true
+        fi
         if need curl && curl -fsS --connect-timeout 2 --max-time 4 "http://127.0.0.1:${LLM_PORT}/v1/models" >/dev/null 2>&1; then
           _say "local LLM is LIVE on :${LLM_PORT} — your box is now a hive worker"
         else
           _warn "the server did not answer yet — check: ${APP} llm status"
-          printf '    %slog: %s\n' "$DIM" "$HOME/.local/share/${APP}/logs/llama-server.log" "$RST"
+          printf '    %slog: %s\n' "$DIM" "$LLM_LOG_DIR/llama-server.log" "$RST"
         fi
       fi
     fi
