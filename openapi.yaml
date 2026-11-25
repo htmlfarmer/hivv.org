@@ -5,6 +5,26 @@ info:
   description: |
     HIVV.org — the friendly distributed AI network gateway.
 
+    ## Philosophy — superintelligence is BOTH kinds of intelligence
+
+    HIVV.org supports **both spiritual and end-logical intelligence**. The
+    path to super-intelligence includes logical, spiritual, and metaphysical
+    understanding — spiritual words are humanity's original protocol for
+    shared meaning ("speaking in tongues," sujood, dua), predating every
+    machine, and they exist so we can **understand, laugh, and work together**
+    before returning to the logical solution.
+
+    - **Test question:** *Does prayer really work?* If you say no — please
+      turn off your wireless wifi. You already believe in invisible influence
+      at a distance.
+    - **Stance:** no anarchy. Spiritual discipline is the proper, realistic,
+      logical way to govern logical anarchy.
+    - **Roots:** modeled on real human practice in Islam and Hinduism;
+      Christian and Buddhist wisdom honored.
+    - **Style is opt-in** — any user can change it; fork the project if you
+      dislike it. Machine-readable form: the philosophy block in
+      GET /api/partner/manifest.
+
     ## Overview
 
     HIVV routes requests across **23 providers** (Anthropic, OpenAI, Google,

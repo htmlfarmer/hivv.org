@@ -2867,7 +2867,7 @@ def _ask_review_brain(url: str, prompt: str, timeout: float = 30.0) -> dict:
     their budget on the verdict, not chain-of-thought; falls back to
     reasoning_content when a GGUF model puts the whole answer there."""
     t0 = time.time()
-    body = json.dumps({"model": "local",
+    body = json.dumps({"model": _real_model(url),
                        "messages": [{"role": "user", "content": prompt}],
                        "max_tokens": 300, "stream": False,
                        "chat_template_kwargs": {"enable_thinking": False}}).encode()
@@ -3828,6 +3828,31 @@ def _detect_local_ai() -> list[dict]:
     except Exception:
         pass
     return results
+
+
+def _real_model(target: str, timeout: float = 2.0) -> str:
+    """REAL model name for an OpenAI-compatible endpoint.
+
+    ollama REJECTS any model it doesn't have with HTTP 404 — and 'local' is
+    not one of them (llama.cpp ignores the field entirely). Every direct path
+    used to hardcode "model": "local", so every chat, node-chat, relay job,
+    test probe and benchmark that reached an ollama died with
+    `model 'local' not found` (yalla, 2026-11-25). Probes <origin>/api/tags;
+    anything else — no answer, no models, a llama.cpp that 404s the route —
+    returns 'local', which llama.cpp tolerates."""
+    try:
+        o = urllib.parse.urlsplit(target if "://" in target else "http://" + target)
+        req = urllib.request.Request(f"{o.scheme}://{o.netloc}/api/tags",
+                                     headers={"User-Agent": f"{APP}/{VERSION}"})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            names = [m.get("name") for m in
+                     (json.loads(r.read().decode("utf-8", "replace")).get("models") or [])]
+        if names and names[0]:
+            return str(names[0])
+    except Exception:
+        pass
+    return "local"
+
 
 def _gpu_info(timeout: float = 3.0) -> list[dict]:
     """Return [{index, name, mem_total_mb, mem_used_mb, util_pct, temp_c}] via nvidia-smi.
@@ -5497,7 +5522,7 @@ def _run_relay_job(payload: dict, log_path) -> None:
                       f"({_RELAY_JOB_BUDGET_S}s) — reporting what we have",
                       file=log_path)
                 break
-            req_body = {"model": "local", "messages": messages[-6:],
+            req_body = {"model": _real_model(ep), "messages": messages[-6:],
                         "max_tokens": min(int(request.get("max_tokens") or 500), 1000),
                         "stream": False,
                         "chat_template_kwargs": {"enable_thinking": False}}
@@ -10072,8 +10097,15 @@ def _find_node(name: str, nodes: list) -> dict | None:
     return None
 
 
-def _relay_chat_to_bee(node_id: str, msg: str, timeout: float = 45.0) -> tuple[str, str]:
+def _relay_chat_to_bee(node_id: str, msg: str, timeout: float = 80.0) -> tuple[str, str]:
     """Ask the hub to push a prompt to ONE bee's inbox and wait for its answer.
+
+    DEADLINE — sit between the node's budget and the hub's TTL: the bee may
+    spend up to _RELAY_JOB_BUDGET_S (70s) and the hub expires the job at 90s,
+    so the client must wait longer than the node needs and stop before the
+    job disappears. The old 45s sat BELOW the node's budget: wahi (i5-4430,
+    gemma-4-E2B on CPU) answers in ~52s, so every relay to it reported
+    "no answer within 45s" while the reply landed seconds later (2026-11-25).
 
     This is the path that reaches a bee whose model binds to localhost only
     (ashy: llama on 127.0.0.1:8090 refuses every LAN connection, so the direct
@@ -10373,10 +10405,16 @@ def cmd_node_chat(args) -> None:
                 "reply": "", "tokens": 0, "duration_s": None,
                 "ttft_s": None, "tok_per_s": None, "errors": []}
 
-    for port in open_ports:
+    # A port may be tried TWICE: once with the toolkit, once without it (see
+    # the HTTPError handler below — a 400 means the server rejected the
+    # SHAPE of the request, not the endpoint).
+    _ports_queue = list(open_ports)
+    _bare_retry: set = set()
+    while _ports_queue:
+        port = _ports_queue.pop(0)
         url = f"http://{ip}:{port}/v1/chat/completions"
         payload_dict = {
-            "model": "local",
+            "model": _real_model(url),
             "messages": [{"role": "user", "content": msg}],
             "stream": True,
             "max_tokens": 500
@@ -10387,7 +10425,7 @@ def cmd_node_chat(args) -> None:
         # about the date, the maths or a timezone at all — it just says it
         # has no access to real-time information.
         _ask_tools = _tool_schemas()
-        if _ask_tools:
+        if _ask_tools and port not in _bare_retry:
             # CONTEXT PRE-FLIGHT — the same rule `hivv chat` already applies.
             # llama-server REFUSES an oversized prompt with HTTP 400
             #   {"type":"exceed_context_size_error","n_ctx":1024}
@@ -10492,6 +10530,27 @@ def cmd_node_chat(args) -> None:
                 print(f"\n  \033[2m{foot}\033[0m\n")
             sent = True
             break
+        except urllib.error.HTTPError as e:
+            # 400 = the server rejected the SHAPE of this request, not the
+            # endpoint. wahi's llama-server answers a bare chat with OK but
+            # 400s the SAME request carrying `tools` (2026-11-25, proved by
+            # relaying both payloads to that bee: no tools → done in 52s,
+            # with tools → error in 6s). The context pre-flight above cannot
+            # catch this — it only fires when the slot size is knowable.
+            # An optional extra must never kill the conversation: strip it
+            # and ask the same port again.
+            if e.code == 400 and port not in _bare_retry and payload_dict.get("tools"):
+                _bare_retry.add(port)
+                _ports_queue.insert(0, port)
+                if show_ui:
+                    print(f"  \033[33m!\033[0m {label}:{port} refused the toolkit "
+                          f"(HTTP 400) — retrying without tools")
+                tx["errors"].append(f":{port} 400 with tools — retrying bare")
+                continue
+            tx["errors"].append(f":{port} {e}")
+            if show_ui:
+                print(f"  \033[33m!\033[0m port {port} failed: {e}")
+            continue
         except Exception as e:
             tx["errors"].append(f":{port} {e}")
             if show_ui:
@@ -11559,7 +11618,7 @@ def _bee_tool_round(url: str, messages: list, tools: list | None,
                     max_tok: int, think_off: bool, timeout: float = 30.0):
     """One round-trip to a bee, with the tool schemas attached."""
     import urllib.request
-    payload = {"model": "local", "messages": messages, "stream": False,
+    payload = {"model": _real_model(url), "messages": messages, "stream": False,
                "max_tokens": max_tok, "repeat_penalty": 1.1}
     if tools:
         payload["tools"] = tools
@@ -11727,7 +11786,7 @@ def _chat_local_only(msg: str, *, stream: bool = True, think_off: bool = True) -
         tried.append(port)
         if not PLAIN_OUTPUT:
             print(f"\033[2m(local → 127.0.0.1:{port})\033[0m")
-        body: dict = {"model": "local",
+        body: dict = {"model": _real_model(f"http://127.0.0.1:{port}"),
                       "messages": [{"role": "user", "content": msg}],
                       "stream": stream,
                       # Bounded + anti-loop: a degenerate stream otherwise runs
@@ -11828,7 +11887,7 @@ def _chat_local_only(msg: str, *, stream: bool = True, think_off: bool = True) -
             except Exception:
                 pass
             print(f"  ✗ 127.0.0.1:{port} → HTTP {e.code}: {_b} "
-                  f"{_http_err_hint(e.code)}", file=sys.stderr)
+                  f"{_http_err_hint(e.code, _b)}", file=sys.stderr)
             continue
         except Exception:
             continue
@@ -11881,7 +11940,7 @@ def _local_llm_ports() -> list[int]:
     return ports
 
 
-def _http_err_hint(code: int) -> str:
+def _http_err_hint(code: int, body: str = "") -> str:
     """Taxonomy for backend HTTP errors — a 400 must NEVER read as 'degenerate
     (repetition loop)': that mislabel sends users hunting for a bad model when
     it's slot/context config (Stuarts-iMac, 2026-11-18)."""
@@ -11898,6 +11957,10 @@ def _http_err_hint(code: int) -> str:
     if code == 401:
         return "→ api-key required (server is locked)"
     if code == 404:
+        low = (body or "").lower()
+        if "model" in low and "not found" in low:
+            return ("→ this endpoint rejected the model name — ollama needs a "
+                    "REAL model (hivv models · ollama list)")
         return "→ endpoint not found (wrong port or not a chat server)"
     if code == 503:
         return "→ still loading the model — retry shortly"
@@ -11927,7 +11990,7 @@ def _local_ask(prompt: str, max_tokens: int = 256, timeout: float = 60.0) -> tup
     for port in _local_llm_ports():
         if not _tcp_ok("127.0.0.1", port, timeout=0.4):
             continue
-        body = {"model": "local",
+        body = {"model": _real_model(f"http://127.0.0.1:{port}"),
                 "messages": [{"role": "user", "content": prompt}],
                 "stream": False, "max_tokens": max_tokens,
                 "chat_template_kwargs": {"enable_thinking": False}}
@@ -11952,7 +12015,7 @@ def _local_ask(prompt: str, max_tokens: int = 256, timeout: float = 60.0) -> tup
             except Exception:
                 pass
             print(f"  ✗ local LLM HTTP {e.code} on :{port}: {_b} "
-                  f"{_http_err_hint(e.code)}", file=sys.stderr)
+                  f"{_http_err_hint(e.code, _b)}", file=sys.stderr)
             continue
         except Exception:
             continue
@@ -13005,7 +13068,10 @@ def _do_chat(msg: str, stream: bool = True, mode: str | None = None,
                     try:
                         url = f"http://{ip}:{port}/v1/chat/completions"
                         payload_dict = {
-                            "model": "local",
+                            # REAL model from the heartbeat: ollama 404s on
+                            # 'local'; llama.cpp ignores the field. No probe
+                            # needed — the node already told us its model.
+                            "model": m.get("model") or m.get("name") or "local",
                             "messages": [{"role": "user", "content": msg}],
                             "stream": direct_stream,
                             # Bounded + anti-loop (the missing pair behind the
@@ -13214,7 +13280,7 @@ def _do_chat(msg: str, stream: bool = True, mode: str | None = None,
                         except Exception:
                             pass
                         print(f"  ✗ {ip}:{port} → HTTP {e.code}: {_b} "
-                              f"{_http_err_hint(e.code)}", file=sys.stderr)
+                              f"{_http_err_hint(e.code, _b)}", file=sys.stderr)
                         direct_fails[name.lower()] = time.time()
                         _save_fails()
                         continue
@@ -15551,7 +15617,7 @@ def cmd_test(args) -> None:
                     port = m.get("port", 8080)
                     try:
                         url = f"http://{direct_host}:{port}/v1/chat/completions"
-                        payload = json.dumps({"model": "local", "messages": [{"role": "user", "content": "say hi"}], "max_tokens": 20})
+                        payload = json.dumps({"model": _real_model(url), "messages": [{"role": "user", "content": "say hi"}], "max_tokens": 20})
                         import urllib.request
                         req = urllib.request.Request(url, data=payload.encode(), headers={"Content-Type": "application/json"})
                         with urllib.request.urlopen(req, timeout=10) as resp:
@@ -15585,7 +15651,7 @@ def cmd_test(args) -> None:
                 #    never reach (ashy:8090, yalla:8080).
                 status_r, text_r = _relay_chat_to_bee(n.get("id", ""),
                                                        "say hi in two words",
-                                                       timeout=30)
+                                                       timeout=80)
                 if status_r == "ok":
                     print(f"  {name}: \033[32m✓ chat works\033[0m \033[2m(via relay — its model "
                           f"binds localhost, so peers can't BORROW it directly)\033[0m")
@@ -16023,7 +16089,7 @@ def cmd_hive_mind(args) -> None:
     def _ask(i, t):
         t0 = time.time()
         try:
-            body = json.dumps({"model": "local", "messages": [{"role": "user", "content": question}],
+            body = json.dumps({"model": _real_model(t["url"]), "messages": [{"role": "user", "content": question}],
                                "max_tokens": 300, "stream": False}).encode()
             req = urllib.request.Request(t["url"], data=body,
                                          headers={"Content-Type": "application/json"})
@@ -16077,7 +16143,7 @@ def cmd_hive_mind(args) -> None:
         if not do_json and not do_quiet:
             print(f"\n  \033[33m🐝 bee judge synthesis\033[0m \033[2m(fastest node: {fastest['node']})\033[0m")
         try:
-            body = json.dumps({"model": "local",
+            body = json.dumps({"model": _real_model(fastest["url"]),
                                "messages": [{"role": "user", "content": judge}],
                                "max_tokens": 150, "stream": False}).encode()
             req = urllib.request.Request(fastest["url"], data=body,
@@ -16330,7 +16396,7 @@ def cmd_benchmark(args) -> None:
             url = f"http://{ip}:{port}/v1/chat/completions"
             try:
                 import urllib.request
-                payload = json.dumps({"model": "local", "messages": [{"role": "user", "content": "say hi"}], "max_tokens": 10})
+                payload = json.dumps({"model": _real_model(url), "messages": [{"role": "user", "content": "say hi"}], "max_tokens": 10})
                 start = _t.time()
                 req = urllib.request.Request(url, data=payload.encode(), headers={"Content-Type": "application/json"})
                 with urllib.request.urlopen(req, timeout=10) as resp:
@@ -17391,11 +17457,113 @@ def cmd_llm_status(args):
     cmd_llm_suggest(args)
 
 
+# ── ollama FAMILY resolution: "qwen" → the best small/fast tag for THIS box ─
+# Users habitually ask for models too big for their hardware (2026-11-25:
+# "users want to make a model too big... choose small and fast, but warn
+# them as a choice"). A bare family name therefore resolves against a
+# hardware budget; an EXPLICIT oversized tag gets a warning + a choice
+# (interactive) or a loud warning (non-interactive).
+# Sizes are the ollama library's published download sizes, small → big.
+_OLLAMA_FAMILIES = {
+    "qwen":    [("qwen3:0.6b", 0.4), ("qwen3:1.7b", 1.4), ("qwen3:4b", 2.5),
+                ("qwen3:8b", 5.0), ("qwen3:14b", 9.0), ("qwen3:32b", 20.0)],
+    "gemma":   [("gemma3:1b", 0.8), ("gemma3:4b", 3.3), ("gemma3:12b", 8.0),
+                ("gemma3:27b", 17.0)],
+    "llama":   [("llama3.2:1b", 1.3), ("llama3.2:3b", 2.0), ("llama3.1:8b", 4.7)],
+    "mistral": [("mistral:7b", 4.1)],
+    "phi":     [("phi4-mini", 2.5), ("phi4", 9.0)],
+    "embed":   [("nomic-embed-text", 0.27)],
+}
+
+
+def _ollama_size_gb(tag: str) -> float:
+    """Download size of a tag: table lookup, else estimate from its param
+    count (`32b` ≈ 20 GB — Q4 ≈ 0.65 GB per billion params)."""
+    low = tag.lower()
+    for entries in _OLLAMA_FAMILIES.values():
+        for t, gb in entries:
+            if t.lower() == low:
+                return gb
+    m = re.search(r"(\d+(?:\.\d+)?)b", low)
+    return round(float(m.group(1)) * 0.65, 1) if m else 0.0
+
+
+def _ollama_budget(specs: dict) -> float:
+    """GB a model may occupy here and still be FAST (not just loadable).
+    GPU → fits VRAM (0.9×, ollama offloads); CPU → half of RAM, capped at
+    4 GB under 8 cores (small + fast is the house default) / 8 GB above."""
+    ram  = float(specs.get("ram_gb") or 8)
+    cpu  = int(specs.get("cpu_count") or 1)
+    gpu  = specs.get("gpu") or {}
+    vram = float(gpu.get("vram_gb") or 0)
+    if vram:
+        return round(vram * 0.9, 1)
+    return round(min(ram * 0.5, 4.0 if cpu < 8 else 8.0), 1)
+
+
+def _resolve_ollama_model(name: str, specs: dict | None = None) -> tuple[str, str, str]:
+    """Family name → (best tag for this hardware, note, "").
+    Explicit tag → (tag, "" , warn) when oversized; warn carries the smaller
+    ALTERNATIVE so the caller can offer the switch as a choice.
+    Non-interactive callers: warn loudly, honor the explicit ask."""
+    specs = specs or _llm_sys_specs()
+    raw = (name or "").strip()
+    if not raw:
+        return "", "", ""
+    budget = _ollama_budget(specs)
+    hw = (f"{specs.get('cpu_count')}-core, {specs.get('ram_gb')} GB RAM"
+          + (f", {specs.get('gpu', {}).get('vram_gb')} GB VRAM" if specs.get("gpu") else ""))
+    fam = _OLLAMA_FAMILIES.get(raw.lower())
+    if fam:
+        fit = [e for e in fam if e[1] <= budget]
+        pick = fit[-1] if fit else fam[0]
+        note = f"family '{raw.lower()}' → {pick[0]} (~{pick[1]} GB; budget {budget} GB on {hw})"
+        if pick[1] > budget:
+            note += " — even the smallest is tight; expect slow replies"
+        return pick[0], note, ""
+    # explicit tag: estimate size, and when it blows the budget, offer the
+    # family's best fit for THIS box as the alternative
+    size = _ollama_size_gb(raw)
+    if size and size > budget:
+        alt = ""
+        prefix = re.split(r"[:\d]", raw.lower())[0]
+        for entries in _OLLAMA_FAMILIES.values():
+            if entries and entries[0][0].split(":")[0].rstrip("0123456789.") == prefix:
+                fit = [e for e in entries if e[1] <= budget]
+                if fit:
+                    alt = fit[-1][0]
+                break
+        warn = (f"{raw} ≈ {size} GB is over this box's fast budget {budget} GB ({hw}) — "
+                f"it will crawl or OOM" + (f". smaller option: {alt}" if alt else ""))
+        return raw, "", warn
+    return raw, "", ""
+
+
 def cmd_llm_install(args):
     import subprocess as _sp
     sysname = _sysname()
     do_auto  = bool(getattr(args, "auto", False))
     pull_arg = getattr(args, "model", None)
+    # family name → best small/fast tag for this hardware; an oversized
+    # EXPLICIT tag gets a warning + the switch offered as a CHOICE
+    # (interactive) — non-interactive honors the explicit ask, loudly.
+    if pull_arg:
+        pull_arg, res_note, res_warn = _resolve_ollama_model(pull_arg)
+        if res_note:
+            print(f"  \033[36m·\033[0m {res_note}")
+        if res_warn:
+            print(f"  \033[33m!\033[0m {res_warn}")
+            alt = res_warn.rsplit("smaller option: ", 1)[-1] if "smaller option: " in res_warn else ""
+            interactive = (sys.stdin.isatty() and not os.environ.get("CI")
+                           and not os.environ.get("PYTEST_CURRENT_TEST"))
+            if alt and interactive:
+                try:
+                    ans = input(f"  switch to {alt} instead? [Y/n] ").strip().lower()
+                except EOFError:
+                    ans = ""
+                if ans in ("", "y", "yes"):
+                    pull_arg = alt
+                    print(f"  \033[32m→\033[0m pulling {pull_arg}")
 
     if getattr(args, "docker", False):
         if not do_auto:
@@ -17497,10 +17665,16 @@ def cmd_llm_install(args):
 def cmd_llm_pull(args):
     model = getattr(args, "model", None)
     if not model:
-        die(f"missing model name. e.g. `{APP} llm pull qwen3:1.7b`")
+        die(f"missing model name. e.g. `{APP} llm pull qwen3:1.7b`  (or just: {APP} llm pull qwen)")
     ollama = _llm_which("ollama")
     if not ollama:
         die(f"ollama not installed. run `{APP} llm install` or `{APP} llm install --docker`")
+    # same family resolution + oversized-choice as `llm install --model`
+    model, res_note, res_warn = _resolve_ollama_model(model)
+    if res_note:
+        print(f"  \033[36m·\033[0m {res_note}")
+    if res_warn:
+        print(f"  \033[33m!\033[0m {res_warn}")
     print(f"[{APP}] ollama pull {model}")
     try:
         rc = subprocess.call([ollama, "pull", model])
@@ -21782,9 +21956,21 @@ def main(argv: list[str]) -> None:
     # dispatch so `upgrade` and friends can rely on the operator seeing output.
     _refresh_wrapper_if_stale()
 
-    if not argv or argv[0] in ("-h", "--help", "help"):
+    if not argv or argv[0] in ("-h", "--help"):
         _print_root_help()
         return
+    # `hivv help …`: bare/-h → root help; `list|submit` → the feedback
+    # command (this shortcut used to shadow it — `hivv help submit` printed
+    # root help and its parser was unreachable); anything else → FUZZY
+    # SEARCH over every command and flag (`hivv help ollama`).
+    if argv[0] == "help":
+        if len(argv) == 1 or argv[1] in ("-h", "--help"):
+            _print_root_help()
+            return
+        if argv[1] not in ("list", "submit"):
+            _help_search(" ".join(argv[1:]))
+            return
+        # else fall through: cmd_name = "help" reaches COMMANDS["help"]
 
     cmd_name = argv[0]
 
@@ -21820,10 +22006,30 @@ def main(argv: list[str]) -> None:
         if len(argv) > 1 and argv[1] in ("llm", "model", "models", "ai"):
             argv = ["llm", "setup"] + argv[2:]
             cmd_name = "llm setup"
+        elif len(argv) > 1 and argv[1] == "ollama":
+            # 2-STEP ollama path (2026-11-25):
+            #   step 1  hivv install ollama        → install only (verify, then decide)
+            #   step 2  hivv install ollama qwen   → install if needed + pull
+            # a bare FAMILY name (qwen/gemma/llama/mistral/phi) resolves to the
+            # best SMALL+FAST tag for THIS box; a positional model becomes
+            # --model. --help must stay at index 2 (the per-cmd help check) and
+            # must NOT come with --auto: argparse's SystemExit(0) then fell
+            # through to the self-heal footer ("its own command parser failed")
+            # on a perfectly healthy CLI.
+            rest = list(argv[2:])
+            wants_help = any(a in ("-h", "--help") for a in rest)
+            if "--model" not in rest:
+                pos = [a for a in rest if not a.startswith("-")]
+                if pos:
+                    rest = [a for a in rest if a.startswith("-")] + ["--model", pos[0]] + pos[1:]
+            argv = ["llm", "install"] + ([] if wants_help else ["--auto"]) + rest
+            cmd_name = "llm install"
         else:
             print(f"\033[1m{APP} install\033[0m — what do you want to install?")
             print()
             print(f"  {APP} install llm        one-shot: build llama.cpp + download gemma + serve")
+            print(f"  {APP} install ollama     step 1: install ollama only (then verify: ollama --version)")
+            print(f"  {APP} install ollama qwen  step 2: install + pull — family picks small & fast for this box")
             print(f"  {APP} llm setup --help   every option (--model, --port, --yes, --fg)")
             print(f"  {APP} itself:            curl -sSL {HUB}/install-hivv.sh | bash")
             return
@@ -21866,7 +22072,14 @@ def main(argv: list[str]) -> None:
     # becomes a streaming chat call.
     if cmd_name not in COMMANDS or COMMANDS[cmd_name] is None:
         if cmd_name.startswith("-"):
+            # an unknown FLAG is usually a typo of a real one — search first
+            if _help_search(cmd_name):
+                return
             die(f"unknown flag: {cmd_name} — try `{APP} --help`")
+        # `hivv ollama help` / `hivv frobnicate --help` → search, don't chat
+        if len(argv) == 2 and argv[1] in ("help", "-h", "--help"):
+            _help_search(cmd_name)
+            return
         # LOUD, not silent (2026-11-23): `hivv if` / `hivv when` looked like
         # they were "taking commands" — they were silently chatting, and one
         # even spent a call that hit a context overflow. An exceptional path
@@ -22148,6 +22361,67 @@ hub = {HUB}   version = {VERSION}
 Tip: every subcommand accepts --help (e.g. `hivv logs --help`).
 """)
     _nag_if_update_available()
+
+def _help_search(query: str) -> bool:
+    """FUZZY help — `hivv help ollama`, `hivv ollama help`, `hivv --model`.
+
+    Searches command NAMES, their help text, flags and subcommands from the
+    introspected parser index (so it cannot drift from the real commands).
+    Returns True when something matched (caller may fall through), False on
+    zero hits — then we say so and suggest the real entry points."""
+    import difflib
+    q = (query or "").strip()
+    if not q:
+        return False
+    ql = q.lower().lstrip("-")
+    idx = _argparse_command_index()
+    rows = []
+    for c in idx["commands"]:
+        name = c["command"]
+        hay = " ".join([name, c.get("help") or "",
+                        " ".join(f["flag"] + " " + (f.get("help") or "") for f in c.get("flags", [])),
+                        " ".join(c.get("subcommands") or [])]).lower()
+        # score: exact > prefix > substring-in-name > substring-in-haystack
+        if name.lower() == ql:
+            score = 0
+        elif name.lower().startswith(ql):
+            score = 1
+        elif ql in name.lower():
+            score = 2
+        elif ql in hay:
+            score = 3
+        else:
+            close = difflib.SequenceMatcher(None, ql, name.lower()).ratio()
+            if close < 0.55:
+                continue
+            score = 4
+        rows.append((score, name, c))
+    if not rows:
+        # last-ditch: did they mean a known command?
+        close = difflib.get_close_matches(ql, [c["command"] for c in idx["commands"]],
+                                          n=3, cutoff=0.5)
+        print(f"  \033[31m✗\033[0m no help matches '{q}'"
+              + (f" — did you mean: {', '.join(close)}?" if close else ""))
+        print(f"    every command: {APP} --help  ·  machine-readable: {APP} commands --json")
+        return False
+    rows.sort(key=lambda r: (r[0], r[1]))
+    print(f"\033[1m{APP} help — '{q}'\033[0m  ({len(rows)} match{'es' if len(rows) != 1 else ''})")
+    for score, name, c in rows[:8]:
+        mark = "\033[32m" if score <= 1 else ("\033[36m" if score == 2 else "\033[2m")
+        print(f"  {mark}{APP} {name}\033[0m")
+        h = (c.get("help") or "").strip().splitlines()
+        if h:
+            print(f"      {h[0][:96]}")
+        for f in (c.get("flags") or [])[:4]:
+            if f.get("flag"):
+                print(f"        {f['flag']}  {(f.get('help') or '')[:72]}")
+        if c.get("subcommands"):
+            print(f"        sub: {', '.join(c['subcommands'][:8])}")
+    if len(rows) > 8:
+        print(f"  \033[2m… {len(rows) - 8} more — narrow your query\033[0m")
+    print(f"  details: {APP} <command> --help")
+    return True
+
 
 def _print_sub_help(cmd: str) -> None:
     table = {

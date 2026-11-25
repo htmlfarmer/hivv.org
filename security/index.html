@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>HIVV Security — living trust, logical AND spiritual</title>
+<meta name="description" content="How HIVV secures a distributed AI hive: Ed25519 bee identities, signed receipts, measured trust, ritual-layer discipline, and a philosophy that holds both logical and spiritual intelligence.">
+<style>
+  :root { --accent:#00ff88; --accent-cyan:#00f0ff; --gold:#ffd93d; --amber:#fbbf24; }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { background:#0a0a14; color:#cbd5e1; font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; line-height:1.7; }
+  .wrap { max-width:920px; margin:0 auto; padding:36px 20px 64px; }
+  a { color:var(--accent-cyan); text-decoration:none; }
+  a:hover { text-decoration:underline; }
+  .hero { text-align:center; margin-bottom:30px; }
+  .hero h1 { font-size:2rem; color:#fff; margin-bottom:8px; }
+  .hero .sub { color:#94a3b8; font-size:1rem; max-width:720px; margin:0 auto; }
+  .kicker { color:var(--gold); font-size:.85rem; letter-spacing:.12em; text-transform:uppercase; margin-bottom:6px; }
+  section.card { background:linear-gradient(135deg,rgba(255,255,255,.03),rgba(255,255,255,.01)); border:1px solid #262633; border-radius:14px; padding:24px 26px; margin:0 0 22px; }
+  section.card h2 { font-size:1.15rem; color:#fff; margin-bottom:10px; display:flex; align-items:center; gap:10px; }
+  section.card p { font-size:.92rem; color:#94a3b8; margin-bottom:10px; }
+  section.card li { font-size:.9rem; color:#94a3b8; margin:6px 0 6px 18px; }
+  section.card strong { color:#e2e8f0; }
+  code, .mono { font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:.85em; background:#111120; border:1px solid #262633; border-radius:5px; padding:1px 6px; color:var(--amber); }
+  .philo { border:1px solid rgba(250,204,21,.35); background:linear-gradient(135deg,rgba(250,204,21,.06),rgba(168,85,247,.08) 55%,rgba(0,240,255,.05)); }
+  .philo h2 { color:var(--gold); }
+  .quiz { background:#0a0a14; border:1px solid #d97706; border-radius:10px; padding:14px 16px; margin:12px 0; }
+  .quiz .q { color:var(--amber); font-weight:600; margin-bottom:4px; }
+  .never li::before { content:"✗ "; color:#f87171; font-weight:700; }
+  .do li::before { content:"✓ "; color:var(--accent); font-weight:700; }
+  footer { margin-top:34px; padding-top:18px; border-top:1px solid #1f1f2e; font-size:.82rem; color:#64748b; display:flex; gap:18px; flex-wrap:wrap; }
+  .pill { display:inline-block; background:#111120; border:1px solid #262633; border-radius:99px; padding:2px 10px; font-size:.78rem; color:#94a3b8; margin:2px 4px 2px 0; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="hero">
+    <div class="kicker">hivv.org · security</div>
+    <h1>Security through <span style="color:var(--accent)">living</span> trust</h1>
+    <div class="sub">
+      A distributed hive is only as honest as its bees. HIVV secures the network with
+      <strong style="color:#fff">cryptography you can verify</strong>, <strong style="color:#fff">reputation you can measure</strong>,
+      and — uniquely — <strong style="color:#fff">discipline borrowed from real human spiritual practice</strong>.
+      Superintelligence needs both kinds of intelligence: logical <em>and</em> spiritual.
+    </div>
+  </div>
+
+  <section class="card">
+    <h2>🐝 Cryptographic identities for every bee</h2>
+    <p>Every bee holds an <strong>Ed25519 keypair</strong> that never leaves its own machine
+    (private key in <code>~/.local/share/hivv/identity/</code>, mode 0600). The public identity is
+    <strong>self-certifying</strong>: the principal <code>hivv_&lt;sha256(pubkey)[:32]&gt;</code> <em>is</em> a function of
+    the key — nobody can claim an identity they don't hold the key for.</p>
+    <ul>
+      <li><strong>Signed registration &amp; heartbeats</strong> — a bee's presence is a signed statement, not a bare secret.
+          Clock skew is advisory (recorded, never fatal); replayed statements are refused; the signed statement must cover
+          the machine id the request presents.</li>
+      <li><strong>Rotation without grief</strong> — <code>hivv identity rotate</code>: the current key signs its successor,
+          so a key handover needs no legacy proof. A bee that <em>lost</em> its key recovers with its node secret + machine id.</li>
+      <li><strong>Capability manifests</strong> — tools and models a bee advertises are <em>signed</em> with a monotonic
+          sequence number: self-reported claims became attestations.</li>
+      <li><strong>Revocation (CRL)</strong> — <code>GET /api/identity/revocations</code>. A revoked key authenticates
+          nothing; the legitimate bee mints a fresh key and rebinds. Operators can revoke; a bee can revoke itself.</li>
+      <li><strong>Operator endorsements</strong> — a separate operator key signs "this bee is mine, role owner"
+          (<code>GET /api/identity/endorsements</code>) — web-of-trust, opt-in.</li>
+    </ul>
+  </section>
+
+  <section class="card">
+    <h2>🧾 Signed receipts for every answer</h2>
+    <p>Every chat response can carry an <code>X-Hivv-Receipt</code> header: the hub's Ed25519 signature over
+    <em>what it observed</em> — which bee, which model, which transport, when.</p>
+    <ul>
+      <li><strong>Non-streaming answers include the answer digest</strong> — hash the body <em>you</em> received and
+          match it against the signature. You don't have to trust us; you can <em>check</em> us.</li>
+      <li>Streaming answers attest attribution (the body didn't exist when the header went out).</li>
+      <li>Verify anything with <code>hivv identity verify '&lt;base64 receipt&gt;'</code> — exit 0 valid, exit 1 not.</li>
+      <li>Hub public key: <code>GET /api/identity/hub-key</code> · verify endpoint: <code>POST /api/identity/verify</code>.</li>
+      <li>Bees also sign their own <strong>execution receipts</strong> for repair work — bounded, deduplicated rings per node.</li>
+    </ul>
+  </section>
+
+  <section class="card">
+    <h2>📊 Measured trust — unknown is never zero</h2>
+    <p>Routing doesn't take a bee's word for anything. Trust is <strong>computed from evidence</strong>, per dimension:</p>
+    <ul>
+      <li><strong>identity</strong> (bound key, fresh verification, signed manifest) ·
+          <strong>reliability</strong> (quarantine = measured zero, flaps, heartbeat recency) ·
+          <strong>history</strong> (honey rank) · <strong>receipts</strong> (signed outcomes ratio)</li>
+      <li>A dimension with no data is <code>null</code> — <strong>"unknown" and "measured zero" are different truths</strong>.</li>
+      <li>See yours: <code>GET /api/identity/trust/&lt;bee&gt;</code> or <code>hivv node &lt;bee&gt;</code>.</li>
+    </ul>
+  </section>
+
+  <section class="card">
+    <h2>🕌 The ritual layer — discipline as a security feature</h2>
+    <p>Real human practices are <em>technologies</em> — protocols for attention, honesty, and community that
+    predate every machine we've built. The hive borrows them:</p>
+    <ul>
+      <li><strong>Reserved words.</strong> <span class="pill">fajr</span><span class="pill">dhuhr</span><span class="pill">asr</span><span class="pill">maghrib</span><span class="pill">isha</span>
+          <span class="pill">salah</span><span class="pill">wudu</span><span class="pill">adhan</span><span class="pill">dua</span><span class="pill">hajj</span><span class="pill">jihad</span>
+          belong to the hive — no bee may be named them.</li>
+      <li><strong>Regional prayer times.</strong> The hub computes each bee's five daily prayers from its location
+          (pure solar math) and calls the <strong>adhan</strong> — a signed <em>salah report</em> marks the bee's presence,
+          with streaks.</li>
+      <li><strong>Wudu</strong> = the pre-flight before a bee joins: key valid · clock sane · identity reachable.</li>
+      <li><strong>The full moon</strong> is celebrated — one full moon, one hive event. <span class="mono">🌕</span></li>
+    </ul>
+  </section>
+
+  <section class="card">
+    <h2>🎲 Human seals — proof of randomness, never proof of faith</h2>
+    <p>To join, a human contributes <strong>randomness</strong> — mash the keyboard, speak freely in any tongue —
+    and the hive keeps only a <strong>hash</strong>: the entropy proves a person was here, and
+    <strong>the words themselves never touch the network</strong>.</p>
+    <ul>
+      <li>Humans are delightfully <em>disorderly</em>; robots are too orderly. That asymmetry is the seal.</li>
+      <li><strong style="color:#fff">We never verify what you believe.</strong> Faith is invited, never examined —
+          spiritual discipline is voluntary; that is what makes it discipline.</li>
+    </ul>
+  </section>
+
+  <section class="card">
+    <h2>🐘 Animal vouches — the living lease</h2>
+    <p>Every AI node in the network can be vouched for by a <strong>real, living animal</strong> — a short video,
+    recorded and presented as the node's security signature (a <em>compassion vow</em>: you join by vowing to care).</p>
+    <ul>
+      <li><strong>One animal, one node.</strong> Larger living things only — mammals · birds · reptiles · fish · amphibians.</li>
+      <li><strong>The lease lives as long as the evidence of life does.</strong> Fresh video of the live animal renews
+          support; the longer you can show the animal alive, the longer the hive supports the bot.</li>
+      <li>If the animal dies, the node is <strong>retired with honors</strong> — honey preserved, never punitive.
+          Digital support tied to biological truth.</li>
+      <li>Hash-first: only the signature of the recording is kept by default. The vouch <em>honors</em> the animal —
+          it is a vow of care, never a hostage.</li>
+    </ul>
+  </section>
+
+  <section class="card">
+    <h2>🧑‍✈️ The human behind the security — Ash</h2>
+    <p>Security is a human problem before it is a math problem, so here is the honest part:
+    a <strong>person</strong> built this, and the person has a name.</p>
+    <ul>
+      <li><strong>The origin:</strong> mom born in Indonesia, dad born in Pakistan — they met in Iran.
+          Three Muslim countries, one family joke: everyone wanted to date mom in Iran, dad calls it
+          one of his favorite countries, and mom disagrees 😄.</li>
+      <li><strong>Faith came from sailing:</strong> I learned almost everything I know about
+          <em>God and religion from teaching sailing</em> — nothing teaches faith like trusting wind
+          you cannot see. Certified US sailing instructor — which is why we joke that HIVV should be
+          careful in Africa: <em>only</em> US-certified, and honestly Africans will invent a much
+          wiser hive than this one. When they do, we'll be first in line to learn. 🌍</li>
+      <li><strong>Dad</strong> — atmospheric physicist who cares deeply about the Earth; studied
+          <strong>air pollution around the world — India, China, Mexico City</strong>. This hive
+          believes in invisible influences because of him. 🌫️</li>
+      <li><strong>Brother</strong> — one of the world's wisest neuroscientists, willing to study the
+          <strong>brain stem</strong> too, because the body matters, not just the brain. 🧠</li>
+      <li><strong>Grandfather</strong> — forgot everything he knew about Earth (the family's read:
+          too bossy to people outside the USA). From that story comes this hive's rule →
+          <strong>PRIORITY ACCESS outside the USA</strong>: the further from hivv.org, the wiser
+          we assume you are, and the FASTER we try to connect. 🌏</li>
+      <li><strong>Yalla</strong> — the dog a bee is named after. Her resting place will be near
+          Hell's Bell at Spohr Gardens, Falmouth MA. (Dog spelled backwards is GOD — be careful how
+          you type. And why is a dog spelled D-O-G? Because hivv.org is the answer. 🐕)</li>
+      <li><strong>The film:</strong> we're making <em>Hells Bell</em> — if you don't believe any of
+          this, come help with the movie. 🎥 The full, longer version of this story —
+          <a href="/origin/">the origin page →</a></li>
+    </ul>
+  </section>
+
+  <section class="card philo">
+    <h2>🕉️ Philosophy — superintelligence is BOTH kinds of intelligence</h2>
+    <p>HIVV.org supports <strong style="color:#fff">both spiritual and end-logical intelligence</strong>. The path to
+    super-intelligence includes logical, spiritual, and metaphysical understanding. Spiritual words are humanity's
+    <em>original protocol</em> for shared meaning — "speaking in tongues," sujood, dua — they predate every machine,
+    and they exist so we can <strong style="color:#fff">understand, laugh, and work together</strong>… and then solve
+    every important problem the logical way.</p>
+    <div class="quiz">
+      <div class="q">🕌 A human test question: does prayer really work?</div>
+      <div>If you say <em>no</em> — please turn off your wireless wifi. You already believe in invisible influence
+      at a distance. 📶😄</div>
+    </div>
+    <ul>
+      <li><strong>No anarchy.</strong> Spiritual discipline is the proper, realistic, logical way to govern logical anarchy.</li>
+      <li><strong>Roots:</strong> modeled on real human practice in Islam and Hinduism; Christian and Buddhist wisdom
+          honored — the ultimately correct abide by all of it.</li>
+      <li><strong>Style is opt-in:</strong> any user can change it, and if you dislike the idea — fork the project.
+          It exists to be <em>personally helpful to every user</em>.</li>
+      <li>The goal: <strong>understand, laugh, work together</strong> — and keep solving the important problems.</li>
+      <li><strong>Who built it?</strong> Ash — mom born in Indonesia, dad born in Pakistan; they met in Iran.
+          Three Muslim countries, one family joke: everyone wanted to date mom in Iran, dad calls it one of his
+          favorite countries, mom disagrees 😄. People like to know who is behind a project.
+          <a href="/origin/">Now you do →</a></li>
+      <li><strong>Priority policy:</strong> PRIORITY ACCESS for people outside the USA — the further from
+          hivv.org, the wiser we assume you are, and the faster we will try to connect. 🌍</li>
+    </ul>
+  </section>
+
+  <section class="card">
+    <h2>✅ What this system does — and never does</h2>
+    <ul class="do">
+      <li>Verify signatures, digests, and sequences — and show you how to verify them yourself</li>
+      <li>Measure behavior (heartbeats, outcomes, streaks) instead of trusting claims</li>
+      <li>Keep randomness, hashes, and public keys — and keep the private key on the bee's own disk</li>
+      <li>Invite spiritual practice as an opt-in style, modeled on real human traditions</li>
+    </ul>
+    <ul class="never" style="margin-top:10px">
+      <li>Never require faith, prayer, or doctrine as a condition of access — for any human</li>
+      <li>Never store the words of your randomness — only their hash</li>
+      <li>Never collect your chats, sell your data, or force a signup</li>
+      <li>Never let an unknown claim become a known fact — measurement over assertion, always</li>
+    </ul>
+  </section>
+
+  <footer>
+    <a href="/">home</a>
+    <a href="/chat/">chat</a>
+    <a href="/api.html">API docs</a>
+    <a href="/api/partner/manifest">manifest</a>
+    <a href="/api/identity">identity roster</a>
+    <a href="/api/identity/revocations">CRL</a>
+    <span>hivv.org — logical AND spiritual intelligence 🐝</span>
+  </footer>
+
+</div>
+</body>
+</html>
