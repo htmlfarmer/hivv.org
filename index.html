@@ -10,8 +10,8 @@
   <link rel="stylesheet" href="/css/shared.css">
   <link rel="stylesheet" href="/styles.css?v=1794950764">
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
-  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <link rel="stylesheet" href="/lib/leaflet/leaflet.css" onerror="this.onerror=null;var l=document.createElement('link');l.rel='stylesheet';l.href='https://unpkg.com/leaflet@1.9.4/dist/leaflet.css';document.head.appendChild(l);">
+  <script src="/lib/leaflet/leaflet.js"></script>
   <script src="https://d3js.org/d3.v7.min.js"></script>
   <style>
     :root {
@@ -210,6 +210,13 @@
 
     .leaflet-popup-tip {
       background: #0d0d1a;
+    }
+
+    /* OpenStreetMap ships light tiles; this map is dark. Only the TILE
+       pane is inverted — the markers, arcs and rings live in the overlay
+       pane and keep their own colours. */
+    #world-map .leaflet-tile-pane {
+      filter: invert(1) hue-rotate(180deg) brightness(1.06) contrast(.88) saturate(.55);
     }
 
     .provider-popup {
@@ -2338,14 +2345,20 @@ curl https://hivv.org/v1/chat/completions \
       minZoom: 1,
       maxZoom: 6,
       zoomControl: false,
-      attributionControl: false,
+      attributionControl: true,   // OpenStreetMap REQUIRES the credit — show it
       preferCanvas: true
     });
 
-    // Esri World Dark Gray — free satellite-style, no API key
-    L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}', {
+    // The basemap is OpenStreetMap through OUR OWN cached proxy
+    // (/api/tile) — open data, no API key, one fetch for every visitor.
+    // The CDN we used to borrow (CARTO) now burns "API KEY REQUIRED"
+    // into every tile it serves; a map that demands a key is not a map
+    // this hive wants. The tile pane is inverted below so OSM's light
+    // tiles read as a dark map — markers and arcs live in the overlay
+    // pane and keep their own colours.
+    L.tileLayer('/api/tile/{z}/{x}/{y}', {
       maxZoom: 19,
-      subdomains: '1,2,3,4,5,6,7,8'
+      attribution: '© OpenStreetMap contributors'
     }).addTo(worldMap);
 
     // Add zoom control to bottom right

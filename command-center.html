@@ -5,8 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>HIVV Command Center — Network Intelligence</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
-  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
-  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <link rel="stylesheet" href="/lib/leaflet/leaflet.css" onerror="this.onerror=null;var l=document.createElement('link');l.rel='stylesheet';l.href='https://unpkg.com/leaflet@1.9.4/dist/leaflet.css';document.head.appendChild(l);">
+  <script src="/lib/leaflet/leaflet.js"></script>
   <script src="https://d3js.org/d3.v7.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
   <style>
@@ -65,6 +65,12 @@
     /* ── MAP ── */
     .map-container { height: 300px; border-radius: 8px; overflow: hidden; }
     .map-container .leaflet-container { background: #0a0a0f; }
+    /* OpenStreetMap ships light tiles; this map is dark. Only the TILE
+       pane is inverted — the node markers live in the overlay pane and
+       keep their own colours. */
+    .map-container .leaflet-tile-pane {
+      filter: invert(1) hue-rotate(180deg) brightness(1.06) contrast(.88) saturate(.55);
+    }
 
     /* ── NODE LIST ── */
     .node-row { display: grid; grid-template-columns: 24px 1fr 100px 80px 80px 60px; align-items: center; gap: 12px; padding: 10px 16px; border-bottom: 1px solid var(--border); font-size: .82rem; }
@@ -663,8 +669,12 @@ async function refreshMetrics() {
 
 // ── WORLD MAP ──
 function initMap() {
-  map = L.map('world-map', { zoomControl: false, attributionControl: false }).setView([20, 0], 2);
-  L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}', { maxZoom: 18, subdomains: '1,2,3,4,5,6,7,8' }).addTo(map);
+  map = L.map('world-map', { zoomControl: false, attributionControl: true }).setView([20, 0], 2);
+  // OpenStreetMap through OUR OWN cached proxy (/api/tile): open data, no
+  // API key, one fetch for every visitor. The tile pane is inverted in CSS
+  // so OSM's light tiles read as a dark map; markers live in the overlay
+  // pane and keep their own colours.
+  L.tileLayer('/api/tile/{z}/{x}/{y}', { maxZoom: 19, attribution: '© OpenStreetMap contributors' }).addTo(map);
   refreshMapMarkers();
 }
 
