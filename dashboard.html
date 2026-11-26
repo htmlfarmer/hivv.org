@@ -404,6 +404,23 @@ async function loadUserKeys() {
 
 async function loadUsageSummary() {
   try {
+    // The summary endpoint carries TODAY's real counts (requests, tokens,
+    // cost). The cards used to show a hard 0 because nothing ever wrote
+    // them - they looked measured and were not.
+    try {
+      const sres = await fetch('/api/usage/summary', { headers: { 'X-Session-Token': sessionToken } });
+      if (sres.ok) {
+        const s = await sres.json();
+        const t = s.today || {};
+        const setNum = (id, v) => {
+          document.getElementById(id).textContent = (v == null ? '—' : Number(v).toLocaleString());
+        };
+        setNum('stat-requests-today', t.requests);
+        setNum('stat-tokens-today', t.tokens);
+        document.getElementById('stat-cost-today').textContent = '$' + Number(t.cost || 0).toFixed(4);
+      }
+    } catch (e) { /* not logged in - leave the cards alone */ }
+
     const res = await fetch('/api/usage?limit=20', {
       headers: { 'X-Session-Token': sessionToken }
     });

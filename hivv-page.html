@@ -1072,7 +1072,9 @@ function updateStats() {
   document.getElementById('statAgents').textContent = agents;
   document.getElementById('statPending').textContent = pending;
   document.getElementById('agentCount').textContent = state.agents.length;
-  document.getElementById('statActions').textContent = state.activities.length || 847;
+  // No invented fallback: zero activities means zero activities. The old
+    // fallback (847) printed a made-up number on a page that had none.
+    document.getElementById('statActions').textContent = state.activities.length;
 }
 
 function renderAgentList(agents) {

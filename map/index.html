@@ -54,7 +54,7 @@ h1{font-size:23px;margin:0 0 2px}.sub{color:var(--dim);font-size:13.5px;margin:0
 </div>
 <div id="map"></div>
 <div id="world" style="display:none;height:520px;border:1px solid var(--line);border-radius:12px;overflow:hidden;background:#0a0d15"></div>
-  <p class="foot"><span style="color:#f5c542">◯</span> ring = this hive (Moscow, Idaho) ·
+  <p class="foot"><span style="color:#f5c542">◯</span> ring = this hive (<span id="hub-city">this hive</span>) ·
   <span style="color:#22c55e">●</span> green = a bee online, grey = resting (from <span class="mono">/api/control/nodes</span>) ·
   gold dashed line = a bee's link home · blue line = a peer hive.
   No map tiles? The list on the right still works offline. 🏡</p>
@@ -62,7 +62,7 @@ h1{font-size:23px;margin:0 0 2px}.sub{color:var(--dim);font-size:13.5px;margin:0
 <div class="side">
   <div class="card"><div class="k">Hive mood (5 min)</div><div class="v" id="mood">…</div><div class="n" id="moodn">loading</div></div>
   <div class="card"><div class="k">Traffic</div><div class="v" id="req">…</div><div class="n" id="reqn">last hour / today</div></div>
-  <div class="card"><div class="k">Bees online</div><div class="v" id="bees">…</div><div class="n" id="beesn">of registered</div></div>
+  <div class="card"><div class="k">Bees online</div><div class="v" id="bees" data-hivv-stat="bees.online" data-hivv-default="…">…</div><div class="n" id="beesn">of <span data-hivv-stat="bees.registered" data-hivv-default="…">…</span> registered</div></div>
 <div class="card"><div class="k">🔗 Bridges</div><div id="bridges" class="n">checking…</div></div>
 <div class="card"><div class="k">🐾 Yalla sightings</div><div id="paws" class="n">checking…</div></div>
 <div class="card"><div class="k">⚡ Activity</div><div id="ticker">loading…</div></div>
@@ -71,7 +71,13 @@ h1{font-size:23px;margin:0 0 2px}.sub{color:var(--dim);font-size:13.5px;margin:0
 
 <script src="/lib/leaflet/leaflet.js"></script>
 <script>
-const HIVV = [46.7331, -116.9899]; // Moscow, Idaho — this hive's home
+// Where THIS hive actually is. It used to be a coordinate pair typed
+// into the page ([46.7331, -116.9899] - Moscow, Idaho), which is a lie the
+// day this box moves. The gateway resolves its own location and publishes
+// it on /api/public/status as `hub`; we read it from there.
+let HIVV = null;          // [lat, lon] once resolved
+let HIVV_CITY = null;
+let hubRing = null;       // the 'this hive' ring marker
 const J = async u => { const r = await fetch(u,{cache:'no-store'}); if(!r.ok) throw new Error(u); return r.json(); };
 let map = null, beeLayer = null, bridgeLayer = null;
 function noMap(msg){
@@ -111,8 +117,11 @@ function initMap(){
   useSource();
   beeLayer = L.layerGroup().addTo(map);
   bridgeLayer = L.layerGroup().addTo(map);
-  L.circleMarker(HIVV, {radius:9, color:'#f5c542', weight:2, fillOpacity:.25})
-    .bindTooltip('🐝 hivv.org — Moscow, Idaho').addTo(map);
+  if (hubRing) { map.removeLayer(hubRing); hubRing = null; }
+  if (HIVV) {
+    hubRing = L.circleMarker(HIVV, {radius:9, color:'#f5c542', weight:2, fillOpacity:.25})
+      .bindTooltip('🐝 hivv.org — ' + (HIVV_CITY || 'this hive')).addTo(map);
+  }
 }
 function bootMap(){
   if (window.L) return initMap();                   // our own copy is here
@@ -126,6 +135,24 @@ bootMap();
 async function tick(){
   try{
     const s = await J('/api/public/status'); const l = s.latency_5m||{};
+    // The hub's real location (the gateway resolves it, we do not guess).
+    if (s.hub && s.hub.lat!=null && s.hub.lon!=null) {
+      const moved = !HIVV || HIVV[0] !== Number(s.hub.lat) || HIVV[1] !== Number(s.hub.lon);
+      HIVV = [Number(s.hub.lat), Number(s.hub.lon)];
+      HIVV_CITY = s.hub.city || null;
+      // The ring follows the hub: redraw it in place (the arcs are
+      // redrawn by the bee/bridge passes below, which run every tick).
+      if (moved && map) {
+        // Draw the ring whether or not it existed before: on the FIRST
+        // resolution there is no ring yet, and the old guard ("&& hubRing")
+        // meant the hive's own marker never appeared at all.
+        if (hubRing) map.removeLayer(hubRing);
+        hubRing = L.circleMarker(HIVV, {radius:9, color:'#f5c542', weight:2, fillOpacity:.25})
+          .bindTooltip('🐝 hivv.org — ' + (HIVV_CITY || 'this hive')).addTo(map);
+        const legend = document.getElementById('hub-city');
+        if (legend) legend.textContent = HIVV_CITY || 'this hive';
+      }
+    }
     const m = document.getElementById('mood'); const avg = l.avg_ms;
     m.textContent = avg==null?'—':(avg<1000?avg+' ms':(avg/1000).toFixed(1)+' s');
     m.className = 'v '+(avg==null?'':avg<1000?'ok':avg<3000?'warn':'bad');
@@ -148,7 +175,7 @@ async function tick(){
           .bindTooltip((online?'🐝 ':'💤 ')+x.name+' — '+(loc.city||'?')+', '+(loc.country||'')+
             (online?' · cap '+(x.metrics&&x.metrics.available_capacity!=null?x.metrics.available_capacity:'?'):''))
           .addTo(beeLayer);
-        if (online) L.polyline([HIVV,[lat,lon]], {color:'#f5c542', weight:1, opacity:.35, dashArray:'4 6'}).addTo(beeLayer);
+        if (online && HIVV) L.polyline([HIVV,[lat,lon]], {color:'#f5c542', weight:1, opacity:.35, dashArray:'4 6'}).addTo(beeLayer);
       });
     }
   }catch(e){}
@@ -164,6 +191,7 @@ async function tick(){
       peers.forEach(p=>{
         const loc = p.location||p; const lat = loc.lat, lon = loc.lon;
         if (lat==null || lon==null) return;
+        if (!HIVV) return;
         L.polyline([HIVV,[lat,lon]], {color:'#5ab0ff', weight:2, opacity:.7})
           .bindTooltip('🔗 '+p.remote_hive).addTo(bridgeLayer);
       });
@@ -219,4 +247,8 @@ document.querySelectorAll('.tab').forEach(b => b.addEventListener('click', () =>
   if (!world && map) setTimeout(() => map.invalidateSize(), 120);
 }));
 </script>
+<!-- U0001F41D THE live numbers — one endpoint (/api/hivv/stats), one binding,
+     every page. No number on this site is typed into the HTML any more. -->
+<script src="/js/hivv-live.js"></script>
+<script>HIVVLive.start({ intervalMs: 30000 });</script>
 </body></html>

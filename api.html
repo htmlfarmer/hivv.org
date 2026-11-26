@@ -284,12 +284,12 @@
       <span class="badge-pill">v2 Public</span>
     </h1>
     <p>
-      An OpenAI-compatible inference proxy, autonomous agent tri-state governance engine, and distributed compute pool. Plug in standard OpenAI SDKs or communicate with local on-premise Gemma-4 running at ~64 tokens/sec.
+      An OpenAI-compatible inference proxy, autonomous agent tri-state governance engine, and distributed compute pool. Plug in standard OpenAI SDKs or communicate with local on-premise Gemma-4 running at the measured speed of the fastest bee on the hive.
     </p>
     <div class="api-specs-row">
       <span class="api-spec-item">Base URL: <b>https://hivv.org/v1</b></span>
       <span class="api-spec-item">Streaming: <b>Server-Sent Events (SSE)</b></span>
-      <span class="api-spec-item">Local Inference: <b>~64 tps hardware-accelerated</b></span>
+      <span class="api-spec-item">Local Inference: <b><span data-hivv-stat="performance.top_tps" data-hivv-format="dec1" data-hivv-default="—">—</span> tps measured (fastest bee)</b></span>
       <span class="api-spec-item">Rate Limit: <b>60 req/min (free open tier)</b></span>
     </div>
   </header>
@@ -646,6 +646,82 @@ while (true) {
 
     <div class="endpoint-bar">
       <span class="method-badge get">GET</span>
+      <span class="endpoint-path">/api/hivv/stats</span>
+      <span class="endpoint-desc">THE canonical live numbers — what the website itself shows</span>
+    </div>
+    <p style="font-size:0.85rem;color:#94a3b8;">
+      One endpoint, every number. <code>null</code> means <i>no data</i> — never <code>0</code> — and
+      <code>bees.online</code> counts the bees that have <i>heartbeated recently</i>, not the ones merely
+      not marked offline. The legacy door <code>/api/hive/stats</code> serves the identical payload.
+    </p>
+    <div class="code-block">
+      <div class="code-header">
+        <span class="code-lang">JSON Response</span>
+        <button class="code-copy-btn" onclick="HIVV.copyCode(this)">Copy</button>
+      </div>
+      <pre><code>{
+  "ok": true,
+  "ts": 1795728051873,
+  "bees": {
+    "registered": 6,
+    "online": 3,
+    "offline": 3,
+    "stressed": 0,
+    "volunteers": 3,
+    "countries": 1,
+    "cities": 1,
+    "country_list": ["US"],
+    "city_list": ["Moscow"],
+    "online_list": ["masjid", "yalla", "ashy"]
+  },
+  "models": {
+    "total": 6,
+    "distinct": 5,
+    "providers_active": 24,
+    "names": ["gemma-4-E2B-it-Q4_K_M.gguf", "qwen2.5:0.5b"]
+  },
+  "capacity": {
+    "total_cpus": 48,
+    "total_memory_gb": 108,
+    "free_memory_gb": 63.4,
+    "total_workers": 3,
+    "active_jobs": 0,
+    "available_capacity": 3,
+    "utilization_percent": 0
+  },
+  "performance": {
+    "requests_today": 36,
+    "tokens_today": 24945,
+    "top_tps": 80.4,
+    "avg_ttfb_ms": 732,
+    "total_jobs": 109,
+    "success_rate": 100,
+    "cost_today": 0
+  },
+  "honey": {
+    "total": 466300,
+    "leader": "ashy",
+    "leader_honey": 173320,
+    "leader_rank": "royal-jelly",
+    "bees": 13
+  },
+  "bridge": {
+    "peers": 1,
+    "allowance_percent": 20,
+    "allowance_mode": "steady"
+  },
+  "gateway": {
+    "version": "v2",
+    "uptime_seconds": 6,
+    "providers_active": 24,
+    "database": "connected",
+    "hub": { "lat": 46.7331, "lon": -116.9899, "city": "Moscow", "country_code": "US" }
+  }
+}</code></pre>
+    </div>
+
+    <div class="endpoint-bar">
+      <span class="method-badge get">GET</span>
       <span class="endpoint-path">/api/control/nodes</span>
       <span class="endpoint-desc">List all registered nodes with metrics</span>
     </div>
@@ -757,5 +833,9 @@ while (true) {
 
 <!-- Shared JavaScript Utilities -->
 <script src="/js/shared.js"></script>
+<!-- U0001F41D THE live numbers — one endpoint (/api/hivv/stats), one binding,
+     every page. No number on this site is typed into the HTML any more. -->
+<script src="/js/hivv-live.js"></script>
+<script>HIVVLive.start({ intervalMs: 30000 });</script>
 </body>
 </html>

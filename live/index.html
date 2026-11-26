@@ -35,14 +35,14 @@ th,td{text-align:left;padding:7px 10px;border-bottom:1px solid var(--line)}th{co
 <div class="grid">
  <div class="card"><div class="k">Hive mood (5 min)</div><div class="v" id="mood">…</div><div class="n" id="moodn">loading</div></div>
  <div class="card"><div class="k">Requests</div><div class="v" id="req">…</div><div class="n" id="reqn">last hour / today</div></div>
- <div class="card"><div class="k">Bees online</div><div class="v" id="bees">…</div><div class="n" id="beesn">of registered</div></div>
- <div class="card"><div class="k">Connected hives</div><div class="v" id="peers">2</div><div class="n">hivv.org (self) · kwaai (test client)</div></div>
+ <div class="card"><div class="k">Bees online</div><div class="v" id="bees" data-hivv-stat="bees.online" data-hivv-default="…">…</div><div class="n" id="beesn">of <span data-hivv-stat="bees.registered" data-hivv-default="…">…</span> registered</div></div>
+ <div class="card"><div class="k">Connected hives</div><div class="v" id="peers" data-hivv-stat="bridge.peers" data-hivv-default="…">…</div><div class="n" id="peersn">hivv.org (self) + verified peers</div></div>
 </div>
 <h2>🐝 Bees</h2>
 <table id="beetable"><thead><tr><th>Bee</th><th>Status</th><th>Capacity</th><th>CPU</th><th>Model</th><th>Location</th></tr></thead><tbody></tbody></table>
 <h2>🔌 Bridge</h2>
 <table><tbody>
-<tr><td>kwaai (KwaaiNet)</td><td class="ok" id="brstate">test client · supervised 85%</td><td class="mono" id="brload">…</td></tr>
+<tr><td id="brpeer">peer hive</td><td class="ok" id="brstate">allowance <span data-hivv-stat="bridge.allowance_percent" data-hivv-format="pct" data-hivv-default="…">…</span> · <span data-hivv-stat="bridge.allowance_mode" data-hivv-default="…">…</span></td><td class="mono" id="brload">…</td></tr>
 </tbody></table>
 <h2>⚡ Recent activity</h2>
 <div id="ticker">loading…</div>
@@ -111,6 +111,24 @@ async function tick(){
     const b = await J('/api/bridge/load');
     document.getElementById('brload').textContent = 'load: ' + (b.latency_5m? b.latency_5m.avg_ms+'ms / '+b.latency_5m.requests+' req 5m' : 'memory only') + ' · mode ' + (b.mode||'?');
   }catch(e){ document.getElementById('brload').textContent = 'load endpoint warming up'; }
+  // The peer count and the CURRENT allowance were typed into this page (a
+  // hard-coded "2" and a hard-coded "85%"). The allowance moves with the
+  // hive's latency - it is 20% right now - so it must be READ, not remembered.
+  try{
+    const peers = await J('/api/bridge/peers');
+    const list = peers.peers || [];
+    document.getElementById('peers').textContent = list.length + 1;   // + this hive
+    document.getElementById('peersn').textContent = list.length
+      ? ('hivv.org (self) · ' + list.map(p=>p.remote_hive).join(', '))
+      : 'hivv.org (self) · no verified peers yet';
+    if (list[0]) document.getElementById('brpeer').textContent = list[0].remote_hive;
+  }catch(e){ document.getElementById('peers').textContent = '—'; }
+  try{
+    const al = await J('/api/bridge/allowance');
+    document.getElementById('brstate').textContent =
+      'allowance ' + (al.percent!=null? al.percent+'%' : 'unlimited') + ' · ' + (al.mode||'?');
+    if (al.reason) document.getElementById('brstate').title = al.reason;
+  }catch(e){ document.getElementById('brstate').textContent = 'allowance unavailable'; }
   try{
     const a = await J('/api/public/activity');
     const items = (a.activity||[]).slice(0,14).map(x=>{
@@ -122,4 +140,8 @@ async function tick(){
   }catch(e){}
 }
 tick(); setInterval(tick, 10000);
-</script></body></html>
+</script><!-- U0001F41D THE live numbers — one endpoint (/api/hivv/stats), one binding,
+     every page. No number on this site is typed into the HTML any more. -->
+<script src="/js/hivv-live.js"></script>
+<script>HIVVLive.start({ intervalMs: 30000 });</script>
+</body></html>

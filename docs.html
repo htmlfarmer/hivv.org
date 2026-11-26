@@ -52,7 +52,9 @@ body{margin:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,
 .swagger-ui .info .base-url pre{background:#fef3c7 !important}
 .swagger-ui .opblock-tag.no-desc{color:#92400e !important}
 </style>
-<link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5.17.14/swagger-ui.css">
+<!-- Swagger UI is served from OUR box: the CSP (script-src 'self') blocks
+     every CDN, so this page rendered an empty shell. -->
+<link rel="stylesheet" href="/lib/swaggerui/swagger-ui.css">
 </head>
 <body>
 
@@ -77,7 +79,7 @@ body{margin:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,
 
 <div id="swagger-ui"></div>
 
-<script src="https://unpkg.com/swagger-ui-dist@5.17.14/swagger-ui-bundle.js" crossorigin></script>
+<script src="/lib/swaggerui/swagger-ui-bundle.js"></script>
 <script>
 window.onload = () => {
   window.ui = SwaggerUIBundle({

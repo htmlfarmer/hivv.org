@@ -41,13 +41,16 @@ fetch('/api/bridge/problems',{cache:'no-store'}).then(r=>r.json()).then(d=>{
     : '<div class="item">✓ no bridge problems right now.</div>';
 }).catch(e=>{ document.getElementById('problems').innerHTML = '<div class="item">unreachable: '+e.message+'</div>'; });
 
-fetch('https://api.github.com/repos/htmlfarmer/hivv/issues?state=open&per_page=30',{headers:{Accept:'application/vnd.github+json'}})
+// Through the HUB, not straight to GitHub: the CSP is connect-src 'self',
+// so a browser fetch to api.github.com is blocked. The hub has no CSP.
+fetch('/api/github/issues')
  .then(r=>r.json()).then(d=>{
-   const items = Array.isArray(d)? d.filter(i=>!i.pull_request) : [];
+   const items = Array.isArray(d.issues)? d.issues : [];
    document.getElementById('list').innerHTML = items.length? items.map(i=>
      '<div class="item"><a href="'+i.html_url+'">#'+i.number+' — '+i.title+'</a>'+
-     '<div class="meta">'+(i.labels||[]).map(l=>'<span class="lbl">'+l.name+'</span>').join('')+
+     '<div class="meta">'+(i.is_pr?'<span class="lbl">pull request</span>':'')+
+     (i.labels||[]).map(l=>'<span class="lbl">'+l.name+'</span>').join('')+
      'opened '+new Date(i.created_at).toLocaleDateString()+' · comments '+(i.comments||0)+'</div></div>').join('')
-     : '<div class="item">no open issues — or GitHub is unreachable from the browser.</div>';
+     : '<div class="item">no open issues — or GitHub is unreachable right now.</div>';
  }).catch(e=>{ document.getElementById('list').innerHTML = '<div class="item">GitHub unreachable: '+e.message+'</div>'; });
 </script></body></html>

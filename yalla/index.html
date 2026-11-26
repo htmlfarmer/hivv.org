@@ -155,7 +155,7 @@ document.getElementById('send').onclick=async()=>{
   const r=await fetch('/api/dog/sightings',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({dog:'yalla',where,note,...geo})}).then(r=>r.json()).catch(()=>({}));
   document.getElementById('sent').textContent = r.ok
-    ? (r.duplicate?'already reported (someone beat you to it — good sign!)':'✓ sent to the hive — it's on the map')
+    ? (r.duplicate?'already reported (someone beat you to it — good sign!)':"✓ sent to the hive — it's on the map")
     : 'failed — text instead: 773-321-8181';
   if(r.ok && !r.duplicate){ document.getElementById('where').value=''; document.getElementById('note').value=''; load(); }
 };

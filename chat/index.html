@@ -6,7 +6,7 @@
   <title>HIVV — Chat</title>
   <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='28'>🧠</text></svg>">
   <!-- Highlight.js theme -->
-  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark-dimmed.min.css">
+  <link rel="stylesheet" href="/lib/highlightjs/highlight-dark-dimmed.min.css">
   <!-- App styles -->
   <link rel="stylesheet" href="styles.css">
 </head>
@@ -231,10 +231,11 @@
 <!-- TOAST -->
 <div class="toast" id="toast"></div>
 
-<!-- CDN Libraries -->
-<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/marked/15.0.4/marked.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.2.4/purify.min.js"></script>
+<!-- Libraries, served from OUR box: the CSP (script-src 'self') blocks every
+     CDN, so the markdown and the code highlighting never ran. -->
+<script src="/lib/highlightjs/highlight.min.js"></script>
+<script src="/lib/marked/marked.min.js"></script>
+<script src="/lib/dompurify/purify.min.js"></script>
 <!-- App -->
 <script src="app.js"></script>
 </body>

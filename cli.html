@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>hivv CLI — the friendly network-agent gateway</title>
-  <meta name="description" content="One command to install the hivv CLI — join the distributed AI network. Chat across 23 providers. Run open models locally. Your CPU/GPU helps solve Earths hardest problems, together.">
+  <meta name="description" content="One command to install the hivv CLI — join the distributed AI network. Chat across the providers this hive is wired to. Run open models locally. Your CPU/GPU helps solve Earths hardest problems, together.">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🐝</text></svg>">
   <style>
   :root{
@@ -81,7 +81,7 @@ footer a{color:var(--honey-dim)}
     <span class="bee">🐝</span>
     <h1>hivv CLI</h1>
     <div class="tagline">v0.2.0 · MIT · stdlib only</div>
-    <p>One command to install a friendly network-agent gateway. Chat across <strong>23 providers</strong>. Optionally join the hivv bee swarm and earn compute credits.</p>
+    <p>One command to install a friendly network-agent gateway. Chat across <strong><span data-hivv-stat="models.providers_active" data-hivv-default="—">—</span> providers</strong>. Optionally join the hivv bee swarm and earn compute credits.</p>
   </header>
 
   <div class="install-card">
@@ -118,8 +118,8 @@ footer a{color:var(--honey-dim)}
 
   <div class="grid">
     <div class="card">
-      <h3>🐝 Chat across 23 providers</h3>
-      <p>Anthropic, OpenAI, Google, Mistral, Groq, DeepSeek, OpenRouter, Qwen, Together, plus 14 self-hosted backends (Ollama, llama.cpp, vLLM, LM Studio, KoboldCPP, LocalAI, …).</p>
+      <h3>🐝 Chat across <span data-hivv-stat="models.providers_active" data-hivv-default="—">—</span> providers</h3>
+      <p>Anthropic, OpenAI, Google, Mistral, Groq, DeepSeek, OpenRouter, Qwen, Together, plus <span data-hivv-stat="models.distinct" data-hivv-default="—">—</span> self-hosted models (Ollama, llama.cpp, vLLM, LM Studio, KoboldCPP, LocalAI, …).</p>
     </div>
     <div class="card">
       <h3>🤝 Join the swarm (optional)</h3>
@@ -131,7 +131,7 @@ footer a{color:var(--honey-dim)}
     </div>
     <div class="card">
       <h3>🪶 Zero deps</h3>
-      <p>Just Python 3.7+. No pip packages, no Docker, no Node, no build tools. The whole CLI is ~27 KB.</p>
+      <p>Just Python 3.7+. No pip packages, no Docker, no Node, no build tools. The whole CLI is ~1 MB of stdlib Python.</p>
     </div>
   </div>
 
@@ -270,5 +270,9 @@ function copyCmd(btn){
   navigator.clipboard.writeText(cmd).then(()=>{btn.textContent='copied!';setTimeout(()=>btn.textContent='copy',1500);});
 }
 </script>
+<!-- U0001F41D THE live numbers — one endpoint (/api/hivv/stats), one binding,
+     every page. No number on this site is typed into the HTML any more. -->
+<script src="/js/hivv-live.js"></script>
+<script>HIVVLive.start({ intervalMs: 30000 });</script>
 </body>
 </html>

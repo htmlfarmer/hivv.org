@@ -185,6 +185,97 @@ paths:
                         status: { type: string, enum: [success, error] }
                         ts: { type: string, format: date-time }
 
+  /api/hivv/stats:
+    get:
+      tags: [Hive]
+      summary: The canonical live numbers (the website's one source of truth)
+      description: |
+        Every number the website shows comes from here. `null` means NO DATA
+        (never 0) - a measurement that was never taken is not a measurement of
+        zero. `bees.online` counts the bees that have heartbeated within the
+        stale threshold, NOT the ones merely not marked offline.
+
+        The legacy door `/api/hive/stats` serves the identical payload.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  ts: { type: integer }
+                  bees:
+                    type: object
+                    properties:
+                      registered: { type: integer, nullable: true }
+                      online: { type: integer, nullable: true }
+                      offline: { type: integer, nullable: true }
+                      stressed: { type: integer, nullable: true }
+                      volunteers: { type: integer, nullable: true }
+                      countries: { type: integer, nullable: true }
+                      cities: { type: integer, nullable: true }
+                      country_list: { type: array, items: { type: string } }
+                      city_list: { type: array, items: { type: string } }
+                      online_list: { type: array, items: { type: string } }
+                  models:
+                    type: object
+                    properties:
+                      total: { type: integer, nullable: true }
+                      distinct: { type: integer, nullable: true }
+                      providers_active: { type: integer, nullable: true }
+                      names: { type: array, items: { type: string } }
+                  capacity:
+                    type: object
+                    properties:
+                      total_cpus: { type: integer, nullable: true }
+                      total_memory_gb: { type: number, nullable: true }
+                      free_memory_gb: { type: number, nullable: true }
+                      total_workers: { type: integer, nullable: true }
+                      active_jobs: { type: integer }
+                      available_capacity: { type: integer, nullable: true }
+                      utilization_percent: { type: number, nullable: true }
+                  performance:
+                    type: object
+                    properties:
+                      requests_today: { type: integer, nullable: true }
+                      tokens_today: { type: integer, nullable: true }
+                      top_tps: { type: number, nullable: true }
+                      avg_ttfb_ms: { type: integer, nullable: true }
+                      total_jobs: { type: integer, nullable: true }
+                      success_rate: { type: number, nullable: true }
+                      cost_today: { type: number, nullable: true }
+                  honey:
+                    type: object
+                    properties:
+                      total: { type: integer, nullable: true }
+                      leader: { type: string, nullable: true }
+                      leader_honey: { type: integer, nullable: true }
+                      leader_rank: { type: string, nullable: true }
+                      bees: { type: integer, nullable: true }
+                  bridge:
+                    type: object
+                    properties:
+                      peers: { type: integer, nullable: true }
+                      allowance_percent: { type: integer, nullable: true }
+                      allowance_mode: { type: string, nullable: true }
+                  gateway:
+                    type: object
+                    properties:
+                      version: { type: string, nullable: true }
+                      uptime_seconds: { type: integer, nullable: true }
+                      providers_active: { type: integer, nullable: true }
+                      database: { type: string, nullable: true }
+                      hub:
+                        type: object
+                        nullable: true
+                        properties:
+                          lat: { type: number }
+                          lon: { type: number }
+                          city: { type: string, nullable: true }
+                          country_code: { type: string, nullable: true }
+
   /api/chat:
     post:
       tags: [Chat]

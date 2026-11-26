@@ -7,8 +7,10 @@
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <link rel="stylesheet" href="/lib/leaflet/leaflet.css" onerror="this.onerror=null;var l=document.createElement('link');l.rel='stylesheet';l.href='https://unpkg.com/leaflet@1.9.4/dist/leaflet.css';document.head.appendChild(l);">
   <script src="/lib/leaflet/leaflet.js"></script>
-  <script src="https://d3js.org/d3.v7.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <!-- d3 + Chart.js are served from OUR box: the CSP (script-src 'self')
+       blocks every CDN, so these charts never ran. The CDNs stay as fallbacks. -->
+  <script src="/lib/d3/d3.v7.min.js"></script>
+  <script src="/lib/chartjs/chart.umd.min.js"></script>
   <style>
     :root {
       --bg: #0a0a0f; --bg-card: #0d0d1a; --bg-card2: #111122;
@@ -418,7 +420,7 @@
       <div class="metric-row">
         <div class="metric-card green"><div class="label">Capabilities</div><div class="value" id="cap-total">--</div><div class="sub">registered nouns of the hive</div></div>
         <div class="metric-card blue"><div class="label">Bees Advertising</div><div class="value" id="cap-bees">--</div><div class="sub">derived hub-side, never self-reported</div></div>
-        <div class="metric-card purple"><div class="label">Route Modes</div><div class="value" id="cap-modes">--</div><div class="sub">quality · cost · privacy · latency · trust</div></div>
+        <div class="metric-card purple"><div class="label">Route Modes</div><div class="value" id="cap-modes">--</div><div class="sub" id="cap-modes-sub">balanced · quality · fast · cost · private · trusted</div></div>
         <div class="metric-card orange"><div class="label">Frontier Tiers</div><div class="value" id="cap-frontier">--</div><div class="sub">money · physical — locked until paired</div></div>
       </div>
       <div class="panel">
@@ -437,9 +439,7 @@
               <option value="cost">cost</option><option value="private">private (no cloud)</option><option value="trusted">trusted</option>
             </select>
             <select id="rp-cap" style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:6px 10px;color:var(--text);font-size:.8rem">
-              <option value="reasoning">reasoning</option><option value="vision">vision</option><option value="coding">coding</option>
-              <option value="web.search">web.search</option><option value="web.fetch">web.fetch</option><option value="local.computation">local.computation</option>
-              <option value="financial.transaction">financial.transaction</option><option value="physical.world">physical.world</option>
+              <option value="">loading capabilities…</option>
             </select>
             <button class="btn btn-green" onclick="refreshPlanner()">Plan route</button>
           </div>
@@ -1203,6 +1203,16 @@ async function refreshCaps() {
   for (const c of data.capabilities) for (const n of (c.nodes || [])) advertising.add(n);
   document.getElementById('cap-bees').textContent = advertising.size;
   document.getElementById('cap-frontier').textContent = data.capabilities.filter(c => ['money', 'physical'].includes(c.tier)).length;
+  // The route planner's capability list is now the LIVE registry, not a
+  // hand-typed subset of 8 out of 18. A capability nobody can plan for is
+  // a capability the planner pretends does not exist.
+  const capSel = document.getElementById('rp-cap');
+  if (capSel) {
+    const keys = [...data.capabilities].map(c => c.key).sort();
+    const keep = capSel.value;
+    capSel.innerHTML = keys.map(k => `<option value="${_hEsc(k)}">${_hEsc(k)}</option>`).join('');
+    if (keys.includes(keep)) capSel.value = keep;
+  }
   const rows = [...data.capabilities].sort((a, b) => (a.tier || '').localeCompare(b.tier || '') || a.key.localeCompare(b.key));
   el.innerHTML = `<table class="data-table"><thead><tr><th>Capability</th><th>Tier</th><th>Gate</th><th>Online bees</th><th>Who</th></tr></thead><tbody>` +
     rows.map(c => `<tr>

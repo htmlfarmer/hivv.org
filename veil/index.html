@@ -54,14 +54,18 @@ and decodes back whole), the heartbeat field <code>secret_key</code>, and the so
 <code>/statement.html</code>. Writing is easy. Reading is the gate.</p>
 </div>
 
-<h2>Posture, tonight (real numbers)</h2>
+<h2>Posture (real numbers — and dated where they are a snapshot)</h2>
 <div class="card"><ul>
 <li>SSH: <b>210 failed password attempts / 6h — all refused.</b> One open
-recommendation standing: disable password auth (the last honest door).</li>
+recommendation standing: disable password auth (the last honest door).
+<span class="small">( snapshot, 25 Nov 2026 )</span></li>
 <li>Gateway auth failures: <b>1</b> — and that one was our own test. Honest
-attribution beats a scary number.</li>
+attribution beats a scary number. <span class="small">( same snapshot )</span></li>
 <li>Bridge endpoints: clean, rate-limited, SSRF-guarded. Load gate: <b>OK</b>,
-85% allowance, 24 calls all night. Canary: <b>4/4 healthy beats</b>.</li>
+current allowance <b><span data-hivv-stat="bridge.allowance_percent" data-hivv-format="pct" data-hivv-default="—">—</span></b>
+(mode <span data-hivv-stat="bridge.allowance_mode" data-hivv-default="—">—</span>),
+<span data-hivv-stat="bridge.peers" data-hivv-default="—">—</span> verified peer
+hive(s). Canary: <b>4/4 healthy beats</b>.</li>
 <li>Two KwaaiNet nodes serving blocks from this hive (Llama-3.1-8B ×4 and
 Qwen-0.5B ×4, both announcing); gemma4 waiting on its weight adapter.</li>
 </ul></div>
@@ -75,4 +79,8 @@ proven by hash). The hidden features above aren't tricks: each one is a door tha
 <p class="small">You read to the end of a hidden page. That's the whole reward.
 Well — that and the header. 🐝</p>
 
-</div></body></html>
+</div><!-- U0001F41D THE live numbers — one endpoint (/api/hivv/stats), one binding,
+     every page. No number on this site is typed into the HTML any more. -->
+<script src="/js/hivv-live.js"></script>
+<script>HIVVLive.start({ intervalMs: 30000 });</script>
+</body></html>

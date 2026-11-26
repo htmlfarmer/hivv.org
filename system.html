@@ -8,7 +8,9 @@
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <link rel="icon" type="image/x-icon" href="/favicon.ico">
   <link rel="apple-touch-icon" href="/apple-touch-icon.png">
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <!-- Chart.js is served from OUR box: the CSP (script-src 'self') blocks
+       every CDN, so these charts never ran. The CDN stays as a fallback. -->
+  <script src="/lib/chartjs/chart.umd.min.js"></script>
   <style>
     :root {
       --past: #a855f7;
@@ -218,15 +220,15 @@
   
   <div class="hivv-stats-grid" id="hivv-stats">
     <div class="hivv-stat">
-      <div class="hivv-stat-value" id="stat-agents">—</div>
+      <div class="hivv-stat-value" id="stat-agents" data-hivv-stat="honey.bees" data-hivv-default="—">—</div>
       <div class="hivv-stat-label">Registered Agents</div>
     </div>
     <div class="hivv-stat">
-      <div class="hivv-stat-value" id="stat-nodes">—</div>
+      <div class="hivv-stat-value" id="stat-nodes" data-hivv-stat="bees.online" data-hivv-default="—">—</div>
       <div class="hivv-stat-label">Active Nodes</div>
     </div>
     <div class="hivv-stat">
-      <div class="hivv-stat-value" id="stat-actions">—</div>
+      <div class="hivv-stat-value" id="stat-actions" data-hivv-stat="performance.requests_today" data-hivv-default="—">—</div>
       <div class="hivv-stat-label">Actions Today</div>
     </div>
     <div class="hivv-stat">
@@ -286,12 +288,15 @@ async function loadHIVVStats() {
   try {
     const res = await fetch('/api/hivv/protocol');
     const data = await res.json();
-    
+
     if (data.stats) {
-      document.getElementById('stat-agents').textContent = (data.stats.nodes_count * 37.4).toLocaleInteger ? 
-        Math.round(data.stats.nodes_count * 37.4).toLocaleString() : Math.round(data.stats.nodes_count * 37.4);
-      document.getElementById('stat-nodes').textContent = data.stats.nodes_count;
-      document.getElementById('stat-proposals').textContent = data.stats.proposals_active;
+      // MEASURED. This used to be `nodes_count * 37.4` — a fabricated
+      // multiplier that turned the node count into a made-up agent fleet
+      // (343 phantom nodes -> "12,828 agents"). No multiplication: the
+      // number is the number.
+      document.getElementById('stat-proposals').textContent =
+        (data.stats.proposals_active !== null && data.stats.proposals_active !== undefined)
+          ? String(data.stats.proposals_active) : '—';
     }
     
     document.getElementById('hivv-network-stats').innerHTML = 
@@ -307,11 +312,14 @@ async function loadHIVVStats() {
     const apiRes = await fetch('/api/hivv/');
     const apiData = await apiRes.json();
     if (apiData.stats) {
-      document.getElementById('stat-agents').textContent = apiData.stats.agents_registered ? 
-        apiData.stats.agents_registered.toLocaleString() : '—';
-      document.getElementById('stat-nodes').textContent = apiData.stats.nodes_online;
-      document.getElementById('stat-actions').textContent = apiData.stats.actions_today ? 
-        apiData.stats.actions_today.toLocaleString() : '—';
+      const s = apiData.stats;
+      const set = (id, v) => {
+        document.getElementById(id).textContent =
+          (v === null || v === undefined || v === '') ? '—' : Number(v).toLocaleString();
+      };
+      set('stat-agents', s.agents_registered);
+      set('stat-nodes', s.nodes_online);
+      set('stat-actions', s.actions_today);
     }
   } catch (e) {}
 }
@@ -429,5 +437,9 @@ setInterval(refreshActivity, 15000);
 setInterval(refreshPool, 30000);
 </script>
 
+<!-- U0001F41D THE live numbers — one endpoint (/api/hivv/stats), one binding,
+     every page. No number on this site is typed into the HTML any more. -->
+<script src="/js/hivv-live.js"></script>
+<script>HIVVLive.start({ intervalMs: 30000 });</script>
 </body>
 </html>
