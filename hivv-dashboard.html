@@ -199,6 +199,16 @@
 
     /* Agent Fleet List */
     .agent-grid { display: flex; flex-direction: column; gap: 12px; }
+    /* A seeded sample row: visible only on request, always dimmed, always
+       labelled. It must never look like a registration. */
+    .agent-card.is-demo { opacity: .55; border-style: dashed; }
+    .agent-status.sample {
+      background: rgba(139, 148, 158, .15);
+      color: #8b949e;
+      border: 1px solid rgba(139, 148, 158, .35);
+      font-size: .58rem;
+      letter-spacing: .04em;
+    }
     .agent-card {
       background: var(--card-bg); border: 1px solid var(--border-color); border-radius: 10px;
       padding: 16px 20px; display: flex; justify-content: space-between; align-items: center;
@@ -515,7 +525,16 @@
         <div class="panel">
           <div class="panel-header">
             <h3>🤖 AGENT FLEET <span class="count" id="agent-count">0</span></h3>
-            <button class="btn-secondary btn-sm" onclick="showAgentRegistration()">+ Register Agent</button>
+            <div style="display:flex;gap:8px;align-items:center;">
+              <button class="btn-secondary btn-sm" id="demo-toggle" onclick="toggleDemoAgents()" style="display:none;">Show sample data</button>
+              <button class="btn-secondary btn-sm" onclick="showAgentRegistration()">+ Register Agent</button>
+            </div>
+          </div>
+          <div id="demo-note" style="display:none;padding:10px 14px;border-bottom:1px solid var(--border-color);font-size:.76rem;color:#8b949e;">
+            <span style="color:var(--maybe);">⚠ SAMPLE DATA</span>
+            &mdash; these rows come from the schema seed script (migration 003), not from
+            registrations. They are never counted as agents, never counted as authorizations,
+            and never appear in the relationship graph.
           </div>
           <div class="agent-grid" id="agent-list">
             <div class="empty-state">
@@ -766,9 +785,19 @@
   }
 
   // Load Agents
+  //
+  // demo=exclude (the default) asks for the REAL registrations only. The
+  // schema seed script left 15 sample rows in hivv_agents, and the Control
+  // Center used to publish them as a live fleet: "10 ACTIVE AGENTS" beside a
+  // REALTIME LIVE badge, with trust scores nobody ever earned. A sample is
+  // a sample - it is shown only when you ASK for it, and it is never counted.
+  let demoTotal = 0;
+  let showDemo = false;
+
   async function loadAgents() {
     try {
-      const r = await fetch(`/api/dashboard/agents?perspective=${currentLensMode}`, {
+      const demoParam = showDemo ? 'demo=all' : 'demo=exclude';
+      const r = await fetch(`/api/dashboard/agents?perspective=${currentLensMode}&${demoParam}`, {
         headers: authHeaders()
       });
       if (!r.ok) return;
@@ -776,6 +805,16 @@
       if (!d.success) return;
 
       loadedAgents = d.agents || [];
+      demoTotal = d.demo_total || 0;
+
+      const toggle = document.getElementById('demo-toggle');
+      const note = document.getElementById('demo-note');
+      if (toggle) {
+        toggle.style.display = demoTotal > 0 ? 'inline-flex' : 'none';
+        toggle.textContent = showDemo ? 'Hide sample data' : 'Show sample data (' + demoTotal + ')';
+      }
+      if (note) note.style.display = (demoTotal > 0 && showDemo) ? 'block' : 'none';
+
       renderAgentFleet();
       updateTriStateCounts();
       loadActivityFeed();
@@ -784,17 +823,30 @@
     }
   }
 
+  // Show or hide the seeded sample rows. They stay labelled either way.
+  // Exported on window because the script is one IIFE and the button calls
+  // it from an inline onclick attribute.
+  window.toggleDemoAgents = async function() {
+    showDemo = !showDemo;
+    await loadAgents();
+  };
+
   // Update Tri-State Summary Counters
   function updateTriStateCounts() {
     let yesCount = 0;
     let maybeCount = 0;
     let noCount = 0;
 
-    loadedAgents.forEach(a => {
+    // The counters NEVER count a sample row, even when the sample rows
+    // are on screen. A sample has no authorization and no state; it is a
+    // fixture, and a fixture that shows up in "YES AUTHORIZED 10" is
+    // exactly the lie this page used to tell.
+    loadedAgents.filter(a => !a.is_demo).forEach(a => {
       if (a.state === 'yes') yesCount++;
       else if (a.state === 'maybe') maybeCount++;
       else if (a.state === 'no') noCount++;
     });
+    const realAgents = loadedAgents.filter(a => !a.is_demo).length;
 
     // Add approvals count to MAYBE
     maybeCount += loadedApprovals.length;
@@ -803,8 +855,8 @@
     document.getElementById('stat-maybe-count').textContent = maybeCount;
     document.getElementById('stat-no-count').textContent = noCount;
 
-    document.getElementById('card-agents').textContent = loadedAgents.length;
-    document.getElementById('agent-count').textContent = loadedAgents.length;
+    document.getElementById('card-agents').textContent = realAgents;
+    document.getElementById('agent-count').textContent = realAgents;
   }
 
   // Render Agent Fleet
@@ -822,11 +874,12 @@
     }
 
     listEl.innerHTML = filtered.map(a => `
-      <div class="agent-card" onclick="openAgentInspector('${a.id}')">
+      <div class="agent-card${a.is_demo ? ' is-demo' : ''}" onclick="openAgentInspector('${a.id}')">
         <div class="agent-info">
           <div class="agent-title-row">
             <span class="agent-name">${escapeHtml(a.public_name || 'Unnamed Agent')}</span>
             <span class="agent-status ${a.state}">${a.state.toUpperCase()}</span>
+            ${a.is_demo ? '<span class="agent-status sample" title="Seeded sample row — not a registration">SAMPLE</span>' : ''}
           </div>
           <div class="agent-meta">
             <span class="agent-meta-item">🤖 ${escapeHtml(a.agent_type || 'ai')}</span>
@@ -836,9 +889,10 @@
           </div>
         </div>
         <div style="display:flex;gap:8px;">
-          <button class="btn-secondary btn-sm" onclick="event.stopPropagation(); toggleAgentState('${a.id}', '${a.state === 'yes' ? 'maybe' : 'yes'}')">
+          ${a.is_demo ? '<span style="font-size:.68rem;color:#8b949e;align-self:center;">seed row</span>' :
+          `<button class="btn-secondary btn-sm" onclick="event.stopPropagation(); toggleAgentState('${a.id}', '${a.state === 'yes' ? 'maybe' : 'yes'}')">
             ${a.state === 'yes' ? 'Pause' : 'Activate'}
-          </button>
+          </button>`}
         </div>
       </div>
     `).join('');
@@ -962,6 +1016,10 @@
   }
 
   // Load Network Graph Visualizer
+  // The "Refresh Graph" button called this from an inline onclick, but
+  // the script is one IIFE, so the name was never on window and the button
+  // did nothing at all. Export it.
+  window.loadNetworkGraph = loadNetworkGraph;
   async function loadNetworkGraph() {
     try {
       const r = await fetch('/api/dashboard/universe-map', {
