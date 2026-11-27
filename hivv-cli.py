@@ -24705,7 +24705,18 @@ def _fleet_remote_report(host: str) -> dict | None:
     """
     if not shutil.which("ssh"):
         return None
-    inner = "hivv fleet --report 2>/dev/null || ~/.local/lib/hivv/hivv-cli.py fleet --report 2>/dev/null || true"
+    # The PROBE FIRST, and that ordering is load-bearing. An older CLI
+    # does not have 'fleet', so it treats the argument as a chat query,
+    # prints a note, and exits ZERO — so a probe that ran second would
+    # never be reached, and the fleet would read the note as "no answer".
+    #
+    # The probe is also the only one that survives: the running agent
+    # RESTORES its CLI from the hub, so a hand-copied new CLI is an old CLI
+    # again by the next morning. The probe is a separate file the agent does
+    # not manage.
+    inner = ("python3 ~/.local/share/hivv/fleet-probe.py 2>/dev/null || "
+             "hivv fleet --report 2>/dev/null || "
+             "~/.local/lib/hivv/hivv-cli.py fleet --report 2>/dev/null || true")
     try:
         r = subprocess.run(
             ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8",
@@ -24821,9 +24832,19 @@ def _fleet_pm2_gateway() -> dict | None:
 
 def _fleet_git_state() -> dict | None:
     """The source tree on this box: which branch, and is it clean?"""
-    for cand in (Path("/var/www/vhosts/hivv.org"),
-                 Path.home() / "work" / "hivv",
-                 Path.home() / "hivv"):
+    # The deployment path is DERIVED, never hardcoded: this repository
+    # moves (a new GitHub repo, a new clone path, a developer's laptop), and
+    # a literal here would point at the wrong tree forever. The gateway
+    # knows where it runs — pm2's cwd is the truth — and the CLI knows
+    # where it lives.
+    cands = []
+    gw = _fleet_pm2_gateway()
+    if gw and gw.get("cwd"):
+        cands.append(Path(gw["cwd"]).parent)
+    cands += [Path(__file__).resolve().parents[1],
+               Path.home() / "work" / "hivv",
+               Path.home() / "hivv"]
+    for cand in cands:
         if not (cand / ".git").exists():
             continue
         try:
@@ -24956,9 +24977,12 @@ def _cmd_fleet_dashboard(args) -> None:
         if not o.get("reachable"):
             print("      unreachable (no key auth? run 'hivv fleet' on that box)")
             continue
-        rn = rep.get("node")
-        if rn:
-            print(f"      node     id {rn.get('identity')}  port {rn.get('port')}")
+        # The probe reports a LIST of nodes; the CLI reports one. Read
+        # both, so the dashboard does not care which one answered.
+        rnodes = rep.get("nodes") or ([rep["node"]] if rep.get("node") else [])
+        for rn in rnodes:
+            mark = "\033[32m●\033[0m" if rn.get("up") else "\033[31m○\033[0m"
+            print(f"      node {mark} id {rn.get('identity')}  port {rn.get('port')}")
         if rep.get("agent_running"):
             print("      agent    running")
         if rep.get("gateway"):
@@ -25056,7 +25080,10 @@ def _fleet_peer_id(home: Path) -> str:
     for name in ("node.log", "kwaainet.log"):
         log = home / "logs" / name
         try:
-            lines = log.read_text(errors="replace").splitlines()[-400:]
+            # The WHOLE file, not the tail: the peer id is logged ONCE at
+            # startup, so a busy node's log has pushed it far past any
+            # "last N lines" window.
+            lines = log.read_text(errors="replace").splitlines()
         except Exception:
             continue
         for line in reversed(lines):
@@ -25276,6 +25303,21 @@ def _cmd_fleet_up(args) -> None:
 
     src = _fleet_ensure_source()
     print(_ok(f"source: {src}"))
+
+    # Install the fleet probe. It is a SEPARATE file on purpose: the
+    # running agent restores its CLI from the hub, so a hand-copied new CLI
+    # is an old CLI again by the next morning. The probe is not managed by
+    # the agent, so it stays.
+    _probe_src = Path(__file__).resolve().parents[1] / "scripts" / "fleet-probe.py"
+    _probe_dst = Path.home() / ".local" / "share" / "hivv" / "fleet-probe.py"
+    if _probe_src.exists():
+        try:
+            _probe_dst.parent.mkdir(parents=True, exist_ok=True)
+            _probe_dst.write_text(_probe_src.read_text())
+            os.chmod(_probe_dst, 0o755)
+            print(_ok(f"probe: {_probe_dst}"))
+        except Exception as e:
+            print(_warn(f"could not install the fleet probe: {e}"))
 
     binary = _fleet_ensure_binary(src)
     print(_ok(f"binary: {binary}"))
