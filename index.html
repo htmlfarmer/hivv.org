@@ -1909,8 +1909,8 @@
         </div>
         <div style="margin-top:10px;font-size:.72rem;color:#666">
           <strong style="color:#94a3b8">Fields for /api/keys/donate:</strong>
-          <code style="color:#ffd93d">provider</code> (required) · <code style="color:#ffd93d">api_key</code> (required) · <code style="color:#94a3b8">endpoint</code> (optional — custom URL) · <code style="color:#94a3b8">name</code> (optional) · <code style="color:#94a3b8">model</code> (optional preferred model)
-          · Keys are <strong style="color:#94a3b8">AES-256-GCM encrypted</strong> at rest.
+          <code style="color:#ffd93d">provider</code> (required) · <code style="color:#ffd93d">api_key</code> (required) · <code style="color:#94a3b8">endpoint</code> (optional — custom URL, stored on YOUR key) · <code style="color:#94a3b8">name</code> (optional) · <code style="color:#94a3b8">model</code> (optional preferred model) · <code style="color:#00ff88">personal</code> (optional true — only YOUR requests can spend it; needs a login or a registered bee)
+          · Keys are <strong style="color:#94a3b8">AES-256-GCM encrypted</strong> at rest. <strong style="color:#ffd93d">Without <code>personal</code> the key is a donation — every bee on the hive can spend it</strong> (capped at 120 req/hour + 200k tokens/day).
         </div>
       </div>
 
@@ -2785,6 +2785,9 @@ curl https://hivv.org/v1/chat/completions \
 
   // ========== PROVIDER RINGS ==========
   function renderProviderRings(providers) {
+    // These are NODES (callers pass realNodes), not providers - and a
+    // node name is attacker-settable at registration. Escaped, because
+    // the boundary strip must not be the only line of defense.
     const container = document.getElementById('provider-rings');
     const circumference = 2 * Math.PI * 36; // radius 36
 
@@ -2808,7 +2811,7 @@ curl https://hivv.org/v1/chat/completions \
               <span class="ring-unit">tok/s</span>
             </div>
           </div>
-          <div class="provider-name">${p.name}</div>
+          <div class="provider-name">${escapeHtml(p.name)}</div>
           <div class="provider-meta">${p.latency} latency</div>
           <div class="provider-status-indicator">
             <span class="status-dot"></span>
