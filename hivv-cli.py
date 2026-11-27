@@ -4652,6 +4652,18 @@ def cmd_agent(stop_event) -> None:
     cycle = 0
     while not stop_event.is_set():
         cycle += 1
+        # 0. THE WATCHDOG TICK — the agent is already awake every 60s, so the
+        # local services get supervised for free on every bee. It runs BEFORE
+        # the heartbeat so a tool server we just restored is announced in this
+        # same cycle. The tick itself is bounded: it never loops, and it only
+        # restarts services the user turned ON (see _watch_decide).
+        try:
+            _wres = _watch_tick()
+            if _wres.get("restarted"):
+                print(f"[{time.strftime('%H:%M:%S')}] WATCH: restarted "
+                      f"{', '.join(_wres['restarted'])}", file=log_path)
+        except Exception as _we:
+            print(f"[{time.strftime('%H:%M:%S')}] WATCH tick error: {_we}", file=log_path)
         node_id = (read_state() or {}).get("node_id")
         # Track stats delta since last heartbeat
         st = read_state() or {}
@@ -6854,6 +6866,452 @@ def _tools_running() -> bool:
         pass
     return False
 
+
+# =============================================================================
+# THE TOOL SERVER'S HEALTH — "running" is not "working"
+# =============================================================================
+# A server can be ALIVE and still be the WRONG one. On 2026-11-26 this box
+# ran the PRE-refactor hivv-tools.py for a MONTH: five tools in the catalog,
+# no do_POST at all (every POST answered 501), no local_tools/hub_tools keys.
+# 'hivv tools on' short-circuited on "the pid is alive" and never replaced
+# it — so the box sat on a server the current CLI could not use, and nothing
+# on the box would ever notice, because a live pid is not a working server.
+#
+# So health = SHAPE + A REAL CALL. Never liveness.
+
+TOOLS_UNIT = "hivv-tools.service"
+TOOLS_ENABLED_FILE = STATE_DIR / "tools.enabled"
+# The current toolkit serves 13 tools (12 + sysinfo). The old one served 5.
+_MIN_TOOLKIT_TOOLS = 12
+
+
+def _tools_catalog(timeout: float = 3.0) -> dict | None:
+    """The running server's catalog, or None when it cannot answer."""
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{TOOLS_PORT}/tools",
+                                    timeout=timeout) as r:
+            data = json.loads(r.read())
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
+def _tools_healthy(catalog: dict | None) -> bool:
+    """Is THIS catalog the CURRENT one?
+
+    Two marks of a current hivv-tools.py: a full catalog, and the
+    local_tools/hub_tools split (the old server had neither). No catalog at
+    all (the server cannot answer) is NOT healthy — silence is not health.
+    """
+    if not isinstance(catalog, dict):
+        return False
+    tools = catalog.get("tools")
+    if not isinstance(tools, list) or len(tools) < _MIN_TOOLKIT_TOOLS:
+        return False
+    return "local_tools" in catalog and "hub_tools" in catalog
+
+
+def _tools_healthy_now() -> bool:
+    """Is the running server the current one?"""
+    return _tools_healthy(_tools_catalog())
+
+
+def _tools_probe() -> tuple[bool, str]:
+    """Full health check: the catalog AND a real tool call.
+
+    The catalog alone was not enough — the old server answered GET /tools
+    perfectly while every POST (the actual tool path) returned 501.
+    """
+    cat = _tools_catalog(timeout=2.0)
+    if not cat:
+        return (False, f"no answer on 127.0.0.1:{TOOLS_PORT}")
+    n = len(cat.get("tools") or [])
+    if not _tools_healthy(cat):
+        return (False, f"stale toolkit (serves {n} tools, no local_tools/hub_tools)")
+    try:
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{TOOLS_PORT}/tool/calculator",
+            data=json.dumps({"expression": "1+1"}).encode(),
+            headers={"Content-Type": "application/json"}, method="POST")
+        with urllib.request.urlopen(req, timeout=4) as r:
+            body = json.loads(r.read())
+        if not body.get("ok"):
+            return (False, f"calculator answered but not ok: {str(body)[:100]}")
+    except Exception as e:
+        return (False, f"tool call failed: {e}")
+    return (True, f"{n} tools · tool calls OK")
+
+
+def _tools_mark_enabled() -> None:
+    """Record the user's INTENT so the watchdog knows the server is supposed
+    to be running even while it is broken. The flag is the desired state; the
+    process is the observed state. A watchdog that cannot tell them apart
+    either restarts what you turned off, or ignores what you turned on."""
+    try:
+        TOOLS_ENABLED_FILE.parent.mkdir(parents=True, exist_ok=True)
+        TOOLS_ENABLED_FILE.write_text(str(int(time.time())))
+    except Exception:
+        pass
+
+
+def _tools_mark_disabled() -> None:
+    try:
+        TOOLS_ENABLED_FILE.unlink()
+    except OSError:
+        pass
+
+
+def _tools_drop_conflicting_unit() -> bool:
+    """Remove a leftover DISABLED tools unit when pm2 owns the port.
+
+    One port, one owner. A disabled unit file is a second owner waiting to
+    be enabled — the moment somebody enables it, the two crash-loop each
+    other over 18789. Return True when a file was removed.
+    """
+    path = _tools_unit_path()
+    if not path.exists():
+        return False
+    try:
+        path.unlink()
+        _systemctl("--user", "daemon-reload")
+        return True
+    except OSError:
+        return False
+
+
+def _tools_stop() -> str:
+    """Stop the tool server — systemd first (it owns the unit), then the pid
+    file (the pre-unit detached spawn). Returns what it did."""
+    notes: list[str] = []
+    if _tools_unit_path().exists() and _systemd_user_available():
+        try:
+            r = subprocess.run(["systemctl", "--user", "stop", TOOLS_UNIT],
+                               capture_output=True, text=True, timeout=30)
+            if r.returncode == 0:
+                notes.append(f"systemctl --user stop {TOOLS_UNIT}")
+        except Exception:
+            pass
+    pid_file = TOOLS_PID_FILE
+    if pid_file.exists():
+        try:
+            pid = int(pid_file.read_text().strip())
+            _kill_pid(pid)
+            notes.append(f"killed pid {pid}")
+        except (ValueError, OSError):
+            pass
+        try:
+            pid_file.unlink()
+        except OSError:
+            pass
+    return "; ".join(notes) or "nothing was running"
+
+
+def _systemd_user_available() -> bool:
+    """Is a systemd USER manager reachable? (macOS/Windows: no.)"""
+    try:
+        r = subprocess.run(["systemctl", "--user", "show-environment"],
+                           capture_output=True, text=True, timeout=8)
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+_PM2_MEMO: dict = {}
+
+
+def _pm2_bin() -> str | None:
+    p = shutil.which("pm2")
+    if p:
+        return p
+    cand = Path.home() / ".local" / "bin" / "pm2"
+    return str(cand) if cand.exists() else None
+
+
+def _pm2_has(name: str, ttl: float = 300.0) -> bool:
+    """Is this name a known pm2 app?
+
+    MEMOISED: pm2 jlist spawns a node process, and the watchdog asks this
+    every cycle. The answer changes on the order of minutes, so a 5-minute
+    memo is honest and keeps the tick cheap.
+    """
+    now = time.time()
+    memo = _PM2_MEMO.get(name)
+    if memo and now - memo[0] < ttl:
+        return bool(memo[1])
+    found = False
+    try:
+        pm2 = _pm2_bin()
+        if pm2:
+            r = subprocess.run([pm2, "jlist"], capture_output=True, text=True,
+                               timeout=25)
+            apps = json.loads(r.stdout or "[]")
+            found = any(isinstance(a, dict) and a.get("name") == name
+                        for a in apps)
+    except Exception:
+        found = False
+    _PM2_MEMO[name] = (now, found)
+    return found
+
+
+def _pm2_restart(name: str) -> tuple[bool, str]:
+    """Restart a pm2 app. Returns (ok, message).
+
+    'pm2 restart' FAILS on an app that is not running ('Process 0 not
+    found') — which is exactly the state a crashed app is in. So a failed
+    restart falls back to 'pm2 start'. (That fallback is what turns the
+    2026-11-26 quarantine drill from 'the app stayed dead' into 'the
+    watchdog brought it back'.)
+    """
+    pm2 = _pm2_bin()
+    if not pm2:
+        return (False, "pm2 not found")
+
+    def _run(action: str):
+        try:
+            return subprocess.run([pm2, action, name], capture_output=True,
+                                  text=True, timeout=90)
+        except Exception:
+            return None
+
+    r = _run("restart")
+    if r is not None and r.returncode == 0:
+        return (True, f"pm2 restart {name}")
+    r2 = _run("start")
+    if r2 is not None and r2.returncode == 0:
+        return (True, f"pm2 start {name}")
+    detail = ""
+    for cand in (r, r2):
+        if cand is not None:
+            detail = ((cand.stderr or "") + " " + (cand.stdout or "")).strip()
+            if detail:
+                break
+    detail = " ".join(detail.split())[:160]      # ONE line: the log is line-based
+    return (False, "pm2 restart failed: " + (detail or "unknown error"))
+
+
+def _pm2_app(name: str) -> dict | None:
+    """The pm2 app's config (pm2_env), or None when there is no such app."""
+    try:
+        pm2 = _pm2_bin()
+        if not pm2:
+            return None
+        r = subprocess.run([pm2, "jlist"], capture_output=True, text=True,
+                           timeout=25)
+        apps = json.loads(r.stdout or "[]")
+        for a in apps:
+            if isinstance(a, dict) and a.get("name") == name:
+                return a.get("pm2_env") or {}
+    except Exception:
+        return None
+    return None
+
+
+def _pm2_bound_restarts(name: str) -> tuple[bool, str]:
+    """Give a pm2 app a BOUNDED restart policy.
+
+    pm2's default is autorestart=true with max_restarts=NONE — an app that
+    cannot start is restarted FOREVER, with no backoff. That is precisely
+    the restart storm this whole feature exists to avoid, and the hub box
+    was running exactly that (ashy, 2026-11-26).
+
+    The bound is max_restarts WITHIN min_uptime: past it pm2 marks the app
+    UNSTABLE and stops restarting — the same 'failed, a human must look'
+    shape as systemd's StartLimit. min_uptime matters as much as
+    max_restarts: with pm2's default 1s, a server that crashes after two
+    seconds of life is never counted as unstable, so the loop never ends.
+    (pm2's CLI has no --min-uptime flag; the policy is applied through a
+    generated ecosystem file.)
+    """
+    env = _pm2_app(name)
+    if not env:
+        return (False, "no pm2 app")
+    if not env.get("autorestart"):
+        return (True, "autorestart is off — nothing to bound")
+    if env.get("max_restarts"):
+        return (True, f"already bounded (max_restarts={env.get('max_restarts')})")
+    exec_path = env.get("pm_exec_path")
+    args = env.get("args") or []
+    cwd = env.get("pm_cwd")
+    if not exec_path or not args:
+        return (False, "cannot reproduce the app's command line")
+    app = {
+        "name": name,
+        "script": exec_path,
+        "args": [str(a) for a in args],
+        "autorestart": True,
+        "max_restarts": 3,
+        "min_uptime": 60000,
+        "restart_delay": 10000,
+        "exp_backoff_restart_delay": 10000,
+        "interpreter": env.get("exec_interpreter") or "none",
+    }
+    if cwd:
+        app["cwd"] = cwd
+    if env.get("pm_out_log_path"):
+        app["out_file"] = env["pm_out_log_path"]
+    if env.get("pm_err_log_path"):
+        app["error_file"] = env["pm_err_log_path"]
+    pm2 = _pm2_bin()
+    if not pm2:
+        return (False, "pm2 not found")
+    tmp_dir = None
+    try:
+        tmp_dir = tempfile.mkdtemp(prefix="hivv-pm2-")
+        eco = Path(tmp_dir) / "ecosystem.json"
+        eco.write_text(json.dumps({"apps": [app]}, indent=2))
+        r = subprocess.run([pm2, "start", str(eco), "--only", name, "--update-env"],
+                           capture_output=True, text=True, timeout=120)
+    except Exception as e:
+        return (False, f"pm2 start failed: {e}")
+    finally:
+        if tmp_dir:
+            try:
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+            except Exception:
+                pass
+    if r.returncode != 0:
+        return (False, "pm2 start failed: "
+                + ((r.stderr or r.stdout or "").strip()[-200:] or f"exit {r.returncode}"))
+    _PM2_MEMO.pop(name, None)
+    return (True, "restart policy bounded (max 3 restarts / 60s, 10s backoff)")
+
+
+def _unit_enabled(unit: str, user: bool = True) -> bool:
+    """Is a unit enabled? 'is-enabled' is the DESIRED state (systemd's
+    "should this run"), which is exactly what a watchdog wants:
+    supervising what the user asked for, and nothing else."""
+    cmd = ["systemctl"] + (["--user"] if user else []) + ["is-enabled", unit]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=8)
+        return (r.stdout or "").strip() == "enabled"
+    except Exception:
+        return False
+
+
+def _systemctl_enable_now(unit: str) -> int:
+    """enable + start a user unit.
+
+    Our _systemctl helper takes ONE action per call, and 'enable --now' is
+    two — passing it as one string is how the tools unit ended up written
+    but never started (TypeError on the call, not on the shell).
+    """
+    rc = _systemctl("--user", "enable", unit)
+    if rc != 0:
+        return rc
+    return _systemctl("--user", "start", unit)
+
+
+def _systemctl_disable_now(unit: str) -> int:
+    """stop + disable a user unit."""
+    _systemctl("--user", "stop", unit)
+    return _systemctl("--user", "disable", unit)
+
+
+def _unit_nrestarts(unit: str, user: bool = True) -> int:
+    """How many times systemd has restarted this unit (its own crash-loop
+    counter). A big number means the unit is already in a restart storm."""
+    cmd = ["systemctl"] + (["--user"] if user else []) + \
+          ["show", unit, "-p", "NRestarts", "--value"]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=8)
+        n = (r.stdout or "").strip()
+        return int(n) if n.isdigit() else 0
+    except Exception:
+        return 0
+
+
+def _tools_unit_path() -> Path:
+    return Path.home() / ".config" / "systemd" / "user" / TOOLS_UNIT
+
+
+def _tools_owner() -> str:
+    """Who owns the tool server on this box?
+    'systemd' | 'pm2' | 'detached' | 'none'
+
+    ONE owner per port. A pm2 app AND a systemd unit over 18789 crash-loop
+    each other — the same fault the llama units have, and the reason this
+    function exists at all. The watchdog restarts through the EXISTING owner
+    rather than installing a second one next to it.
+    """
+    if _unit_enabled(TOOLS_UNIT):
+        return "systemd"
+    if _pm2_has("hivv-tools"):
+        return "pm2"
+    if _tools_unit_path().exists():
+        return "systemd"
+    if _tools_running():
+        return "detached"
+    return "none"
+
+
+def _tools_unit_text() -> str:
+    """The systemd user unit for the tool server.
+
+    Restart=on-failure is PROCESS supervision: a crash is brought back.
+    StartLimitBurst=3 / StartLimitIntervalSec=300 is systemd's OWN
+    loop-breaker — three failed starts in five minutes and the unit goes
+    'failed' instead of storming. Same bound every hivv unit carries.
+    """
+    tool_script = _runtime_file(f"{APP}-tools.py")
+    log = STATE_DIR / "tools.log"
+    return f"""[Unit]
+Description=hivv local tool server (the deterministic half of the toolkit)
+After=network.target
+# crash-loop bound: 3 starts / 5 min then failed, not an endless restart storm
+StartLimitIntervalSec=300
+StartLimitBurst=3
+
+[Service]
+Type=simple
+ExecStart={sys.executable} {tool_script} start
+Restart=on-failure
+RestartSec=10
+Environment=HIVV_TOOLS_HOST=127.0.0.1
+Environment=HIVV_HUB={HUB}
+StandardOutput=append:{log}
+StandardError=append:{log}
+
+[Install]
+WantedBy=default.target
+"""
+
+
+def _watch_unit_path() -> Path:
+    return Path.home() / ".config" / "systemd" / "user" / WATCH_UNIT
+
+
+def _watch_unit_text() -> str:
+    """The watchdog's own systemd unit.
+
+    The watchdog is supervised too — Restart=on-failure with the same
+    3-starts-per-5-minutes bound. A broken watchdog must not become a
+    restart storm of its own.
+    """
+    log = STATE_DIR / "watch.log"
+    if _is_frozen():
+        exec_start = f"{sys.executable} watch run"
+    else:
+        exec_start = f"{sys.executable} {Path(__file__).resolve()} watch run"
+    return f"""[Unit]
+Description=hivv watchdog — restart stuck local services (bounded, never a loop)
+After=network.target
+# crash-loop bound: 3 starts / 5 min then failed, not an endless restart storm
+StartLimitIntervalSec=300
+StartLimitBurst=3
+
+[Service]
+Type=simple
+ExecStart={exec_start}
+Restart=on-failure
+RestartSec=30
+StandardOutput=append:{log}
+StandardError=append:{log}
+
+[Install]
+WantedBy=default.target
+"""
+
+
 def _find_opencode() -> str | None:
     """Locate the opencode binary even when the agent's PATH is minimal —
     pm2/systemd/manual `hivv start` shells often lack ~/.opencode/bin."""
@@ -6895,6 +7353,588 @@ def _shared_tools() -> list:
         tools.append("opencode")
     return tools
 
+# =============================================================================
+# THE WATCHDOG — restart a stuck service, and NEVER loop
+# =============================================================================
+# WHY (2026-11-26): the tool server had NO supervisor at all. It was started
+# by a detached 'setsid' spawn, so when it died it stayed dead, and when it
+# went STALE it stayed stale. The gateway had scripts/health-watchdog.sh; the
+# agent and llama had systemd units with crash-loop bounds. The tool server
+# had neither — and the report that started this was a box that had been
+# quietly broken for a MONTH.
+#
+# THE LOOP QUESTION. "Restart it if it gets stuck" is one line; "but never
+# loop" is the whole design. A watchdog that restarts a service which cannot
+# start is a restart storm: it hides the real fault behind a busy loop and
+# burns the box. So every restart here passes FOUR gates:
+#
+#   1. DESIRED STATE — only services the user turned ON are supervised. A
+#      watchdog that restarts what you deliberately turned OFF is a bug.
+#   2. THRESHOLD — two consecutive failed probes, never one. A blip is not a
+#      fault; a wedged server is.
+#   3. BACKOFF — the delay GROWS with each failure (120s -> 240 -> 480 -> 900
+#      cap), so a service that cannot start is not hammered.
+#   4. BUDGET — a hard cap on restarts. Spend it and the service is
+#      QUARANTINED: the watchdog stops restarting it and says so, out loud,
+#      until a human looks ('hivv watch reset') or the service recovers on
+#      its own. Bounded beats clever: an endless retry is a slow storm.
+#
+# The state lives in a FILE, so the bound survives a watchdog restart — the
+# loop breaker cannot be reset by the very thing it exists to stop.
+
+WATCH_STATE_FILE = STATE_DIR / "watch-state.json"
+WATCH_LOG_FILE = STATE_DIR / "watch.log"
+WATCH_UNIT = "hivv-watch.service"
+
+
+def _watch_cfg() -> dict:
+    """The four dials, read at CALL time (not import time) so a test — or an
+    operator — can change them without restarting anything."""
+    def _i(name: str, default: int) -> int:
+        try:
+            return int(os.environ.get(name, "") or default)
+        except (TypeError, ValueError):
+            return default
+    return {
+        "fails": _i("HIVV_WATCH_FAILS", 2),
+        "backoff": _i("HIVV_WATCH_BACKOFF", 120),
+        "max_backoff": _i("HIVV_WATCH_MAX_BACKOFF", 900),
+        "budget": _i("HIVV_WATCH_BUDGET", 4),
+        "window": _i("HIVV_WATCH_WINDOW", 3600),
+        "interval": _i("HIVV_WATCH_INTERVAL", 30),
+    }
+
+
+def _watch_decide(svc: dict, *, desired: bool = True, healthy: bool = False,
+                  now: float = 0.0, cfg: dict | None = None) -> tuple[str, str]:
+    """What should the watchdog do about one service?  PURE — no I/O, no clock.
+
+    Returns (action, reason) where action is:
+      "ok"         — healthy, or not wanted on this box
+      "wait"       — unhealthy, but under the threshold or inside the backoff
+      "restart"    — restart it now
+      "quarantine" — the budget is spent; STOP restarting and say so
+
+    It MUTATES svc (the per-service state) — the caller saves it.
+    """
+    cfg = cfg or _watch_cfg()
+    svc.setdefault("fails", 0)
+    svc.setdefault("restarts", [])
+    svc.setdefault("last_restart", 0)
+    svc.setdefault("quarantined", 0)
+
+    # Not wanted here: nothing to supervise. The user's intent is the law.
+    if not desired:
+        svc["fails"] = 0
+        return ("ok", "not wanted on this box")
+
+    # A service that came back on its own clears everything — the failure was
+    # transient, and the counters must not punish the NEXT real failure.
+    if healthy:
+        svc["fails"] = 0
+        svc["quarantined"] = 0
+        svc["restarts"] = [t for t in svc["restarts"] if now - t < cfg["window"]]
+        return ("ok", "healthy")
+
+    # Already quarantined: the budget is spent. Say the SAME thing every
+    # tick, and do not touch the service. This is the end of the loop.
+    if svc.get("quarantined"):
+        return ("quarantine", svc.get("quarantine_reason")
+                or "restart budget spent — a human must look (hivv watch reset)")
+
+    svc["fails"] += 1
+    if svc["fails"] < cfg["fails"]:
+        return ("wait", f"probe {svc['fails']}/{cfg['fails']} failed — waiting for a second opinion")
+
+    # Prune the restart ledger to the window, then check the budget.
+    svc["restarts"] = [t for t in svc["restarts"] if now - t < cfg["window"]]
+    if len(svc["restarts"]) >= cfg["budget"]:
+        svc["quarantined"] = 1
+        svc["quarantined_at"] = now
+        svc["quarantine_reason"] = (
+            f"restart budget spent ({len(svc['restarts'])}/{cfg['budget']} in "
+            f"{cfg['window'] // 60} min) — NOT restarting again, a human must look")
+        return ("quarantine", svc["quarantine_reason"])
+
+    # The backoff GROWS with every attempt: 120 -> 240 -> 480 -> 900 (cap).
+    n = len(svc["restarts"])
+    backoff = min(cfg["max_backoff"], cfg["backoff"] * (2 ** n))
+    last = svc.get("last_restart") or 0
+    if last and now - last < backoff:
+        left = int(backoff - (now - last))
+        return ("wait", f"backoff — {left}s before the next attempt")
+
+    return ("restart", f"unhealthy for {svc['fails']} probes — attempt {n + 1}/{cfg['budget']}")
+
+
+def _watch_load_state() -> dict:
+    try:
+        data = json.loads(WATCH_STATE_FILE.read_text())
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _watch_save_state(state: dict) -> None:
+    """Atomic — a half-written state file would reset the loop breaker."""
+    try:
+        WATCH_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = WATCH_STATE_FILE.with_name(WATCH_STATE_FILE.name + ".tmp")
+        tmp.write_text(json.dumps(state, indent=2))
+        tmp.replace(WATCH_STATE_FILE)
+    except Exception:
+        pass
+
+
+def _watch_log(msg: str) -> None:
+    # ONE line per entry: a multi-line message (pm2's output is multi-line)
+    # would break the log into fragments nobody can grep.
+    msg = " ".join(str(msg).split())
+    try:
+        WATCH_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with WATCH_LOG_FILE.open("a") as f:
+            f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}\n")
+    except Exception:
+        pass
+
+
+def _llama_units() -> list[str]:
+    """The llama-family units on this box (user scope)."""
+    out: list[str] = []
+    try:
+        r = subprocess.run(["systemctl", "--user", "list-unit-files",
+                            "--no-legend", "--no-pager", "llama*.service"],
+                           capture_output=True, text=True, timeout=8)
+        for line in (r.stdout or "").splitlines():
+            parts = line.split()
+            if parts and parts[0].endswith(".service"):
+                out.append(parts[0])
+    except Exception:
+        pass
+    return out
+
+
+def _watch_probe_llama() -> tuple[bool, str]:
+    """Is a local model server answering?
+
+    A 401 counts as UP: a keyed llama is alive and working. Restarting it
+    because it refused an UNAUTHENTICATED probe would be a restart loop with
+    no fix — the key is the fix, and it is not ours to remove.
+    """
+    for port in (8080, 8081, 8082, 8090, 1234, 11434):
+        try:
+            req = urllib.request.Request(f"http://127.0.0.1:{port}/v1/models",
+                                         headers={"User-Agent": f"{APP}/{VERSION}"})
+            with urllib.request.urlopen(req, timeout=2) as r:
+                json.loads(r.read())
+            return (True, f"model server on {port}")
+        except urllib.error.HTTPError as e:
+            if e.code in (401, 403):
+                return (True, f"model server on {port} (keyed — {e.code})")
+        except Exception:
+            continue
+    return (False, "no local model server answering")
+
+
+def _watch_probe_agent() -> tuple[bool, str]:
+    """Is the agent alive AND heartbeating? The heartbeat is the truth."""
+    st = read_state() or {}
+    pid = st.get("pid")
+    if not pid:
+        return (False, "agent is not running (no pid)")
+    try:
+        alive = pid_alive(int(pid))
+    except (TypeError, ValueError):
+        alive = False
+    if not alive:
+        return (False, f"agent process {pid} is not running")
+    hb = st.get("last_heartbeat") or 0
+    try:
+        age = int(time.time() - float(hb))
+    except (TypeError, ValueError):
+        age = -1
+    if hb and age > 300:
+        return (False, f"last heartbeat {age}s ago (stale)")
+    return (True, f"pid {pid} · heartbeat {age}s ago")
+
+
+def _tools_desired() -> bool:
+    """The user's INTENT: 'hivv tools on' writes the flag, 'hivv tools off'
+    removes it. The flag survives the server dying — which is exactly when
+    the watchdog needs to know the server is supposed to be there."""
+    if TOOLS_ENABLED_FILE.exists():
+        return True
+    if _unit_enabled(TOOLS_UNIT):
+        return True
+    # a pm2 app is a standing decision too (somebody started it on purpose)
+    return _pm2_has("hivv-tools")
+
+
+def _watch_supervisor_note() -> str:
+    """Who supervises the tool server here, and is their restart policy
+    BOUNDED? An unbounded supervisor is an infinite loop wearing a hat."""
+    owner = _tools_owner()
+    if owner == "systemd":
+        return f"systemd ({TOOLS_UNIT} · StartLimit 3/300s)"
+    if owner == "pm2":
+        env = _pm2_app("hivv-tools") or {}
+        n = env.get("max_restarts")
+        return (f"pm2 (hivv-tools · {('max ' + str(n) + ' restarts') if n else 'UNBOUNDED'})")
+    if owner == "detached":
+        return "nothing (a detached spawn — it stays dead when it dies)"
+    return "nothing"
+
+
+def _llama_desired() -> bool:
+    return any(_unit_enabled(u) for u in _llama_units())
+
+
+def _agent_desired() -> bool:
+    return _unit_enabled("hivv-agent.service")
+
+
+def _watch_start_tools_detached() -> tuple[str, str]:
+    """Start the tool server WITHOUT systemd (the pre-unit behaviour)."""
+    script = _runtime_file(f"{APP}-tools.py")
+    if not script.exists():
+        try:
+            data = _http_get_bytes(f"{HUB}/{APP}-tools.py")
+            script.parent.mkdir(parents=True, exist_ok=True)
+            script.write_bytes(data)
+            script.chmod(0o755)
+        except Exception as e:
+            return ("failed", f"could not fetch the tool server: {e}")
+    try:
+        if IS_WINDOWS:
+            subprocess.Popen([sys.executable, str(script), "start"],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             env=dict(os.environ, HIVV_HUB=HUB,
+                                      HIVV_VISITOR_ID=_get_visitor_id()),
+                             creationflags=0x00000008 | 0x00000200)
+        else:
+            subprocess.Popen(["setsid", sys.executable, str(script), "start"],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             env=dict(os.environ, HIVV_HUB=HUB,
+                                      HIVV_VISITOR_ID=_get_visitor_id()),
+                             start_new_session=True)
+    except Exception as e:
+        return ("failed", f"spawn failed: {e}")
+    time.sleep(1.5)
+    ok, detail = _watch_probe_tools()
+    return ("restarted" if ok else "failed",
+            f"spawned {script.name}" + ("" if ok else f" — but {detail}"))
+
+
+def _watch_restart_tools() -> tuple[str, str]:
+    """(status, message) — status is restarted | failed | skipped.
+
+    'skipped' means NO ATTEMPT WAS MADE, so it does not spend the budget.
+    """
+    if _tools_unit_path().exists():
+        if not _systemd_user_available():
+            # The unit OWNS the port. A manual spawn would fight it for
+            # 18789 and neither would win. Say so instead of interfering.
+            return ("skipped", "systemd user manager unreachable — the unit owns the port")
+        r = subprocess.run(["systemctl", "--user", "restart", TOOLS_UNIT],
+                           capture_output=True, text=True, timeout=30)
+        if r.returncode == 0:
+            return ("restarted", f"systemctl --user restart {TOOLS_UNIT}")
+        err = ((r.stderr or "") + " " + (r.stdout or "")).strip().splitlines()
+        return ("failed", "systemd refused: " + (err[-1] if err else f"exit {r.returncode}"))
+    if _pm2_has("hivv-tools"):
+        # pm2 owns it (the hub box runs it as a pm2 app). Restart it the way
+        # its owner restarts it — do not install a second owner beside it.
+        ok, msg = _pm2_restart("hivv-tools")
+        return ("restarted" if ok else "failed", msg)
+    return _watch_start_tools_detached()
+
+
+def _watch_restart_llama() -> tuple[str, str]:
+    for unit in _llama_units():
+        if not _unit_enabled(unit):
+            continue
+        # A SYSTEM-scope llama owns the same ports as the user-scope one.
+        # Two units, one port: they crash-loop each other forever, and
+        # restarting either one just feeds the loop. That is a config fault.
+        if _unit_enabled(unit, user=False):
+            return ("skipped", f"a system-scope {unit} is enabled too — one port, two owners; fix that first")
+        n = _unit_nrestarts(unit)
+        if n > 10:
+            return ("skipped", f"{unit} is already crash-looping ({n} restarts) — fix it, do not restart it again")
+        r = subprocess.run(["systemctl", "--user", "restart", unit],
+                           capture_output=True, text=True, timeout=30)
+        if r.returncode == 0:
+            return ("restarted", f"systemctl --user restart {unit}")
+        return ("failed", f"{unit} restart failed (exit {r.returncode})")
+    return ("skipped", "no enabled llama unit to restart")
+
+
+def _watch_quarantine_tools() -> str:
+    """Quarantine means STOP.
+
+    systemd bounds ITSELF (StartLimitBurst=3/300s: three failed starts in
+    five minutes and the unit goes 'failed'). pm2 does NOT: its counter is
+    anchored at the app's CREATION, so an app that starts crashing days
+    later restarts forever. That is the loop we are here to kill, so the
+    watchdog stops the app — pm2 does not restart a stopped one.
+
+    Returns a note for the log ("" when there was nothing to stop).
+    """
+    if _pm2_has("hivv-tools"):
+        pm2 = _pm2_bin()
+        if pm2:
+            try:
+                r = subprocess.run([pm2, "stop", "hivv-tools"],
+                                   capture_output=True, text=True, timeout=60)
+                if r.returncode == 0:
+                    return "stopped the pm2 app (pm2 does not restart a stopped one)"
+            except Exception:
+                pass
+    return ""
+
+
+def _watch_services() -> list[dict]:
+    """The services the watchdog knows about.
+
+    The agent is REPORT-ONLY: its systemd unit already carries
+    Restart=always, and an agent that restarts itself mid-tick is a suicide
+    with extra steps. systemd owns the agent; the watchdog only watches.
+    """
+    return [
+        {"name": "tools", "desired": _tools_desired,
+         "probe": _tools_probe, "restart": _watch_restart_tools,
+         "quarantine": _watch_quarantine_tools},
+        {"name": "llama", "desired": _llama_desired,
+         "probe": _watch_probe_llama, "restart": _watch_restart_llama,
+         "quarantine": None},
+        {"name": "agent", "desired": _agent_desired,
+         "probe": _watch_probe_agent, "restart": None,
+         "quarantine": None},
+    ]
+
+
+def _watch_tick(now: float | None = None, do_restart: bool = True,
+               commit: bool = True) -> dict:
+    """ONE supervision pass. It never loops inside itself.
+
+    commit=False makes the pass PURELY OBSERVATIONAL — 'hivv watch status'
+    asks "is it working?" and must not answer by counting as a failed probe.
+    A status command that mutates the failure counter could trigger a
+    restart just because somebody looked.
+    """
+    now = float(now if now is not None else time.time())
+    cfg = _watch_cfg()
+    state = _watch_load_state()
+    if not commit:
+        state = json.loads(json.dumps(state))   # work on a copy
+    out: dict = {"services": [], "restarted": [], "quarantined": [], "checked_at": now}
+    for svc in _watch_services():
+        name = svc["name"]
+        s = state.setdefault(name, {})
+        try:
+            desired = bool(svc["desired"]())
+        except Exception:
+            desired = False
+        healthy, detail = (False, "not wanted on this box")
+        if desired:
+            try:
+                healthy, detail = svc["probe"]()
+            except Exception as e:
+                healthy, detail = (False, f"probe error: {e}")
+        action, reason = _watch_decide(s, desired=desired, healthy=healthy,
+                                       now=now, cfg=cfg)
+        rec = {"name": name, "desired": desired, "healthy": healthy,
+               "detail": detail, "action": action, "reason": reason,
+               "restarts": len(s.get("restarts") or []),
+               "quarantined": bool(s.get("quarantined"))}
+        if action == "restart":
+            if not do_restart:
+                rec["restart"] = "dry-run"
+            elif not svc.get("restart"):
+                rec["restart"] = "report-only — systemd owns this one"
+            else:
+                status, msg = svc["restart"]()
+                rec["restart"] = f"{status}: {msg}"
+                if status in ("restarted", "failed"):
+                    # An ATTEMPT is spent either way — that is the honest
+                    # accounting, and it is what stops the loop.
+                    s.setdefault("restarts", []).append(now)
+                    s["last_restart"] = now
+                    s["last_error"] = reason
+                    out["restarted"].append(name)
+                    _watch_log(f"{name}: {status.upper()} — {msg} ({reason})")
+                else:
+                    _watch_log(f"{name}: skipped — {msg}")
+        elif action == "quarantine":
+            out["quarantined"].append(name)
+            note = ""
+            if svc.get("quarantine"):
+                try:
+                    note = svc["quarantine"]() or ""
+                except Exception as e:
+                    note = f"(stop failed: {e})"
+            _watch_log(f"{name}: QUARANTINED — {reason}"
+                       + (f" — {note}" if note else ""))
+        if desired and not healthy:
+            s["last_error"] = detail or reason
+        elif healthy:
+            s["last_error"] = None
+            s["last_ok"] = now
+        out["services"].append(rec)
+    if commit:
+        _watch_save_state(state)
+    return out
+
+
+def _watch_resume(service: str) -> str:
+    """After a human reset, bring a quarantined service back.
+
+    The quarantine may have STOPPED it (pm2 does not restart a stopped
+    app). A reset means "I have looked at it" — so it should come back.
+    """
+    if service == "tools":
+        if _pm2_has("hivv-tools"):
+            pm2 = _pm2_bin()
+            if pm2:
+                try:
+                    r = subprocess.run([pm2, "start", "hivv-tools"],
+                                       capture_output=True, text=True, timeout=90)
+                    if r.returncode == 0:
+                        return "pm2 start hivv-tools"
+                except Exception:
+                    pass
+        elif _tools_unit_path().exists():
+            _systemctl("--user", "start", TOOLS_UNIT)
+            return f"systemctl --user start {TOOLS_UNIT}"
+    return ""
+
+
+def cmd_watch(args) -> None:
+    """The watchdog — restart stuck local services, without a restart loop.
+
+        hivv watch on      install + enable the watchdog (systemd)
+        hivv watch off     disable it
+        hivv watch status  what is watched, what is healthy, what was restarted
+        hivv watch run     the loop (foreground) — --once for a single pass
+        hivv watch reset   clear a quarantine (or one service's counters)
+    """
+    action = (getattr(args, "action", None) or "status").lower()
+    cfg = _watch_cfg()
+
+    if action == "on":
+        if not _systemd_user_available():
+            die("no systemd user manager here — the agent's own heartbeat "
+                "already supervises the local services; nothing to install")
+        unit_path = _watch_unit_path()
+        try:
+            unit_path.parent.mkdir(parents=True, exist_ok=True)
+            unit_path.write_text(_watch_unit_text())
+        except OSError as e:
+            die(f"could not write {unit_path}: {e}")
+        _systemctl("--user", "daemon-reload")
+        rc = _systemctl_enable_now(WATCH_UNIT)
+        if rc != 0:
+            die(f"could not enable {WATCH_UNIT} — check: systemctl --user status {WATCH_UNIT}")
+        ok(f"watchdog enabled — {WATCH_UNIT}")
+        print(f"  watching: tools · llama · agent (report-only)")
+        print(f"  loop-breaker: {cfg['fails']} failed probes → restart · "
+              f"backoff {cfg['backoff']}s→{cfg['max_backoff']}s · "
+              f"budget {cfg['budget']} restarts/{cfg['window'] // 60}min")
+        print(f"  status: hivv watch status")
+        return
+
+    if action == "off":
+        if _watch_unit_path().exists():
+            _systemctl_disable_now(WATCH_UNIT)
+            ok(f"watchdog disabled — {WATCH_UNIT}")
+        else:
+            print(f"[{APP}] watchdog was not installed")
+        return
+
+    if action == "reset":
+        service = (getattr(args, "service", None) or "").strip().lower()
+        state = _watch_load_state()
+        if not service:
+            state = {}
+            _watch_save_state(state)
+            ok("watchdog counters + quarantines cleared")
+            return
+        if service not in state:
+            die(f"no watchdog state for '{service}' — known: {', '.join(sorted(state)) or '(none)'}")
+        state[service] = {}
+        _watch_save_state(state)
+        ok(f"watchdog counters cleared for '{service}'")
+        note = _watch_resume(service)
+        if note:
+            print(f"[{APP}] resumed: {note}")
+        return
+
+    if action == "run":
+        once = bool(getattr(args, "once", False))
+        if once:
+            res = _watch_tick()
+            for s in res["services"]:
+                print(f"  {s['name']:<6} {'on ' if s['desired'] else 'off':<4} "
+                      f"{'✓' if s['healthy'] else '✗'} {s['detail']}")
+                if s.get("restart"):
+                    print(f"         → {s['restart']}")
+            if res["quarantined"]:
+                print(f"  quarantined: {', '.join(res['quarantined'])}")
+            return
+        print(f"[{APP}] watchdog running — every {cfg['interval']}s "
+              f"(budget {cfg['budget']}/{cfg['window'] // 60}min). Ctrl-C to stop.")
+        while True:
+            try:
+                res = _watch_tick()
+                if res["restarted"]:
+                    print(f"[{time.strftime('%H:%M:%S')}] restarted: {', '.join(res['restarted'])}")
+            except Exception as e:
+                print(f"[{time.strftime('%H:%M:%S')}] tick error: {e}")
+            try:
+                time.sleep(cfg["interval"])
+            except KeyboardInterrupt:
+                print(f"[{APP}] watchdog stopped")
+                return
+
+    # status
+    res = _watch_tick(do_restart=False, commit=False)
+    state = _watch_load_state()
+    print(f"\n\033[1m{APP} watchdog\033[0m — local services")
+    print(f"  {'SERVICE':<8} {'WANTED':<8} {'HEALTH':<8} {'RESTARTS':<9} {'STATE'}")
+    for s in res["services"]:
+        st = state.get(s["name"]) or {}
+        n = len(st.get("restarts") or [])
+        if not s["desired"]:
+            state_label = "\033[2mnot wanted\033[0m"
+        elif s["quarantined"] or st.get("quarantined"):
+            state_label = "\033[31mQUARANTINED\033[0m"
+        elif s["healthy"]:
+            state_label = "\033[32mok\033[0m"
+        else:
+            state_label = "\033[33m" + s["action"] + "\033[0m"
+        mark = "\033[32m✓\033[0m" if s["healthy"] else "\033[31m✗\033[0m"
+        want = "\033[32mon\033[0m" if s["desired"] else "\033[2moff\033[0m"
+        print(f"  {s['name']:<8} {want:<8} {mark:<8} {n:<9} {state_label}   "
+              f"\033[2m{s['detail']}\033[0m")
+    print(f"\n  \033[2mloop-breaker: {cfg['fails']} failed probes before a restart · "
+          f"backoff {cfg['backoff']}s\u2192{cfg['max_backoff']}s · "
+          f"budget {cfg['budget']} restarts per {cfg['window'] // 60}min, then QUARANTINE\033[0m")
+    q = [s["name"] for s in res["services"]
+         if (state.get(s["name"]) or {}).get("quarantined")]
+    if q:
+        print(f"  \033[31mquarantined: {', '.join(q)}\033[0m — a human must look "
+              f"(hivv watch reset)")
+    last = state.get("tools") or {}
+    if last.get("last_restart"):
+        print(f"  \033[2mlast tools restart: "
+              f"{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(last['last_restart']))}"
+              f"\033[0m")
+    if _watch_unit_path().exists():
+        print(f"  watchdog unit: \033[32m{'enabled' if _unit_enabled(WATCH_UNIT) else 'installed (not enabled)'}\033[0m")
+    print(f"  tools supervisor: \033[2m{_watch_supervisor_note()}\033[0m")
+    print()
+
+
 def cmd_tools(args) -> None:
     """Manage the local tool server and see the whole hive catalog.
 
@@ -6922,33 +7962,30 @@ def cmd_tools(args) -> None:
     # A runtime DOWNLOAD must never land in a root-owned install dir
     # (/usr/local/lib/hivv) — that broke `hivv chat` for every non-root user
     # on a system-wide install (asher@wahi 2026-11-21).
+    #
+    # The download happens in the 'on' branch ONLY. A STATUS command must
+    # never die because a helper is missing or the hub is unreachable —
+    # asking "is it working?" has to answer even when the answer is "no".
     tool_script = _runtime_file(f"{APP}-tools.py")
-    if not tool_script.exists():
-        print(f"[{APP}] tools server not installed — downloading...")
-        try:
-            data = _http_get_bytes(f"{HUB}/{APP}-tools.py")
-            tool_script.parent.mkdir(parents=True, exist_ok=True)
-            tool_script.write_bytes(data)
-            tool_script.chmod(0o755)
-        except Exception as e:
-            die(f"download failed: {e}\n"
-                f"    (cannot write to {tool_script.parent})")
 
     if args.action == "status":
         if _tools_running():
             pid_file = TOOLS_PID_FILE
             pid = int(pid_file.read_text().strip()) if pid_file.exists() else "?"
             print(f"[{APP}] tools server running on port {TOOLS_PORT} (PID {pid})")
-            try:
-                with socket.create_connection(("127.0.0.1", TOOLS_PORT), timeout=2) as s:
-                    import urllib.request
-                    with urllib.request.urlopen(f"http://127.0.0.1:{TOOLS_PORT}/tools", timeout=3) as r:
-                        data = json.loads(r.read())
-                        print(f"[{APP}] available tools: {', '.join(data.get('tools', []))}")
-            except Exception as e:
-                print(f"[{APP}] health check: {e}")
+            healthy, detail = _tools_probe()
+            if healthy:
+                print(f"[{APP}] health: \033[32m✓\033[0m {detail}")
+            else:
+                # ALIVE IS NOT ENOUGH. A server can answer GET /tools with an
+                # OLD catalog and 501 every POST — that is exactly what a
+                # month-old pre-refactor hivv-tools.py looks like from here.
+                print(f"[{APP}] health: \033[31m✗\033[0m {detail}")
+                print(f"[{APP}]   → fix: hivv tools off && hivv tools on")
         else:
             print(f"[{APP}] tools server not running")
+            if TOOLS_ENABLED_FILE.exists():
+                print(f"[{APP}]   (wanted ON — the watchdog will bring it back)")
         return
 
     if args.action == "list":
@@ -7010,45 +8047,121 @@ def cmd_tools(args) -> None:
         sys.exit(1 if fails else 0)
 
     if args.action == "on":
+        # ALIVE IS NOT ENOUGH — the stale-server trap (ashy 2026-11-26).
+        # This box ran the PRE-refactor hivv-tools.py for a MONTH: alive,
+        # but serving 5 tools with no do_POST, so every POST answered 501.
+        # The old code short-circuited on "the pid is alive" and never
+        # replaced it, so the box stayed broken and nothing said so.
         if _tools_running():
-            print(f"[{APP}] tools server already running")
-        else:
-            print(f"[{APP}] starting tools server on port {TOOLS_PORT}...")
-            tool_cmd = [sys.executable, str(tool_script), "start"]
-            # The tool server proxies the heavy tools (code, memory, translate)
-            # to the hub, so it has to know WHICH hub.
-            tool_env = dict(os.environ, HIVV_HUB=HUB, HIVV_VISITOR_ID=_get_visitor_id())
-            if IS_WINDOWS:
-                subprocess.Popen(
-                    tool_cmd,
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                    env=tool_env,
-                    creationflags=0x00000008 | 0x00000200,  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
-                )
+            cat = _tools_catalog()
+            if _tools_healthy(cat):
+                # Is it SUPERVISED, and by WHOM? A detached spawn has no
+                # owner — when it dies it stays dead. But a pm2 app IS an
+                # owner: leave it alone and restart through it. Installing a
+                # systemd unit next to a live pm2 app would put two owners
+                # on one port — they crash-loop each other.
+                owner = _tools_owner()
+                if owner == "detached" and _systemd_user_available():
+                    print(f"[{APP}] tools server is running but UNSUPERVISED — adopting it under systemd")
+                    _tools_stop()
+                else:
+                    print(f"[{APP}] tools server already running"
+                          + (f" (owner: {owner})" if owner != "none" else ""))
+                    if owner == "pm2":
+                        if _tools_drop_conflicting_unit():
+                            print(f"[{APP}] removed the leftover {TOOLS_UNIT} (pm2 owns the port)")
+                        bounded, bmsg = _pm2_bound_restarts("hivv-tools")
+                        if bounded:
+                            print(f"[{APP}] pm2 restart policy: {bmsg}")
+                        else:
+                            print(f"[{APP}] \033[33mWARNING\033[0m could not bound "
+                                  f"the pm2 restart policy — {bmsg}")
+                    _tools_mark_enabled()
+                    return
             else:
-                subprocess.Popen(
-                    ["setsid"] + tool_cmd,
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                    env=tool_env,
-                    start_new_session=True
-                )
+                print(f"[{APP}] tools server is running but STALE — replacing it")
+                print(f"[{APP}]   {len(cat.get('tools') or [])} tools advertised; the current toolkit serves {_MIN_TOOLKIT_TOOLS}+")
+                _tools_stop()
+
+        # Start it. WHO owns it decides HOW it is started — one owner per
+        # port. pm2 owns it on the hub box; systemd takes it everywhere else.
+        # systemd brings a crash back (Restart=on-failure) and its
+        # StartLimitBurst=3 is the loop-breaker: three failed starts in five
+        # minutes and the unit goes 'failed' instead of storming.
+        if not tool_script.exists():
+            print(f"[{APP}] tools server not installed — downloading...")
+            try:
+                data = _http_get_bytes(f"{HUB}/{APP}-tools.py")
+                tool_script.parent.mkdir(parents=True, exist_ok=True)
+                tool_script.write_bytes(data)
+                tool_script.chmod(0o755)
+            except Exception as e:
+                die(f"download failed: {e}\n"
+                    f"    (cannot write to {tool_script.parent})")
+
+        owner = _tools_owner()
+        if owner == "pm2":
+            # A leftover DISABLED unit file would be a second owner waiting
+            # to be enabled: one port, two owners, crash-loop. Remove it.
+            if _tools_drop_conflicting_unit():
+                print(f"[{APP}] removed the leftover {TOOLS_UNIT} (pm2 owns the port)")
+            # pm2's default restart policy is UNBOUNDED (autorestart with no
+            # max_restarts): a server that cannot start is restarted forever,
+            # with no backoff. Bound it BEFORE trusting it to supervise
+            # anything — that unbounded loop is the thing we are here to kill.
+            bounded, bmsg = _pm2_bound_restarts("hivv-tools")
+            if bounded:
+                print(f"[{APP}] pm2 restart policy: {bmsg}")
+            else:
+                print(f"[{APP}] \033[33mWARNING\033[0m could not bound the pm2 "
+                      f"restart policy — {bmsg}")
+            print(f"[{APP}] tools server is owned by pm2 — restarting it there")
+            done, msg = _pm2_restart("hivv-tools")
+            if not done:
+                die(f"pm2 could not restart the tools server — {msg}")
             time.sleep(2)
-            if _tools_running():
-                ok(f"tools server live on http://127.0.0.1:{TOOLS_PORT}")
-                print(f"[{APP}] others on the hive can now use your tools!")
-            else:
-                die("failed to start tools server — check: python3 hivv-tools.py test")
+            healthy, detail = _tools_probe()
+            if not healthy:
+                die(f"pm2 restarted the tools server but it is not serving: {detail}")
+            _tools_mark_enabled()
+            ok(f"tools server live on http://127.0.0.1:{TOOLS_PORT} (owner: pm2)")
+            print(f"[{APP}] others on the hive can now use your tools!")
+            return
+
+        if owner in ("none", "detached") and _systemd_user_available():
+            unit_path = _tools_unit_path()
+            try:
+                unit_path.parent.mkdir(parents=True, exist_ok=True)
+                unit_path.write_text(_tools_unit_text())
+            except OSError as e:
+                die(f"could not write {unit_path}: {e}")
+            _systemctl("--user", "daemon-reload")
+            rc = _systemctl_enable_now(TOOLS_UNIT)
+            if rc != 0:
+                die(f"could not start {TOOLS_UNIT} — check: systemctl --user status {TOOLS_UNIT}")
+            time.sleep(1.5)
+            healthy, detail = _tools_probe()
+            if not healthy:
+                die(f"{TOOLS_UNIT} started but is not serving: {detail}")
+            _tools_mark_enabled()
+            ok(f"tools server live on http://127.0.0.1:{TOOLS_PORT} (systemd: {TOOLS_UNIT})")
+            print(f"[{APP}] others on the hive can now use your tools!")
+            return
+
+        # No systemd, no pm2 — the detached spawn (macOS, Windows, containers).
+        print(f"[{APP}] starting tools server on port {TOOLS_PORT}...")
+        status, msg = _watch_start_tools_detached()
+        if status == "restarted":
+            _tools_mark_enabled()
+            ok(f"tools server live on http://127.0.0.1:{TOOLS_PORT}")
+            print(f"[{APP}] others on the hive can now use your tools!")
+        else:
+            die(f"failed to start tools server — {msg}")
         return
 
     if args.action == "off":
-        pid_file = TOOLS_PID_FILE
-        if pid_file.exists():
-            try:
-                pid = int(pid_file.read_text().strip())
-                _kill_pid(pid)
-            except (ValueError, OSError): pass
-            try: pid_file.unlink()
-            except OSError: pass
+        _tools_stop()
+        _tools_mark_disabled()
         ok("tools server stopped")
         return
 
@@ -21687,6 +22800,15 @@ def build_parser() -> argparse.ArgumentParser:
                     choices=["on", "off", "status", "share", "list", "test"],
                     help="on/off/status/share/list/test (default: list)")
 
+    sp = sub.add_parser("watch",   help="watchdog — restart stuck local services (bounded, never a loop)")
+    sp.add_argument("action", nargs="?", default="status",
+                    choices=["on", "off", "status", "run", "reset"],
+                    help="on/off/status/run/reset (default: status)")
+    sp.add_argument("service", nargs="?", default=None,
+                    help="service name for reset (tools | llama | agent)")
+    sp.add_argument("--once", action="store_true",
+                    help="run ONE supervision pass and exit (for cron)")
+
     sp = sub.add_parser("call",    help="invoke a tool through the hive (no local LLM needed)")
     sp.add_argument("tool",
                     help="tool to invoke: web_search, current_time, calculator, web_fetch, "
@@ -22220,6 +23342,7 @@ COMMANDS = _resolve_cmds({
     "pct":             "cmd_pct",
     "ping":            "cmd_ping",
     "tools":           "cmd_tools",
+    "watch":           "cmd_watch",
     "call":            "cmd_call",
     "info":            "cmd_info",
     "update":          "cmd_update",
@@ -22891,6 +24014,7 @@ def _print_sub_help(cmd: str) -> None:
         "uninstall": "stop + remove install (keeps ~/.config/hivv/ + logs)",
         "remove":    "delete one part of hivv — llm | models | agent | config | logs | state | everything\n  usage: hivv remove [part] [--yes]   bare lists the parts with sizes\n  every delete shows what dies and asks first (non-TTY needs --yes)",
         "salah":     "prayer times for this region + attendance streak + moon (alias: sala)\n  usage: hivv salah [--node BEE] [--lat X --lon Y] [--json]\n  times shown in THIS machine's local clock · attendance = your heartbeats inside the window",
+        "watch":     "the watchdog — restart a stuck local service, never in a loop\n  usage: hivv watch [status|on|off|run|reset]\n  watches: tools · llama · agent(report-only)\n  restarts only what you turned ON; 2 failed probes then a restart,\n  growing backoff, and a hard budget → QUARANTINE (a human looks)",
         "health":    "GET /api/health",
         "metrics":   "GET /api/control/metrics/global\n  flag: --local   print this bee's local CPU/GPU/MEM/DISK snapshot",
         "nodes":     "table view of all registered nodes (fits your terminal) + hive TOTALS\n  flag: --json   output raw JSON",
@@ -22939,6 +24063,7 @@ def _print_sub_help(cmd: str) -> None:
         "llm setup": "ONE-SHOT local LLM: build llama.cpp → download GGUF → serve in background\n  usage: hivv llm setup [--model KEY] [--port N] [--ctx N] [--yes] [--fg]\n  alias: hivv install llm   · default model: gemma4:e2b",
         "test":      "end-to-end smoke test: doctor, speed, LLM, contract, network, tools\n  usage: hivv test [all|everything|tools]\n  tools = just the toolkit (catalog · local server · real tool calls · policy · a MODEL using one)",
         "tools":     "the toolkit: local tool server + the whole hive catalog\n  usage: hivv tools [list|status|on|off|share|test]\n  test = the diagnostic: checks the catalog, the local server, real tool\n         calls both ways, policy posture, SSRF — then asks a MODEL",
+        "watch":     "the watchdog — restart a stuck local service, never in a loop\n  usage: hivv watch [status|on|off|run|reset]\n  watches: tools · llama · agent(report-only) · restarts only what you turned ON\n  loop-breaker: 2 failed probes → restart, growing backoff, then a hard\n         restart budget → QUARANTINE (a human must look, not a loop)",
         "volunteer": "relay jobs (cross-NAT compute) — ON by default since 2026-11-18\n  usage: hivv volunteer [on|off|status]   ·  opt out: hivv volunteer off",
         "setup":     "configure OpenCode + VS Code + local LLM with hivv\n  flags: --write [PATH]  write/merge ./opencode.jsonc (default)\n         --global        with --write: use ~/.config/opencode/opencode.jsonc\n         --json          detection dict + config as JSON\n         --profile P    local | hybrid | hive | cloud (default hybrid)\n         --backend M    pin one specific local model\n         --tools IDS    only these tool ids, comma-separated\n         --gui          also write the GUI tool configs\n         --dry-run      show what would be written, write nothing",
         "capabilities": "what can this HIVV instance do? (capability discovery)\n  shows the OpenAI surface, route modes, deterministic tools, hive tools, MCP\n  flag: --json   machine-readable",
