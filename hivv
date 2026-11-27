@@ -26,6 +26,12 @@ case "$SELF_DIR" in
 esac
 
 CLIENT_URL="${HIVV_CLIENT_URL:-https://hivv.org/hivv-cli.py}"
+# THE FALLBACK SOURCE. The wrapper is one of the things that dies when
+# hivv.org does, so it needs a second place to get the client from. This is
+# ONE extra request, and only when the hub is unreachable, and only ever
+# because a HUMAN ran the wrapper. The automatic update path never touches
+# GitHub — that is the flood law (see the CLI: hivv fallback).
+FALLBACK_URL="${HIVV_FALLBACK_URL:-https://raw.githubusercontent.com/htmlfarmer/hivv/main/public_html/hivv-cli.py}"
 CLIENT_FILE="${HIVV_CLIENT_FILE:-$PARENT_LIB/hivv-cli.py}"
 
 need_python() {
@@ -42,6 +48,17 @@ need_curl_or_wget() {
     fi
 }
 
+
+# fetch one URL into a file. Returns non-zero on failure — the caller
+# decides whether to try the next source.
+_fetch_to() {
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL --connect-timeout 15 --max-time 90 "$1" -o "$2"
+    else
+        wget -q --timeout=90 -O "$2" "$1"
+    fi
+}
+
 download_client() {
     need_curl_or_wget
     mkdir -p "$(dirname "$CLIENT_FILE")" 2>/dev/null || {
@@ -52,11 +69,19 @@ download_client() {
     echo "[hivv] fetching fresh client from $CLIENT_URL" >&2
     local tmp
     tmp=$(mktemp "${TMPDIR:-/tmp}/hivv-dl.XXXXXX")
-    if command -v curl >/dev/null 2>&1; then
-        curl -fsSL "$CLIENT_URL" -o "$tmp" || { rm -f "$tmp"; echo "[hivv] download failed" >&2; exit 1; }
-    else
-        wget -qO "$tmp" "$CLIENT_URL" || { rm -f "$tmp"; echo "[hivv] download failed" >&2; exit 1; }
+    # The hub first; the GitHub copy only if the hub is unreachable. One
+    # extra request, by a human, on purpose — never a loop.
+    local src="$CLIENT_URL"
+    if ! _fetch_to "$src" "$tmp"; then
+        if [[ -n "$FALLBACK_URL" && "$FALLBACK_URL" != "$src" ]]; then
+            echo "[hivv] hub unreachable — falling back to the GitHub copy" >&2
+            src="$FALLBACK_URL"
+            _fetch_to "$src" "$tmp" || { rm -f "$tmp"; echo "[hivv] download failed (hub AND the GitHub fallback)" >&2; exit 1; }
+        else
+            rm -f "$tmp"; echo "[hivv] download failed" >&2; exit 1
+        fi
     fi
+    echo "[hivv] fetched the client from $src" >&2
     if head -1 "$tmp" 2>/dev/null | grep -qiE "<!DOCTYPE|<html"; then
         rm -f "$tmp"
         echo "[hivv] server returned an HTML page, not the CLI — try again later" >&2

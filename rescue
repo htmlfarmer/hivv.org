@@ -39,6 +39,12 @@ APP=hivv
 # HIVV_HUB override = testable offline (file://) and self-hostable —
 # same env var the CLI itself honors.
 HUB="${HIVV_HUB:-https://hivv.org}"
+# THE ESCAPE HATCH. The rescue script pulls the installer FROM the hub —
+# so if the hub is down, the rescue is dead too. The GitHub repo has the
+# same installer. ONE extra request, only when the hub does not answer,
+# only because a human ran the rescue. The automatic update path never
+# touches GitHub — that is the flood law.
+FALLBACK_RAW="${HIVV_FALLBACK_RAW:-https://raw.githubusercontent.com/htmlfarmer/hivv/main/public_html}"
 IS_ROOT=0
 [ "$(id -u)" = "0" ] && IS_ROOT=1
 
@@ -108,10 +114,25 @@ if [ "$NEED_REPAIR" -eq 1 ]; then
     # ~/.local. --mode=user is forced because it ALWAYS sets up the
     # per-user agent service (the auto-switch path skips it — a node with
     # no service is not fixed, it is parked).
+    #
+    # THE ESCAPE HATCH: if hivv.org is DOWN, the installer it wants is the
+    # one on GitHub. ONE extra request, only when the hub does not answer,
+    # only because a human ran the rescue. The automatic update path never
+    # touches GitHub — that is the flood law.
+    fetch_installer() {
+        if curl -fsSL --connect-timeout 10 --max-time 60 "$1" 2>/dev/null | bash -s -- "$2"; then
+            return 0
+        fi
+        return 1
+    }
     if [ "$SUDO_OK" -eq 1 ] && [ "$IS_ROOT" -eq 1 ]; then
-        curl -fsSL "$HUB/install-$APP.sh" | bash -s -- --mode=system +            || die "installer (system) failed — copy this output for support"
+        fetch_installer "$HUB/install-$APP.sh" "--mode=system" \
+            || fetch_installer "$FALLBACK_RAW/install-$APP.sh" "--mode=system" \
+            || die "installer (system) failed from BOTH hivv.org and the GitHub fallback — copy this output for support"
     else
-        curl -fsSL "$HUB/install-$APP.sh" | bash -s -- --mode=user +            || die "installer (user) failed — copy this output for support"
+        fetch_installer "$HUB/install-$APP.sh" "--mode=user" \
+            || fetch_installer "$FALLBACK_RAW/install-$APP.sh" "--mode=user" \
+            || die "installer (user) failed from BOTH hivv.org and the GitHub fallback — copy this output for support"
     fi
     ok "installer finished"
 else
