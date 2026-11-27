@@ -5569,6 +5569,11 @@ def _run_relay_job(payload: dict, log_path) -> None:
             st2 = read_state() or {}
             st2["tasks_completed"] = (st2.get("tasks_completed") or 0) + 1
             st2["tokens_processed"] = (st2.get("tokens_processed") or 0) + max(1, len(content or "") // 4)
+            # local_requests -> the heartbeat's stats.total_requests. WITHOUT
+            # this line the bee reported ZERO requests forever: the heartbeat
+            # computed the delta from this key, but nothing ever wrote it, so
+            # `hivv stats` showed REQS 0 for every bee in the hive.
+            st2["local_requests"] = (st2.get("local_requests") or 0) + 1
             write_state(st2)
         except Exception:
             pass
@@ -5801,6 +5806,9 @@ def _run_coding_job(payload: dict, log_path) -> None:
                 st2["tasks_completed"] = (st2.get("tasks_completed") or 0) + 1
                 st2["tokens_processed"] = ((st2.get("tokens_processed") or 0)
                                            + max(1, len(patch or "") // 4))
+                # a coding job is a served request too (it keeps the REQS
+                # counter honest for a bee that only does coding work)
+                st2["local_requests"] = (st2.get("local_requests") or 0) + 1
                 write_state(st2)
             except OSError:
                 pass
@@ -9774,7 +9782,12 @@ def _hive_totals(nodes: list[dict], pings: dict) -> dict:
     for n in nodes:
         tot["bees"] += 1
         tot["models"] += len(n.get("local_models") or [])
-        tot["tokens_total"] += (n.get("stats") or {}).get("total_tokens_processed") or 0
+        # routed_tokens = every token the hub received from that bee (the
+        # truth for ALL traffic); total_tokens_processed = the bee's own
+        # relay-only tally. Prefer the hub's number, fall back to the bee's.
+        _nstats = n.get("stats") or {}
+        tot["tokens_total"] += (_nstats.get("routed_tokens")
+                                 or _nstats.get("total_tokens_processed") or 0)
         st = n.get("status")
         # Match the hub's own definition of "online" (status !== 'offline').
         # A quarantined bee is still REGISTERED and still heartbeating, so
@@ -11164,6 +11177,12 @@ def cmd_stats(args) -> None:
         t_tok_str = str(t_tokens)
     print(f"  {'TOTAL':<15} {'':8} {'':7} {t_tasks:<8} {t_tok_str:<10} {t_reqs:<7}")
     print()
+    # LEGEND. The three middle columns used to be silently wrong (REQS was a
+    # structural zero, TOKENS counted relay work only), so say exactly what
+    # each one measures — a number without a meaning is a rumour.
+    print(f"  \033[2mREQS = requests the hive routed to that bee (direct + relay)\n"
+          f"  TOKENS = tokens it generated · TASKS = jobs its own agent ran\n"
+          f"  --json carries the transport split and the bee's own tally\033[0m\n")
 
 def cmd_incidents(args) -> None:
     """List, summarize, or resolve network incidents."""
@@ -15229,7 +15248,7 @@ def cmd_verify(args) -> None:
     The test suite ships with the repo (tests/, 500+ checks, also run by
     CI on every push). It answers the question a fork must answer before
     it ships: "I modified the code — did I break anything?" Without it,
-    every customisation is a leap of faith; with it, a change either
+    every customisation is a leap of trust; with it, a change either
     passes the same gate the original passes, or it does not, and the
     failing test says exactly what broke.
 
