@@ -21539,6 +21539,56 @@ def _dial_pid(port: int | None = None) -> int | None:
         return None
 
 
+def _pin_from_argv(argv: list) -> str:
+    """The --pin in an argv list ("" = none). Pure: no process, no I/O."""
+    for i, x in enumerate(argv or []):
+        if x == "--pin" and i + 1 < len(argv):
+            return str(argv[i + 1])
+        if str(x).startswith("--pin="):
+            return str(x).split("=", 1)[1]
+    return ""
+
+
+def _dial_process_argv(pid: int) -> list:
+    """The argv of a running process. Linux reads /proc; macOS has no /proc,
+    so it asks ps. Empty when neither says (never raises)."""
+    try:
+        raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+        argv = [x for x in raw.decode("utf-8", "replace").split(chr(0)) if x]
+        if argv:
+            return argv
+    except OSError:
+        pass
+    if shutil.which("ps"):
+        try:
+            r = subprocess.run(["ps", "-p", str(pid), "-o", "args="],
+                               capture_output=True, text=True, timeout=5)
+            line = (r.stdout or "").strip()
+            if r.returncode == 0 and line:
+                import shlex
+                return shlex.split(line)
+        except Exception:
+            return []
+    return []
+
+
+def _dial_running_pin(port: int | None = None) -> str:
+    """The --pin the RUNNING shim was started with ("" = none).
+
+    The live process argv is the only honest source: the unit file can be
+    rewritten while the old process keeps serving, and 'dial status' must
+    report what is actually answering, not what is written down.
+
+    A macOS box has no /proc, so the argv comes from ps instead -- reading
+    /proc only and returning "" made every pin look absent on macOS, which
+    is what the CI caught (unit tests (macos-latest) red on this branch).
+    """
+    pid = _dial_pid(port)
+    if not pid:
+        return ""
+    return _pin_from_argv(_dial_process_argv(pid))
+
+
 def _dial_install_service(port: int, hub: str | None = None,
                           pin: str = "") -> str | None:
     """Install + enable auto-start for the shim. Returns 'systemd'|
@@ -21587,8 +21637,25 @@ def _dial_ensure(port: int | None = None, hub: str | None = None,
             "service": None, "error": None, "endpoint": _dial_url(port)}
     h = _dial_health(port)
     if h:
-        info.update(running=True, how="already", pid=h.get("pid"))
-        return info
+        # A PIN IS A REQUEST, NOT A WISH.
+        # 'hivv dial on --pin yalla' answered "already running" and changed
+        # NOTHING: the shim kept serving whatever bee it had already picked,
+        # the --pin was dropped on the floor, and the command printed success.
+        # The unit file still had no --pin in it, and the operator had no way
+        # to tell (yalla 2026-11-27).
+        running_pin = _dial_running_pin(port)
+        if pin and running_pin != pin:
+            # Stop it WITHOUT the opt-out marker: it is about to be started
+            # again, this time with the pin it was asked for.
+            _dial_stop(port, service=True, marker=False)
+            # SIGTERM is asynchronous — wait for the port to go quiet.
+            deadline = time.time() + 5.0
+            while _dial_health(port) is not None and time.time() < deadline:
+                time.sleep(0.2)
+            info["pin_replaced"] = running_pin
+        else:
+            info.update(running=True, how="already", pid=h.get("pid"))
+            return info
     if _dial_disabled():
         info["how"] = "disabled"
         info["error"] = "opted out (hivv dial off / HIVV_DIAL_OFF)"
@@ -21615,10 +21682,15 @@ def _dial_ensure(port: int | None = None, hub: str | None = None,
     return info
 
 
-def _dial_stop(port: int | None = None, service: bool = True) -> dict:
+def _dial_stop(port: int | None = None, service: bool = True,
+               marker: bool = True) -> dict:
     """Stop the shim: disable auto-start FIRST (so Restart=always doesn't
     fight us), then SIGTERM any survivor. Leaves the dial.off marker so
-    setup won't auto-start it again. Returns {stopped, running, port}."""
+    setup won't auto-start it again.
+
+    marker=False leaves the opt-out marker alone -- used when the shim is
+    being stopped only to be started again with a different pin, where
+    "opted out" would be a lie. Returns {stopped, running, port}."""
     port = port or _dial_port()
     stopped = []
     if service and shutil.which("systemctl") and _service_state("hivv-dial.service"):
@@ -21643,12 +21715,13 @@ def _dial_stop(port: int | None = None, service: bool = True) -> dict:
         except (OSError, PermissionError):
             pass
         time.sleep(0.4)
-    try:
-        STATE_DIR.mkdir(parents=True, exist_ok=True)
-        _dial_off_marker().write_text(
-            f"off at {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
-    except OSError:
-        pass
+    if marker:
+        try:
+            STATE_DIR.mkdir(parents=True, exist_ok=True)
+            _dial_off_marker().write_text(
+                f"off at {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+        except OSError:
+            pass
     return {"stopped": stopped, "running": _dial_health(port) is not None,
             "port": port}
 
@@ -22507,6 +22580,10 @@ def _dial_manage(what: str, port: int, hub: str, pin: str = "") -> None:
             print(f"{APP} dial: {how} on 127.0.0.1:{port} "
                   f"(pid {info.get('pid') or '?'})")
             print(f"  endpoint: {info['endpoint']}")
+            if "pin_replaced" in info:
+                was = info["pin_replaced"] or "(none)"
+                print(f"  pin: {was} -> {pin} "
+                      f"(the shim was restarted with the pin)")
             if info.get("service") == "systemd":
                 print("  auto-start: hivv-dial.service (survives reboot)")
             elif info.get("service") == "launchd":
