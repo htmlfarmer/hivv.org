@@ -692,7 +692,7 @@ async function refreshMapMarkers() {
     if (!loc?.lat || !loc?.lon) continue;
     const color = n.status === 'online' ? '#00ff88' : n.status === 'stale' ? '#ffd93d' : '#ff4757';
     const icon = L.divIcon({ className: '', html: `<div style="width:12px;height:12px;border-radius:50%;background:${color};box-shadow:0 0 8px ${color}"></div>`, iconSize: [12, 12] });
-    L.marker([loc.lat, loc.lon], { icon }).addTo(map).bindPopup(`<b>${n.name}</b><br>${n.ip}<br>${n.status}`);
+    L.marker([loc.lat, loc.lon], { icon }).addTo(map).bindPopup(`<b>${_hEsc(n.name)}</b><br>${_hEsc(n.ip)}<br>${_hEsc(n.status)}`);
   }
 }
 
@@ -766,7 +766,7 @@ async function refreshNodeCards() {
     el.innerHTML += `
       <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;padding:16px;border-top:3px solid ${status}">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
-          <div style="font-weight:700;font-size:.9rem">${n.name}</div>
+          <div style="font-weight:700;font-size:.9rem">${_hEsc(n.name)}</div>
           <div style="text-align:right">
             <span style="font-size:.65rem;color:${status}">${n.status}</span>
             <div style="font-size:.6rem;font-family:var(--mono);color:${LATEST_VER && n.version !== LATEST_VER ? 'var(--orange)' : 'var(--text-dim)'}">${_hEsc((n.version || '?').replace('0.2.', ''))}${LATEST_VER && n.version !== LATEST_VER ? ' ⚠' : ''}</div>
@@ -1062,7 +1062,7 @@ async function refreshNodes() {
     const memColor = mem > 80 ? 'var(--red)' : mem > 50 ? 'var(--orange)' : 'var(--green)';
     el.innerHTML += `<div class="node-row">
       <div class="node-dot ${n.status}"></div>
-      <div><div class="node-name">${n.name}</div><div class="node-ip">${n.id} · <span style="color:${LATEST_VER && n.version !== LATEST_VER ? 'var(--orange)' : 'var(--text-dim)'}">${_hEsc((n.version || '?').replace('0.2.', ''))}${LATEST_VER && n.version !== LATEST_VER ? ' ⚠ behind' : ' ✓'}</span></div></div>
+      <div><div class="node-name">${_hEsc(n.name)}</div><div class="node-ip">${_hEsc(n.id)} · <span style="color:${LATEST_VER && n.version !== LATEST_VER ? 'var(--orange)' : 'var(--text-dim)'}">${_hEsc((n.version || '?').replace('0.2.', ''))}${LATEST_VER && n.version !== LATEST_VER ? ' ⚠ behind' : ' ✓'}</span></div></div>
       <div class="node-ip">${n.ip || n.lan_ip || '?'}</div>
       <div><span class="tag tag-blue">${(n.local_models||[]).length}</span></div>
       <div><div class="node-bar"><div class="node-bar-fill" style="width:${cpu}%;background:${cpuColor}"></div></div><div style="font-size:.65rem;color:var(--text-dim)">${Math.round(cpu)}%</div></div>
