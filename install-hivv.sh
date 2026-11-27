@@ -38,6 +38,12 @@ fi
 # ── globals ────────────────────────────────────────────────────────────
 APP="hivv"
 HUB="${HIVV_HUB:-https://hivv.org}"   # env-overridable (offline tests, self-host)
+# THE FALLBACK SOURCE. hivv.org serves the CLI and the wrapper, so it is a
+# single point of failure for the install itself. The GitHub repo has the
+# same files under public_html/ — ONE extra request, only when the hub does
+# not answer, only because a human ran the installer. The automatic update
+# path never touches GitHub: that is the flood law.
+FALLBACK_RAW="${HIVV_FALLBACK_RAW:-https://raw.githubusercontent.com/htmlfarmer/hivv/main/public_html}"
 PREFIX="/usr/local"
 DO_UNINSTALL=0
 DO_EXPERIMENT=0
@@ -46,6 +52,7 @@ ASSUME_YES=0
 HIVV_MODE="auto"   # auto | system | user — explicit install scope (2026-11-18 rethink)
 QUIET=0
 WITH_LLM=0   # 0 = auto-prompt if interactive, 1 = yes, -1 = no
+WITH_GIT=0   # 0 = auto-prompt if interactive, 1 = yes, -1 = no (git + gh)
 WITH_SERVICE=1  # 1 = install service by default when sudo available, 0 = skip
 LLM_MODEL=""
 
@@ -296,6 +303,8 @@ while [[ $# -gt 0 ]]; do
         --yes|-y)   ASSUME_YES=1      ; shift ;;
         --with-llm) WITH_LLM=1        ; shift ;;
         --no-llm)   WITH_LLM=-1       ; shift ;;
+        --with-git) WITH_GIT=1        ; shift ;;
+        --no-git)   WITH_GIT=-1       ; shift ;;
         --mode=*)  HIVV_MODE="${1#*=}"  ; shift ;;
         --mode)    HIVV_MODE="$2"      ; shift 2 ;;
         --no-service)  WITH_SERVICE=0  ; shift ;;
@@ -313,6 +322,8 @@ while [[ $# -gt 0 ]]; do
               "  --with-llm     also install llama.cpp + a recommended open model" \
               "  --no-llm       skip the LLM prompt" \
               "  --no-service   skip the boot-time background service" \
+              "  --with-git     also install git + the GitHub CLI (to contribute)" \
+              "  --no-git       skip the contributor-tools prompt" \
               "  --experiment   dry-run pre-flight check — changes nothing" \
               "  --uninstall    remove what we installed" \
               "  --quiet        less output" \
@@ -376,13 +387,33 @@ _pkg_of() {
             pacman|brew)    echo "gcc" ;;
             *)              echo "g++" ;;
         esac
+    elif [[ "$2" == "gh" ]]; then
+        # The GitHub CLI is spelled "github-cli" on some distros.
+        case "$1" in
+            pacman|apk|zypper) echo "github-cli" ;;
+            winget) echo "GitHub.cli" ;;
+            *) echo "gh" ;;
+        esac
+    elif [[ "$2" == "gh" ]]; then
+        # The GitHub CLI is spelled "github-cli" on some distros.
+        case "$1" in
+            pacman|apk|zypper) echo "github-cli" ;;
+            winget) echo "GitHub.cli" ;;
+            *) echo "gh" ;;
+        esac
     else
         echo "$2"
     fi
 }
 
 # _tool_label <tool> — human name for a tool key
-_tool_label() { if [[ "$1" == "cxx" ]]; then echo "c++ compiler"; else echo "$1"; fi; }
+_tool_label() {
+    case "$1" in
+        cxx) echo "c++ compiler" ;;
+        gh)  echo "GitHub CLI" ;;
+        *)   echo "$1" ;;
+    esac
+}
 _can_sudo() { sudo -n true 2>/dev/null; }
 
 # _can_ask_sudo — a HUMAN is watching this install: safe to let sudo ask
@@ -455,6 +486,10 @@ _pkg_manual_hint() {
 #   EXACT command to run and returns 1. NEVER exits, NEVER hangs.
 ensure_build_tools() {
     local missing=() pkgs=() names=() all_pkgs=() t pm cmd hint sudo_cmd="" note="" attempt=0
+    # The label names the KIND of tool, so the same machinery installs the
+    # compiler toolchain ("build tool") and the contributor tools
+    # ("contributor tool") without a second copy of the escalation ladder.
+    local label="${_TOOLS_LABEL:-build tool}"
     for t in "$@"; do
         need "$t" || missing+=("$t")
     done
@@ -487,7 +522,7 @@ ensure_build_tools() {
         fi
 
         if [[ "$attempt" -eq 1 ]]; then
-            printf '  %s→%s installing build tools: %s (via %s)%s…\n' "$BLU" "$RST" "${names[*]}" "$pm" "$note"
+            printf '  %s→%s installing %s(s): %s (via %s)%s…\n' "$BLU" "$RST" "$label" "${names[*]}" "$pm" "$note"
             if [[ "$pm" == "apt" ]]; then $sudo_cmd apt-get update >/dev/null 2>&1 || true; fi
             cmd="$(_pkg_install_cmd "$pm" "${pkgs[@]}")"
             if [[ -n "$cmd" ]]; then
@@ -495,7 +530,7 @@ ensure_build_tools() {
                     missing=()
                     for t in "$@"; do need "$t" || missing+=("$t"); done
                     if [[ ${#missing[@]} -eq 0 ]]; then
-                        printf '  %s✓%s installed: %s\n' "$GRN" "$RST" "$*"
+                        printf '  %s✓%s installed %s(s): %s\n' "$GRN" "$RST" "$label" "$*"
                         return 0
                     fi
                 fi
@@ -504,13 +539,32 @@ ensure_build_tools() {
     fi
 
     hint="$(_pkg_manual_hint "$pm" "${all_pkgs[@]}")"
-    printf '  %s!%s missing build tool(s): %s\n' "$YLW" "$RST" "${names[*]}" >&2
+    printf '  %s!%s missing %s(s): %s\n' "$YLW" "$RST" "$label" "${names[*]}" >&2
     if [[ -n "$hint" ]]; then
         printf '    %sinstall them:%s %s\n' "$DIM" "$RST" "$hint" >&2
     else
         printf '    %sinstall %s with your package manager, then re-run this command%s\n' "$DIM" "${names[*]}" "$RST" >&2
     fi
     return 1
+}
+
+# ensure_dev_tools — git + the GitHub CLI, for CONTRIBUTING to the source.
+# Neither is needed to RUN hivv; both are needed to open a pull request.
+# Same contract as the build tools: auto-install when we safely can, else
+# print the EXACT command. Never exits, never hangs.
+ensure_dev_tools() {
+    local have_git=0 have_gh=0
+    need git && have_git=1
+    need gh   && have_gh=1
+    if [[ "$have_git" -eq 1 && "$have_gh" -eq 1 ]]; then
+        printf '  %s\u2713%s contributor tools present (git, gh)\n' "$GRN" "$RST"
+        return 0
+    fi
+    _TOOLS_LABEL="contributor tool"
+    ensure_build_tools git gh
+    local rc=$?
+    _TOOLS_LABEL=""
+    return $rc
 }
 
 if [[ "$DO_UNINSTALL" == "1" ]]; then
@@ -819,6 +873,29 @@ dl() {
             sleep 2
         fi
     done
+    # THE HUB DID NOT ANSWER. One more try — the GitHub copy of the same
+    # file (public_html/ mirrors what the site serves, so the basename is
+    # the same). ONE extra request, only because a human ran the
+    # installer. The automatic update path never touches GitHub: that is
+    # the flood law.
+    if [[ -n "${FALLBACK_RAW:-}" ]]; then
+        local fb_url="$FALLBACK_RAW/$(basename "$url")"
+        local fb_cmd=""
+        if need curl; then
+            fb_cmd="curl -fsSL --connect-timeout 15 --max-time 90 -o '$tmp' '$fb_url'"
+        else
+            fb_cmd="wget -q --timeout=90 -O '$tmp' '$fb_url'"
+        fi
+        if bash -c "$fb_cmd" 2>/dev/null && [[ -s "$tmp" ]] \
+           && ! head -1 "$tmp" 2>/dev/null | grep -qiE "<!DOCTYPE|<html"; then
+            printf '[hivv] hub unreachable — using the GitHub copy (%s)\n' "$fb_url" >&2
+            if [[ -n "$SUDO" ]]; then
+                $SUDO cp "$tmp" "$out" && $SUDO chmod 0644 "$out" && rm -f "$tmp" && return 0
+            else
+                mv "$tmp" "$out" && return 0
+            fi
+        fi
+    fi
     rm -f "$tmp"
     return 1
 }
@@ -1443,6 +1520,35 @@ if should_install_llm; then
     printf '  %sto enable local AI later:%s\n' "$BLD" "$RST"
     printf '    curl -sSL %s/install-%s.sh | bash -s -- --with-llm\n\n' "$HUB" "$APP"
   fi
+fi
+
+
+# ── optional: contributor tools (git + gh) ─────────────────────────────────
+# HIVV's source is open and AI agents are explicitly welcome to change it
+# (see CONTRIBUTING.md "For AI agents" and /ai.txt). git + gh are NOT needed
+# to RUN the network — only to CONTRIBUTE to it — so this is asked, and the
+# default answer is "no".
+should_install_git() {
+  [[ "$WITH_GIT" -eq  1 ]] && return 0
+  [[ "$WITH_GIT" -eq -1 ]] && return 1
+  [[ -t 0 ]] || return 1
+  printf '  %sContribute to HIVV%s (install git + GitHub CLI)? [y/N] %s' "$BLD" "$RST" "$RST"
+  local ans=""
+  read -r ans </dev/tty || return 1
+  [[ "$ans" =~ ^[Yy] ]]
+}
+
+if should_install_git; then
+  printf '
+  %s%s🐝 contributor tools — for changing HIVV itself%s
+
+' "$BLD" "$HIVE" "$RST"
+  ensure_dev_tools
+  printf '  %s→%s branch, commit, open a PR: see CONTRIBUTING.md%s
+' "$DIM" "$RST" "$RST"
+  printf '  %s→%s or set it all up later: %s contribute%s
+
+' "$DIM" "$RST" "$APP" "$RST"
 fi
 
 # ── PATH advice ──────────────────────────────────────────────────────
