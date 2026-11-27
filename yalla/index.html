@@ -20,10 +20,6 @@ a{color:var(--gold)}
 #seen div{padding:5px 0;border-bottom:1px dashed #1a2130}
 .small{color:var(--dim);font-size:13px}
 </style></head><body>
-<nav><span class="brand">🐝 hivv.org</span>
-<a href="/">🏠 Home</a><a href="/map/">🗺 Map</a><a href="/live/">📡 Live</a>
-<a href="/yalla/" style="color:var(--green);font-weight:700">🐾 Yalla</a>
-<a href="/style/">✨ Style</a><a href="/bugs/">🪲 Bugs</a><a href="/docs">API</a></nav>
 <div class="wrap">
 <h1>🐾 THE YALLA PROTOCOL</h1>
 <p class="sub">finding one dog with a whole hive — the high-tech hivv, pointed at what we love</p>
@@ -160,4 +156,5 @@ document.getElementById('send').onclick=async()=>{
   if(r.ok && !r.duplicate){ document.getElementById('where').value=''; document.getElementById('note').value=''; load(); }
 };
 </script>
+  <script src="/js/hivv-nav.js"></script>
 </body></html>

@@ -1044,7 +1044,6 @@ async function refreshCharts() {
   await refreshPulse();
 }
 
-
 // ── NODES VIEW ──
 async function refreshNodes() {
   const data = await fetchJSON('/api/control/nodes');
@@ -1527,5 +1526,6 @@ async function init() {
 
 init();
 </script>
+  <script src="/js/hivv-nav.js"></script>
 </body>
 </html>

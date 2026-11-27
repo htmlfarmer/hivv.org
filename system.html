@@ -159,22 +159,6 @@
 <body>
 <div class="container">
 
-<nav class="site-nav">
-  <a href="/" class="brand"> HIVV.org</a>
-  <div class="nav-links">
-    <a href="/">🏠 Home</a>
-    <a href="/live/">📡 Live</a>
-    <a href="/connect.html">🔗 Connect</a>
-    <a href="/database.html">Database</a>
-    <a href="/hivv.html">Neural Command</a>
-    <a href="/nodes.html">🐝 Nodes</a>
-    <a href="/donate.html">Donate</a>
-    <a href="/system.html" class="active">System</a>
-    <a href="/api.html">🔌 API</a>
-    <a href="/account.html">Account</a>
-  </div>
-</nav>
-
 <h1>System Status</h1>
 <p class="subtitle">Live infrastructure metrics and HIVV Protocol network status.</p>
 
@@ -441,5 +425,6 @@ setInterval(refreshPool, 30000);
      every page. No number on this site is typed into the HTML any more. -->
 <script src="/js/hivv-live.js"></script>
 <script>HIVVLive.start({ intervalMs: 30000 });</script>
+  <script src="/js/hivv-nav.js"></script>
 </body>
 </html>

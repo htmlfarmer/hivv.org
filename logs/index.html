@@ -13,7 +13,6 @@ pre{background:var(--card);border:1px solid var(--line);border-radius:10px;paddi
 .note{background:#141024;border:1px solid #32245c;border-radius:10px;padding:12px 14px;color:#cbb8ff;font-size:13.5px;margin:14px 0}
 a{color:var(--gold)}
 </style></head><body>
-<nav><span class="brand">🐝 hivv.org</span><a href="/map/">🗺 Map</a><a href="/live/">📡 Live</a><a href="/watch.html">Watch</a><a href="/connect.html">Connect</a><a href="/nodes.html">Bees</a><a href="/logs/" style="color:var(--green)">Logs</a><a href="/bugs/">Bugs</a><a href="/docs">API</a></nav>
 <div class="wrap">
 <h1>📜 Logs</h1>
 <p class="sub">the honest version: errors, failures and slow calls — counts only, never prompts, IPs or tokens of identity</p>
@@ -42,4 +41,5 @@ async function go(){
   }catch(e){ document.getElementById('health').textContent = 'health unreachable: '+e.message; }
 }
 go(); setInterval(go, 20000);
-</script></body></html>
+</script>  <script src="/js/hivv-nav.js"></script>
+</body></html>

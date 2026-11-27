@@ -1426,21 +1426,7 @@
       <span id="header-status-text" data-hivv-stat="performance.top_tps" data-hivv-format="tps" data-hivv-prefix="LIVE — ">loading…</span>
     </div>
 
-    <nav class="command-nav">
-      <a href="/map/" data-nav="/map/">🗺 Map</a>
-      <a href="/chat/" data-nav="/chat/">🗣️ Chat</a>
-      <a href="/hivv-dashboard.html" data-nav="/hivv-dashboard.html">Governance</a>
-      <a href="/status" data-nav="/status">Status</a>
-      <a href="/nodes.html" id="hivv-bee-pill" data-nav="/nodes.html" data-hivv-pill title="bee status loading" style="display:inline-flex;align-items:center;gap:6px;color:#fef3c7;font-weight:600;border:1px solid #57534e;border-radius:999px;padding:4px 12px;background:rgba(254,243,199,.05);text-decoration:none"><span data-hivv-pill-dot style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#a3a3a3"></span><span>🐝 <span data-hivv-pill-count>…</span> online</span></a>
-      <a href="/cli.html" data-nav="/cli.html" style="color:#fbbf24;font-weight:700;border:1px solid #d97706;border-radius:6px;padding:4px 10px;background:rgba(251,191,36,.08)">🐝 Install CLI</a>
-      <a href="/docs" data-nav="/docs">API Docs</a>
-      <a href="/live/" data-nav="/live/" style="color:#22c55e;font-weight:700;border:1px solid #16a34a;border-radius:6px;padding:4px 10px;background:rgba(34,197,94,.08);text-decoration:none">📡 Live</a>
-      <a href="/watch.html" data-nav="/watch.html" style="color:#f5c542;font-weight:600;text-decoration:none">👁 Watch</a>
-      <a href="/connect.html" data-nav="/connect.html" style="color:#5ab0ff;font-weight:600;text-decoration:none">🔗 Connect</a>
-      <a href="/logs/" data-nav="/logs/" style="color:#a3a3a3;text-decoration:none">📜 Logs</a>
-      <a href="/bugs/" data-nav="/bugs/" style="color:#ff6b6b;text-decoration:none">🪲 Bugs</a>
-      <a href="/about.html" data-nav="/about.html" style="color:#a855f7;font-weight:600;border:1px solid rgba(168,85,247,.35);border-radius:6px;padding:4px 10px;background:rgba(168,85,247,.08);text-decoration:none">💜 About &amp; Contact</a>
-    </nav>
+    <div data-hivv-nav="links"></div>
   </header>
 
   <!-- MAIN CONTROL LAYOUT -->
@@ -3970,22 +3956,9 @@ curl https://hivv.org/v1/chat/completions \
 })();
   </script>
 
-  <!-- The nav lights up the page you are ON -- the "active" link used to
-       be hard-coded to Chat, which was wrong on every page but one. -->
-  <script>
-  (function () {
-    var here = location.pathname.replace(/\/+$/, '') || '/';
-    var links = document.querySelectorAll('nav.command-nav a[data-nav]');
-    for (var i = 0; i < links.length; i++) {
-      var target = links[i].getAttribute('data-nav').replace(/\/+$/, '') || '/';
-      if (target === here || (here.indexOf(target + '/') === 0 && target !== '/')) {
-        links[i].classList.add('active');
-      } else {
-        links[i].classList.remove('active');
-      }
-    }
-  })();
-  </script>
+  <!-- The nav itself is /js/hivv-nav.js: ONE component, ONE inventory,
+       every page of the site, and it marks the page you are on. The old
+       per-page navs each listed a different subset of the site. -->
 
   <!-- 🐝 THE live numbers — one endpoint, one binding, every page.
        /js/hivv-live.js fills every [data-hivv-stat] element from
@@ -3995,5 +3968,6 @@ curl https://hivv.org/v1/chat/completions \
   <script>
     HIVVLive.start({ intervalMs: 30000 });
   </script>
+  <script src="/js/hivv-nav.js"></script>
 </body>
 </html>

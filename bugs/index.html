@@ -14,7 +14,6 @@ h1{font-size:24px;margin:0 0 4px}.sub{color:var(--dim);margin:0 0 18px;font-size
 .lbl{display:inline-block;font-size:11px;padding:1px 8px;border-radius:20px;border:1px solid var(--line);color:var(--dim);margin-right:6px}
 a{color:var(--gold)}
 </style></head><body>
-<nav><span class="brand">🐝 hivv.org</span><a href="/map/">🗺 Map</a><a href="/live/">📡 Live</a><a href="/watch.html">Watch</a><a href="/connect.html">Connect</a><a href="/nodes.html">Bees</a><a href="/logs/">Logs</a><a href="/bugs/" style="color:var(--green)">Bugs</a><a href="/docs">API</a></nav>
 <div class="wrap">
 <h1>🪲 Bugs &amp; work in progress</h1>
 <p class="sub">open issues on <a href="https://github.com/htmlfarmer/hivv">github.com/htmlfarmer/hivv</a> · live from the GitHub API</p>
@@ -53,4 +52,5 @@ fetch('/api/github/issues')
      'opened '+new Date(i.created_at).toLocaleDateString()+' · comments '+(i.comments||0)+'</div></div>').join('')
      : '<div class="item">no open issues — or GitHub is unreachable right now.</div>';
  }).catch(e=>{ document.getElementById('list').innerHTML = '<div class="item">GitHub unreachable: '+e.message+'</div>'; });
-</script></body></html>
+</script>  <script src="/js/hivv-nav.js"></script>
+</body></html>

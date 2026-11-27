@@ -50,18 +50,7 @@
 <body style="background: #050508;">
 <div class="dashboard-container">
 
-  <nav class="site-nav" style="margin-bottom: 30px;">
-    <a href="/" class="brand"> HIVV.org</a>
-    <div class="nav-links">
-      <a href="/">🏠 Home</a>
-    <a href="/live/">📡 Live</a>
-    <a href="/connect.html">🔗 Connect</a>
-      <a href="/dashboard.html" class="active">My Account</a>
-      <a href="/admin.html" id="nav-admin" style="display:none;">Admin</a>
-    </div>
-  </nav>
-
-  <main id="main">
+<main id="main">
 
   <div id="login-required" class="login-prompt" style="display: none;">
     <h2>Login Required</h2>
@@ -618,5 +607,6 @@ async function logout() {
 checkSession();
 </script>
   </main>
+  <script src="/js/hivv-nav.js"></script>
 </body>
 </html>

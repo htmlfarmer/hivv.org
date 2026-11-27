@@ -35,12 +35,6 @@ h1{font-size:23px;margin:0 0 2px}.sub{color:var(--dim);font-size:13.5px;margin:0
    overlay pane, so they keep their own colours. */
 .leaflet-tile-pane.hivv-dark-tiles{filter:invert(1) hue-rotate(180deg) brightness(1.06) contrast(.88) saturate(.55)}
 </style></head><body>
-<nav><span class="brand">🐝 hivv.org</span>
-<a href="/">🏠 Home</a><a href="/map/" class="on">🗺 Map</a><a href="/live/">📡 Live</a>
-<a href="/watch.html">👁 Watch</a><a href="/connect.html">🔗 Connect</a>
-<a href="/nodes.html">🐝 Bees</a><a href="/status">Status</a>
-<a href="/logs/">📜 Logs</a><a href="/bugs/">🪲 Bugs</a><a href="/docs">API</a></nav>
-
 <div class="head">
 <h1>🗺 The whole hive, on one map</h1>
 <p class="sub">every bee, every connection, everything going on — refreshing itself <span class="pulse"></span></p>
@@ -251,4 +245,5 @@ document.querySelectorAll('.tab').forEach(b => b.addEventListener('click', () =>
      every page. No number on this site is typed into the HTML any more. -->
 <script src="/js/hivv-live.js"></script>
 <script>HIVVLive.start({ intervalMs: 30000 });</script>
+  <script src="/js/hivv-nav.js"></script>
 </body></html>
