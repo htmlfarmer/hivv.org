@@ -869,7 +869,18 @@
     });
 
     if (filtered.length === 0) {
-      listEl.innerHTML = '<div class="empty-state"><div class="icon">No matching agents</div><p>Adjust your search or status filter.</p></div>';
+      // Two different truths, and they must not be blurred: there are no
+      // agents AT ALL (the fleet is empty - register one), or there are
+      // agents but this filter excludes them.
+      const noneAtAll = loadedAgents.length === 0 && currentStatusFilter === 'all';
+      const n = loadedAgents.length;
+      listEl.innerHTML = noneAtAll
+        ? '<div class="empty-state"><div class="icon">No agents registered</div>'
+          + '<p>Nobody has registered an agent on this hive yet. Register yours via the API '
+          + 'and it appears here - with its permissions, its state and its provenance.</p></div>'
+        : '<div class="empty-state"><div class="icon">No matching agents</div>'
+          + '<p>' + n + ' agent' + (n === 1 ? '' : 's')
+          + ' on file, none match this filter. Adjust your search or status filter.</p></div>';
       return;
     }
 
