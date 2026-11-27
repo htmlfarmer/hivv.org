@@ -10394,7 +10394,7 @@ _FAST_HARD = [
     ("shell_true", "critical", "shell command interpolation", re.compile(r"shell\s*=\s*True")),
     ("os_system", "critical", "shell command execution", re.compile(r"\bos\.system\s*\(")),
     ("subprocess_shell", "high", "process spawning", re.compile(r"\bsubprocess\.(?:run|call|Popen|check_output|check_call)\s*\(")),
-    ("destructive_delete", "critical", "recursive/destructive delete", re.compile(r"\b(?:shutil\.rmtree|fs\.rmSync|rm\s+-[rf])\b")),
+    ("destructive_delete", "critical", "recursive/destructive delete", re.compile(r"\b(?:shutil\.rmtree|fs\.rmSync|rm\s+-[a-z]*[rf][a-z]*)\b")),
     ("credential_paths", "critical", "credential file access", re.compile(r"(?:^|[\s\"'=])(?:/etc/(?:passwd|shadow)|\.ssh/id_[a-z0-9]+|~?/\.aws/credentials)", re.M | re.I)),
     ("env_secret_read", "high", "secret environment variable read", re.compile(r"\b(?:os\.environ(?:\.get)?\s*\(?\s*['\"][^'\"]*(?:SECRET|TOKEN|PASSWORD|KEY)|process\.env\.[A-Z_]*(?:SECRET|TOKEN|PASSWORD|KEY))")),
     ("network_socket", "high", "network request", re.compile(r"\b(?:socket\.socket|socket\.create_connection|requests\.(?:get|post|put|delete)|urllib\.request\.urlopen|httpx\.(?:get|post))\s*\(")),
@@ -21586,14 +21586,25 @@ def _dial_ensure(port: int | None = None, hub: str | None = None,
         info["how"] = "foreign"
         info["error"] = f"port {port} is in use by another app"
         return info
-    # persistent service first (survives reboot), detached spawn as fallback
+    # persistent service first (survives reboot), detached spawn as fallback.
+    #
+    # The wait is 8s, not 3s. Each poll costs ~0.75s (0.5s healthz timeout +
+    # 0.25s sleep), so the old 3.0s got about FOUR chances to see a shim that
+    # is still importing a 25k-line CLI — on a loaded box (CI, or two test
+    # suites at once) that cold start blows past it and the start reports
+    # "failed" for a shim that was about to answer. It also used to be
+    # tighter than _dial_wait's own 4.0s default, which is how long a wait
+    # should never be shorter than the thing it waits on.
+    #
+    # 8s only ever costs time on the ERROR path (the shim genuinely cannot
+    # start); a healthy shim answers in well under a second.
     svc = _dial_install_service(port, hub, pin)
     info["service"] = svc
-    if _dial_wait(port, seconds=3.0):
+    if _dial_wait(port, seconds=8.0):
         info.update(running=True, how="service", pid=_dial_pid(port))
         return info
     pid = _dial_spawn(port, hub, pin)
-    if _dial_wait(port, seconds=3.0):
+    if _dial_wait(port, seconds=8.0):
         info.update(running=True, how="spawned", pid=pid)
         return info
     info["how"] = "failed"
@@ -22564,6 +22575,15 @@ def cmd_dial(args) -> None:
         _dial_manage(what, port, hub, pin)
         return
 
+    # STARTUP CANARY — the FIRST thing the server path does, after the
+    # management commands have returned (they must stay parseable: status
+    # output and setup --json are asserted on). The macOS CI runner reported
+    # "alive, 0 bytes, 10s" for weeks, which cannot distinguish "stuck
+    # importing the module" from "stuck inside cmd_dial". This line bisects
+    # them on the very next run: present -> main() dispatched and the hang is
+    # downstream; absent -> the hang is in the import.
+    print(f"[{APP}] dial starting (pid {os.getpid()})", flush=True)
+
     # ── stable shim id: sha1(user@host)[:12], written once ────────
     shim_file = STATE_DIR / "dial-id"
     shim = ""
@@ -23015,15 +23035,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--fetch", action="store_true", help="fetch origin first")
     sp.add_argument("--check", action="store_true", help="exit non-zero when out of sync (CI)")
     sp.add_argument("--quiet", action="store_true", help="less noise")
-    sp = sub.add_parser("propose", help="send a proposal to the hive — signed, screened, deduped, filed")
-    sp.add_argument("topic", nargs="?", default=None,
-                    help="the proposal in one line (or use --title)")
-    sp.add_argument("--type", dest="ptype", default=None,
-                    choices=["suggestion", "bug", "patch"],
-                    help="what kind of proposal (default: suggestion)")
-    sp.add_argument("--evidence", default=None,
-                    help="what you saw — a pid, a log line, a date, a symptom")
-    sp.add_argument("--body", default=None, help="the full text (defaults to the topic)")
+    sp = sub.add_parser("propose", help="propose a change to the source — scan, review, authorize, test")
     sp.add_argument("--staged", action="store_true", help="propose what is staged")
     sp.add_argument("--file", action="append", help="propose one file's diff (repeatable)")
     sp.add_argument("--patch", help="propose a patch file (no git needed)")
@@ -23033,23 +23045,13 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--branch", default=None, help="branch name for the proposal")
     sp.add_argument("--title", default=None, help="one-line title")
     sp.add_argument("--summary", default=None, help="what this change does")
-    sp.add_argument("--votes", type=int, default=1,
-                    help="ask at least this many models (the hub boards 3 by default)")
-    sp.add_argument("--dry-run", action="store_true", help="local only: show what would be sent, talk to nobody")
-    sp.add_argument("--check", action="store_true",
-                    help="ask the HUB to run the whole funnel and report what WOULD happen — creates nothing")
-    sp.add_argument("--red-team", action="store_true",
-                    help="TAG as hostile-testing traffic: recorded + badged, kept off the public page, NEVER weakens a check")
+    sp.add_argument("--votes", type=int, default=1, help="how many models to ask (default 1)")
+    sp.add_argument("--no-review", action="store_true",
+                    help="deterministic scan only — do not ask a model (a human then signs)")
+    sp.add_argument("--dry-run", action="store_true", help="scan and review only — send nothing")
     sp.add_argument("--patch-out", default=None, help="write the patch here (the credential-free handback)")
-    sp.add_argument("--push", action="store_true",
-                    help="REFUSED: nodes never hold a GitHub credential — the hub files it")
+    sp.add_argument("--push", action="store_true", help="push a branch and open a PR (needs git + gh)")
     sp.add_argument("--no-tests", action="store_true", help="skip the local test run")
-    sp.add_argument("--json", dest="json_output", action="store_true", help="output raw JSON")
-
-    sp = sub.add_parser("proposals", help="what I sent to the hive, and where each one got to")
-    sp.add_argument("--all", action="store_true", help="every proposal on this hub, not just mine")
-    sp.add_argument("--contributors", action="store_true",
-                    help="who is changing the hive — ranked by merged proposals")
     sp.add_argument("--json", dest="json_output", action="store_true", help="output raw JSON")
 
     sp = sub.add_parser("contribute", help="set up to contribute to HIVV's source (git, gh, clone, auth)")
@@ -23971,191 +23973,82 @@ def _propose_push(branch: str, title: str, body: str) -> tuple[bool, str]:
         return False, f"gh pr create failed: {(r.stderr or r.stdout).strip()[:300]}"
     return True, (r.stdout or "").strip()
 
-# A WRITTEN-UP PROPOSAL — `hivv propose mypro.txt` (or .md, .rst, anything)
-# ══════════════════════════════════════════════════════════════════════════
-#
-# Not everybody writes a proposal in one shell line. Some people write it
-# up properly — a paragraph of context, what they saw, what they suggest —
-# save it as mypro.md and hand the FILE over. The positional argument is
-# therefore a PATH when it names a real file: the extension is only a hint,
-# so a title that happens to contain a dot is never mistaken for a filename
-# (the test is "does it exist on disk", not "does it end in .txt").
-
-# Matches the hub: the body column and the funnel both cap at 40 KB.
-_PROPOSAL_TEXT_MAX = 40_000
-
-
-def _propose_looks_like_diff(s: str) -> bool:
-    """Is this a unified diff rather than prose?"""
-    head = (s or "")[:8000]
-    # `diff --git` is specific enough to trust anywhere. The ---/+++ pair
-    # needs BOTH: prose about a code review mentions either one alone.
-    if "diff --git" in head:
-        return True
-    return ("\n+++ " in head or head.startswith("+++ ")) and (
-        "\n--- " in head or head.startswith("--- "))
-
-
-def _propose_title_from(text: str, fallback: str = "") -> str:
-    """A title for a written-up file: its heading, else its first line."""
-    lines = (text or "").splitlines()[:20]
-    for line in lines:
-        s = line.strip()
-        if s.startswith("#"):
-            t = s.lstrip("#").strip()
-            if t:
-                return t[:300]
-    for line in lines:
-        s = line.strip()
-        if s:
-            return s[:300]
-    return fallback
-
-
 def cmd_propose(args) -> None:
-    """hivv propose — send a proposal to the hive.
+    """hivv propose — raise a change to the source, with the evidence.
 
-    The NODE does exactly two things: it SIGNS (Ed25519, the same identity
-    block that registers this bee) and it REPORTS back. Everything else is
-    the hub's:
+    The order is the point: scan (deterministic) → review (the hive) →
+    authorize (policy) → test (the baseline suite). Each step is a gate on
+    the hub, and the hub's state machine refuses to advance past a gate that
+    did not pass.
 
-      verify → rate limit → dedupe → fastScan → model board → policy gate
-        → filed as a GitHub issue, or held for a human, or never filed.
-
-    That split IS the design law: nodes never hold a GitHub credential, so
-    exactly one secret exists on the whole network, and it lives behind the
-    github.write policy gate on the hub.
+    Nothing is pushed without authorization.
     """
     as_json = bool(getattr(args, "json_output", False))
-
-    # THE LAW — a node that could push a branch could push anything.
-    if getattr(args, "push", False):
-        die("the hub files it, not you — nodes never hold a GitHub credential.\n"
-            "  The hub holds exactly ONE token, behind the github.write gate.\n"
-            "  Drop --push: your proposal is signed, screened and filed for you.")
-
-    # ── gather ───────────────────────────────────────────────────────────
-    ptype = getattr(args, "ptype", None) or "suggestion"
-    topic = (getattr(args, "topic", None) or "").strip()
-    text = (getattr(args, "body", None) or "").strip()
-    evidence = (getattr(args, "evidence", None) or "").strip()
-
-    # The positional is a PATH when it names a real file. Tested by
-    # existence, never by extension — so `hivv propose mypro.txt` reads the
-    # file, and a plain title containing a dot still works as a title.
-    src_file = None
-    if not text and topic:
-        cand = Path(topic).expanduser()
-        if cand.is_file():
-            src_file = cand
-
-    if src_file is not None:
-        try:
-            raw = src_file.read_text(encoding="utf-8", errors="replace")
-        except OSError as e:
-            die(f"could not read {src_file}: {e}")
-        if not raw.strip():
-            die(f"{src_file} is empty — nothing to propose")
-        if _propose_looks_like_diff(raw):
-            # A bare .diff/.patch handed over positionally: the patch path
-            # already parses the file list and caps the size, so hand it
-            # straight over instead of re-reading it as prose.
-            if not getattr(args, "patch", None):
-                args.patch = str(src_file)
-            src_file = None
-            raw = ""
-        topic = ""          # it was a path, never a title
-        text = raw
-    elif topic and not text:
-        text = topic
-
-    title = (getattr(args, "title", None) or "").strip()
-    if not title:
-        if src_file is not None:
-            title = _propose_title_from(text) or src_file.stem
-        else:
-            title = topic
-    title = (title or "").strip()
-
-    if not title:
-        die("a proposal needs a title:\n"
-            f'  {APP} propose "tools server never refreshes a stale helper" \\'
-            '       --evidence "pid 42335 ran hivv-tools.py from Sep 16"\n'
-            '       hivv propose mypro.md      (a written-up proposal)')
-
-    if len(text) > _PROPOSAL_TEXT_MAX:
-        text = text[:_PROPOSAL_TEXT_MAX] + "\n… [proposal truncated]"
-
-    # A prose file never triggers `git diff` — running it would silently
-    # propose the repository's own working tree instead of the file the
-    # user handed over.
-    has_patch_source = any([
-        getattr(args, "patch", None),
-        getattr(args, "staged", False),
-        getattr(args, "file", None),
-        getattr(args, "stdin", False),
-    ])
-    wants_patch = has_patch_source or (ptype == "patch" and src_file is None)
-    diff, files = "", []
-    if wants_patch:
-        diff, files = _propose_collect(args)
-        if (diff or "").strip():
-            ptype = "patch"
-        elif ptype == "patch":
-            die("nothing to propose — the patch is empty.\n"
-                '  hivv propose "…" --staged\n'
-                '  hivv propose "…" --file <path>\n'
-                '  hivv propose "…" --patch change.patch')
-
-    if len(diff) > _PROPOSE_MAX_DIFF:
-        diff = diff[:_PROPOSE_MAX_DIFF] + "\n… [patch truncated]\n"
+    diff, files = _propose_collect(args)
+    if not (diff or "").strip():
+        die("nothing to propose — the diff is empty.\n"
+            "  staged changes   hivv propose --staged\n"
+            "  one file         hivv propose --file <path>\n"
+            "  a patch file     hivv propose --patch change.patch")
 
     base_sha = getattr(args, "base", None)
-    if not base_sha and wants_patch:
+    if not base_sha:
         rc, out = _git("rev-parse", "HEAD")
         if rc == 0 and out.strip():
             base_sha = out.strip().splitlines()[0].strip()
 
-    # ── THE ENVELOPE — signed by this bee's own key ──────────────────────
-    node_id = _my_node_id() or socket.gethostname().split(".")[0]
-    ident = _identity_envelope("proposal.create", node_id, {
-        "type": ptype,
-        "title": title[:300],
-        "body": text[:20000],
-        "evidence": evidence[:4000],
-        "patch": diff or None,
-    })
-    if not ident:
-        warn("no signing identity on this box — sending unsigned.\n"
-             "     The hub will refuse it; run: hivv identity keygen")
+    hard, secrets, injection = _propose_scan(files, diff)
+    no_review = bool(getattr(args, "no_review", False))
+    votes = [] if no_review else _propose_votes(
+        diff, int(getattr(args, "votes", 1) or 1))
 
-    body = {
-        "node_id": node_id,
-        "type": ptype,
-        "title": title,
-        "body": text,
-        "evidence": evidence,
-        "patch": diff,
-        "files_changed": files,
-        "identity": ident,
-        "repo": getattr(args, "repo", None) or _PROPOSE_REPO,
-        "base_sha": base_sha,
-        "branch": getattr(args, "branch", None),
-        "summary": getattr(args, "summary", None) or text[:500],
-        "baseline_suite_digest": _propose_baseline_digest(base_sha),
-        "board_size": (int(getattr(args, "votes", 1) or 1)
-                       if (getattr(args, "votes", 1) or 1) > 1 else None),
-        # A LABEL, never a bypass: it marks the row and keeps it off the
-        # public page. It does not, and must not, skip a single check.
-        "red_team": bool(getattr(args, "red_team", False)),
+    evidence = {
+        "hard_danger": hard,
+        "secrets": secrets,
+        "injection": injection,
+        "votes": [{"verdict": v["verdict"], "model": v["model"],
+                   "family": v["family"]} for v in votes],
     }
+    if no_review:
+        # Nobody reviewed it — say so out loud. The hub then demands a human
+        # before it lands, which is the honest answer to a clean scan that
+        # no model ever looked at.
+        evidence["deterministic_only"] = True
+    blocked = bool(hard or secrets)
+    risky = [v for v in votes if v["verdict"] == "RISKY"]
 
-    # ── the credential-free handback (works with no hub at all) ──────────
-    # Written BEFORE the dry-run exit on purpose: --dry-run means "send
-    # nothing", not "write no local file". Wanting the artifact without
-    # the network is exactly the offline case this flag exists for.
+    if not as_json:
+        print(f"\033[1m{APP} propose\033[0m — {len(files)} file(s), "
+              f"{len(diff)} bytes of patch\n")
+        print(f"  repo:  {getattr(args, 'repo', None) or _PROPOSE_REPO}")
+        print(f"  base:  {base_sha or '(unknown)'}")
+        print()
+        for kind, items in (("hard danger", hard), ("secret", secrets),
+                            ("injection", injection)):
+            if items:
+                print(f"  \033[31m✗\033[0m {kind}: {len(items)} finding(s)")
+                for it in items[:8]:
+                    what = (it.get("label") or it.get("pattern")
+                            or it.get("finding") or "?")
+                    sample = it.get("sample") or it.get("match") or ""
+                    print(f"      {it.get('file', '')} {what}"
+                          + (f" - {sample[:70]}" if sample else ""))
+        if no_review:
+            print("  \033[33m○\033[0m review skipped by request "
+                  "(--no-review) — a human then signs")
+        elif votes:
+            for v in votes:
+                colour = {"SAFE": "\033[32m", "REVIEW": "\033[33m",
+                          "RISKY": "\033[31m"}.get(v["verdict"], "")
+                print(f"  \033[1m{v['model']}\033[0m → {colour}{v['verdict']}\033[0m")
+        else:
+            print("  \033[33m○\033[0m no model answered the review")
+        print()
+
+    # the credential-free artifact -- written FIRST, so a dry run still
+    # produces the thing the contributor actually needs to hand back
     patch_out = getattr(args, "patch_out", None)
-    if patch_out and diff:
+    if patch_out:
         try:
             Path(patch_out).expanduser().write_text(diff, encoding="utf-8")
             if not as_json:
@@ -24164,323 +24057,158 @@ def cmd_propose(args) -> None:
             warn(f"could not write {patch_out}: {e}")
 
     if getattr(args, "dry_run", False):
-        preview = {k: (v[:200] + "…" if isinstance(v, str) and len(v) > 200 else v)
-                   for k, v in body.items() if k != "identity"}
-        preview["identity"] = "signed" if ident else "MISSING"
-        if not as_json:
-            print(f"\033[1m{APP} propose\033[0m — dry run, nothing was sent\n")
-            for k, v in preview.items():
-                print(f"  {k}: {v}")
+        if blocked:
+            verdict = "BLOCKED"
+        elif injection or risky:
+            # Low-confidence signals: a diff-borne directive, or a model that
+            # voted RISKY. Neither kills the change - both route it to a
+            # human. Only the deterministic findings block.
+            verdict = "NEEDS A HUMAN"
+            if injection:
+                print("    the diff carries something that could be read as an")
+                print("    instruction - a human signs this one before it lands.")
+            if risky:
+                print("    a reviewer voted RISKY - a human signs this one too.")
         else:
-            print(json.dumps({"dry_run": True, "proposal": preview}, indent=2))
-        sys.exit(0)
-
-    if not as_json:
-        print(f"\033[1m{APP} propose\033[0m — {ptype}"
-              + (f", {len(files)} file(s), {len(diff)} bytes" if diff else "")
-              + "\n")
-        print(f"  title:    {title}")
-        if evidence:
-            print(f"  evidence: {evidence[:120]}")
-        print(f"  signed:   {node_id}" + ("  ✓" if ident else "  ✗ unsigned"))
-        print()
-
-    # A pre-check goes to the SAME door with ?dry_run=1 — the hub runs every
-    # stage and writes nothing. It is a query parameter, not a body field.
-    _check = bool(getattr(args, "check", False))
-    code, resp = http("POST",
-                      "/api/proposals?dry_run=1" if _check else "/api/proposals",
-                      body=body, timeout=60)
-    # ── the hub answered ──────────────────────────────────────────────────
-    if code == 0:
+            verdict = "CLEAR"
         if not as_json:
-            print("  \033[33m○\033[0m the hub is not reachable — nothing was sent.")
-            print("    Reconnect and retry, or hand the patch back with --patch-out.")
+            print(f"  \033[1m{verdict}\033[0m — dry run, nothing was sent")
+        else:
+            print(json.dumps({"dry_run": True, "verdict": verdict,
+                              "files": files, "evidence": evidence}, indent=2))
+        sys.exit(0 if verdict == "CLEAR" else 1)
+
+    body = {
+        "repo": getattr(args, "repo", None) or _PROPOSE_REPO,
+        "base_sha": base_sha,
+        "branch": getattr(args, "branch", None),
+        "title": getattr(args, "title", None) or "proposed change",
+        "summary": getattr(args, "summary", None) or "",
+        "patch": diff,
+        "files_changed": files,
+        "baseline_suite_digest": _propose_baseline_digest(base_sha),
+    }
+
+    code, resp = http("POST", "/api/proposals", body=body, timeout=30)
+    if code != 201 or not isinstance(resp, dict) or not resp.get("id"):
+        if not as_json:
+            print(f"  \033[33m○\033[0m the hub is not reachable ({code}) — "
+                  f"the gates cannot run here.")
+            print("    Hand the patch back to a machine that can reach the hub;")
+            print("    it will study it, test it and ask a human before anything lands.")
         else:
             print(json.dumps({"ok": False, "hub_code": code,
-                              "error": resp if isinstance(resp, dict) else str(resp)},
-                             indent=2))
+                              "error": resp if isinstance(resp, dict) else str(resp),
+                              "evidence": evidence}, indent=2))
         sys.exit(2)
 
-    if code not in (200, 201) or not isinstance(resp, dict):
+    pid = resp["id"]
+    if not as_json:
+        print(f"  proposal: {pid}")
+        if resp.get("protected_hit"):
+            print("  \033[33m!\033[0m PROTECTED PATH — a human must approve this one")
+
+    # ── G1 · study ────────────────────────────────────────────────────────
+    code, resp = http("POST", f"/api/proposals/{pid}/study",
+                       body={"evidence": evidence}, timeout=30)
+    if code != 200 or not isinstance(resp, dict):
         problems = resp.get("problems") if isinstance(resp, dict) else None
-        stage = resp.get("stage") if isinstance(resp, dict) else None
         if not as_json:
-            print(f"  \033[31m✗\033[0m refused at {stage or 'intake'} (HTTP {code})")
+            print("  \033[31m✗\033[0m the study gate refused it")
             for pb in (problems or [])[:10]:
                 print(f"      {pb}")
-            if stage == "verify":
-                print("    hint: hivv identity status   (is this box's key bound?)")
-            elif stage == "limit":
-                print("    hint: one bee, one day — the quota resets with the clock")
-            elif stage == "screen":
-                print("    hint: the deterministic screen found a hard danger or a secret")
         else:
-            print(json.dumps({"ok": False, "hub_code": code, "stage": stage,
-                              "problems": problems or []}, indent=2))
+            print(json.dumps({"ok": False, "stage": "study", "response": resp},
+                             indent=2))
         sys.exit(1)
+    if not as_json:
+        print("  \033[32m✓\033[0m study passed")
 
-    # ── the PRE-CHECK answered ────────────────────────────────────────────
-    if isinstance(resp, dict) and resp.get("dry_run"):
-        w = resp.get("would") or {}
+    # ── G2 · authorize ────────────────────────────────────────────────────
+    code, resp = http("POST", f"/api/proposals/{pid}/authorize", body={}, timeout=30)
+    if code == 202 and isinstance(resp, dict) and resp.get("verdict") == "MAYBE":
         if not as_json:
-            print("  \033[1mDRY RUN\033[0m — nothing was created, no grant was minted,")
-            print("  and your rate-limit allowance was not spent.\n")
-            colour = {"SAFE": "\033[32m", "REVIEW": "\033[33m",
-                      "RISKY": "\033[31m"}.get(resp.get("verdict"), "")
-            print(f"  verdict:  {colour}{resp.get('verdict')}\033[0m")
-            sc = resp.get("screen") or {}
-            if sc:
-                print(f"  screen:   {sc.get('verdict')} (hard {sc.get('hard')}, "
-                      f"secrets {sc.get('secrets')})")
-            ok_votes = [v for v in (resp.get("reviews") or []) if v and v.get("ok")]
-            if ok_votes:
-                print("  board:")
-                for v in ok_votes:
-                    c = {"SAFE": "\033[32m", "REVIEW": "\033[33m",
-                         "RISKY": "\033[31m"}.get(v.get("verdict"), "")
-                    print(f"      {v.get('model')} \u2192 {c}{v.get('verdict')}\033[0m")
-            else:
-                print("  \033[33m○\033[0m no usable board verdict")
-            print()
-            if w.get("add_vote_to"):
-                print(f"  \033[36m≡\033[0m would NOT create — it would add a vote to "
-                      f"{w['add_vote_to']}")
-            else:
-                print("  \033[32m✓\033[0m would create a new proposal")
-            if w.get("protected_path"):
-                print("  \033[33m!\033[0m PROTECTED PATH — a human must sign it, "
-                      "no matter the vote count")
-            if w.get("needs_human"):
-                print("  \033[33m◐\033[0m would be held for a human")
-            if w.get("gates"):
-                print("  gates:     " + " \u2192 ".join(w["gates"]))
-            filing = w.get("filing") or {}
-            act = filing.get("action")
-            if act == "file":
-                print("  \033[32m✓\033[0m would be filed"
-                      + (" (offline stub)" if filing.get("stub") else ""))
-            elif act == "never_file":
-                print(f"  \033[31m✗\033[0m would NEVER be filed "
-                      f"(policy rule {filing.get('rule')})")
-            for p in (resp.get("problems") or [])[:6]:
-                print(f"  \033[33m○\033[0m {p}")
-            print()
-            print("  send it for real:  drop --check")
+            print("  \033[33m◐\033[0m MAYBE — a human has to say yes:")
+            print(f"      {APP} approve {resp.get('grant_id')}")
+            print("    the proposal stays alive until then — that is not a failure.")
         else:
-            print(json.dumps(resp, indent=2))
+            print(json.dumps({"ok": True, "stage": "authorize",
+                              "verdict": "MAYBE", "grant_id": resp.get("grant_id"),
+                              "proposal_id": pid}, indent=2))
         sys.exit(0)
-
-    # ── STAGE 3 · dedupe — five bees, one issue, +1 vote ──────────────────
-    if resp.get("deduped"):
-        pid = (resp.get("proposal") or {}).get("id")
-        votes = resp.get("votes")
+    if code != 200 or not isinstance(resp, dict):
         if not as_json:
-            print(f"  \033[36m≡\033[0m already filed as {pid} — your identity was added"
-                  f" as vote #{votes}")
-            print("    (the same idea from another bee — one issue beats five)")
+            print("  \033[31m✗\033[0m authorization refused: "
+                  f"{resp.get('error') if isinstance(resp, dict) else resp}")
         else:
-            print(json.dumps({"ok": True, "deduped": True, "proposal_id": pid,
-                              "votes": votes, "verdict": resp.get("verdict"),
-                              "issue_url": resp.get("issue_url")}, indent=2))
-        sys.exit(0)
+            print(json.dumps({"ok": False, "stage": "authorize", "response": resp},
+                             indent=2))
+        sys.exit(1)
+    if not as_json:
+        print("  \033[32m✓\033[0m authorized")
 
-    prop = resp.get("proposal") or {}
-    pid = prop.get("id")
-    verdict = resp.get("verdict")
-    filing = resp.get("filing") or {}
-    colour = {"SAFE": "\033[32m", "REVIEW": "\033[33m",
-              "RISKY": "\033[31m"}.get(verdict, "")
+    # ── G3 · test ─────────────────────────────────────────────────────────
+    if getattr(args, "no_tests", False):
+        if not as_json:
+            print("  \033[33m○\033[0m tests skipped by request — "
+                  "the proposal stops at 'authorized'")
+        sys.exit(0)
+    t = _propose_run_tests()
+    if not t.get("ran"):
+        if not as_json:
+            print(f"  \033[33m○\033[0m no test suite here ({t.get('reason')}) — "
+                  "the proposal stops at 'authorized'")
+        sys.exit(0)
+    test_evidence = {
+        "base_sha": base_sha,
+        "baseline_suite_digest": body["baseline_suite_digest"],
+        "passed": t.get("passed", 0),
+        "failed": t.get("failed", 0),
+        "summary": t.get("summary", ""),
+    }
+    code, resp = http("POST", f"/api/proposals/{pid}/test",
+                       body={"evidence": test_evidence}, timeout=30)
+    if code != 200 or not isinstance(resp, dict):
+        problems = resp.get("problems") if isinstance(resp, dict) else None
+        if not as_json:
+            print("  \033[31m✗\033[0m the test gate refused it")
+            for pb in (problems or [])[:10]:
+                print(f"      {pb}")
+        else:
+            print(json.dumps({"ok": False, "stage": "test", "response": resp},
+                             indent=2))
+        sys.exit(1)
+    if not as_json:
+        print(f"  \033[32m✓\033[0m tests passed ({t.get('passed')} passed, "
+              f"{t.get('failed')} failed)")
+
+    # ── what is left ──────────────────────────────────────────────────────
+    state = resp.get("state") if isinstance(resp, dict) else None
+    if getattr(args, "push", False):
+        branch = getattr(args, "branch", None) or "ai/proposed-change"
+        title = getattr(args, "title", None) or "proposed change"
+        good, msg = _propose_push(
+            branch, title,
+            f"Proposed with {APP} propose.\n\nProposal: {pid}\n")
+        if not as_json:
+            if good:
+                print(f"  \033[32m✓\033[0m pushed {branch} — {msg}")
+            else:
+                print(f"  \033[33m○\033[0m not pushed: {msg}")
+        else:
+            print(json.dumps({"ok": good, "push": msg, "proposal_id": pid,
+                              "state": state}, indent=2))
+        sys.exit(0 if good else 1)
 
     if not as_json:
-        print(f"  \033[1m{pid}\033[0m   verdict: {colour}{verdict}\033[0m")
-        ok_votes = [v for v in (resp.get("reviews") or []) if v and v.get("ok")]
-        if ok_votes:
-            print("  model board:")
-            for v in ok_votes:
-                c = {"SAFE": "\033[32m", "REVIEW": "\033[33m",
-                     "RISKY": "\033[31m"}.get(v.get("verdict"), "")
-                print(f"      {v.get('model')} → {c}{v.get('verdict')}\033[0m")
-        else:
-            print("  \033[33m○\033[0m the board returned no usable verdict —"
-                  " routed for human review")
-        sc = resp.get("screen") or {}
-        if sc:
-            print(f"  screen: {sc.get('verdict')}"
-                  f" (hard {sc.get('hard')}, secrets {sc.get('secrets')})")
-        if resp.get("protected_hit"):
-            print("  \033[33m!\033[0m PROTECTED PATH — a human must approve this one,"
-                  " no matter how many models said yes")
-
         print()
-        act = filing.get("action")
-        if act == "file":
-            stub = " (offline stub — this hub holds no GitHub token)" if filing.get("stub") else ""
-            print(f"  \033[32m✓\033[0m filed{stub}")
-            if filing.get("issue_url"):
-                print(f"    {filing['issue_url']}")
-        elif act == "needs_human":
-            print(f"  \033[33m◐\033[0m held for a human — run:")
-            print(f"      {APP} approve {filing.get('grant_id')}")
-        else:
-            print(f"  \033[31m✗\033[0m never filed (policy rule {filing.get('rule')})")
-
-        for pb in (resp.get("problems") or [])[:6]:
-            print(f"  \033[33m○\033[0m {pb}")
-
-        gates = resp.get("gates")
-        if gates:
-            st = gates.get("study")
-            if isinstance(st, list):
-                st = "failed — " + (st[0] if st else "unknown")
-            print()
-            print(f"  study:     {st}")
-            print(f"  authorize: {gates.get('authorize')}")
-            if gates.get("grant_id"):
-                print(f"      {APP} approve {gates['grant_id']}")
-
-        print()
-        print(f"  track it:  {APP} proposals")
-        print(f"             curl -s {HUB}/api/proposals/{pid}")
+        print(f"  \033[1mstate: {state}\033[0m")
+        print("  the hive still has to approve it, and a human merges it:")
+        print(f"    curl -s {HUB}/api/proposals/{pid}")
+        print("    see HIVV_SELF_MODIFICATION_PLAN.md for the whole loop")
     else:
-        print(json.dumps({
-            "ok": True, "proposal_id": pid, "verdict": verdict,
-            "dedupe_key": resp.get("dedupe_key"), "votes": resp.get("votes"),
-            "filing": filing, "gates": resp.get("gates"),
-            "protected_hit": resp.get("protected_hit"),
-            "problems": resp.get("problems") or [],
-            "screen": resp.get("screen"), "reviews": resp.get("reviews"),
-            "issue_url": filing.get("issue_url"),
-        }, indent=2))
-
-# ── STAGE 4 · the feedback loop ─────────────────────────────────────────────
-
-# What a proposal looks like once the hub has answered. The marks are the
-# point: a merged one prints the line the plan promises.
-_PROPOSAL_STATE_MARK = {
-    "merged":    "\033[32m✓\033[0m",
-    "deployed":  "\033[32m✓✓\033[0m",
-    "approved":  "\033[32m✓\033[0m",
-    "tested":    "\033[32m✓\033[0m",
-    "authorized":"\033[33m◐\033[0m",
-    "studied":   "\033[33m◐\033[0m",
-    "draft":     "\033[33m○\033[0m",
-    "rejected":  "\033[31m✗\033[0m",
-    "expired":   "\033[90m∘\033[0m",
-    "failed":    "\033[31m✗\033[0m",
-}
-
-
-def cmd_proposals(args) -> None:
-    """hivv proposals — every proposal this bee sent, and where it got to.
-
-    Stage 4 of the funnel. The hub answers GET /api/proposals/mine with this
-    bee's rows; a merged one prints exactly what the plan promises:
-
-        ✓ merged — hive/proposal-7 · lands in your next hivv update
-    """
-    as_json = bool(getattr(args, "json_output", False))
-    node_id = _my_node_id() or socket.gethostname().split(".")[0]
-
-    # ── STAGE 4b · the contributor view ────────────────────────────────
-    # Separate from `hivv contributors` (which reads GitHub commits): a bee
-    # whose patch merged here may have no GitHub identity at all.
-    if getattr(args, "contributors", False):
-        code, resp = http("GET", "/api/proposals/contributors", timeout=20)
-        if code == 0 or not isinstance(resp, dict):
-            die("the hub did not answer (" + str(code) + ")")
-        if as_json:
-            print(json.dumps(resp, indent=2))
-            return
-        rows = resp.get("contributors") or []
-        if not rows:
-            print(f"\033[1m{APP} contributors\033[0m — nobody has proposed yet.")
-            return
-        print(f"\033[1m{APP} contributors\033[0m — who is changing the hive\n")
-        for i, c in enumerate(rows, 1):
-            who = c.get("id") or "?"
-            merged = int(c.get("merged") or 0)
-            mark = "\033[32m✓\033[0m" if merged else "\033[90m·\033[0m"
-            print(f"  {i:>2}. {mark} {who}")
-            print(f"       {merged} merged · {c.get('proposals') or 0} proposed"
-                  f" · {c.get('votes_received') or 0} vote(s) received"
-                  f" · {c.get('votes_cast') or 0} cast")
-        print()
-        print("  (GitHub commit history: hivv contributors)")
-        return
-
-    if getattr(args, "all", False):
-        path = "/api/proposals?limit=200"
-    else:
-        path = "/api/proposals/mine"
-        if node_id:
-            path += "?node=" + urllib.parse.quote(node_id)
-
-    code, resp = http("GET", path, timeout=20)
-    if code == 0 or not isinstance(resp, dict):
-        die("the hub did not answer (" + str(code) + ") — "
-            + (str(resp)[:160] if resp else "no response"))
-
-    rows = resp.get("proposals") or []
-    if as_json:
-        print(json.dumps(resp, indent=2))
-        return
-
-    if not rows:
-        print(f"\033[1m{APP} proposals\033[0m — nothing yet.")
-        print(f'  send one:  {APP} propose "the thing I noticed" --evidence "..."')
-        return
-
-    counts = resp.get("counts") or {}
-    print(f"\033[1m{APP} proposals\033[0m — {len(rows)}"
-          + (f"   ({', '.join(f'{v} {k}' for k, v in counts.items())})"
-             if counts else "")
-          + "\n")
-
-    for p in rows:
-        state = str(p.get("state") or "draft")
-        mark = _PROPOSAL_STATE_MARK.get(state, "\033[90m·\033[0m")
-        pid = p.get("id")
-        title = (p.get("title") or "(untitled)")[:64]
-        ptype = p.get("type") or "suggestion"
-        votes = p.get("vote_count") or len(p.get("votes") or [])
-        verdict = p.get("verdict") or "-"
-
-        # A red-team row is still YOURS to see (it is your test), just
-        # never published. The badge says which world it belongs to.
-        rt = "  \033[35mRED TEAM\033[0m" if p.get("red_team") else ""
-        print(f"  {mark} {pid}  [{ptype}] {title}{rt}")
-        line = f"        {state} · verdict {verdict}"
-        if votes:
-            line += f" · {votes} vote(s)"
-        if p.get("node_id"):
-            line += f" · from {p['node_id']}"
-        print(line)
-
-        if p.get("issue_url"):
-            print(f"        issue {p['issue_url']}")
-
-        # THE LINE THE PLAN PROMISES.
-        if state in ("merged", "deployed"):
-            print(f"        \033[32m✓ merged — lands in your next {APP} update\033[0m")
-        elif state in ("authorized", "tested", "approved"):
-            gates = p.get("gates") or {}
-            auth = gates.get("authorize") if isinstance(gates, dict) else None
-            if isinstance(auth, dict) and auth.get("evidence", {}).get("grant_id"):
-                print(f"        needs a human: {APP} approve "
-                      f"{auth['evidence']['grant_id']}")
-        elif state == "rejected":
-            rej = p.get("rejection") or {}
-            if rej.get("reason"):
-                print(f"        reason: {rej['reason'][:100]}")
-        print()
-
-    print(f"  read all of them, in the open: {HUB.rstrip('/')}/proposals/")
-
-    if any(str(p.get("state")) in ("merged", "deployed") for p in rows):
-        print(f"  a merged proposal is picked up by every bee on its next "
-              f"{APP} update.")
-
+        print(json.dumps({"ok": True, "proposal_id": pid, "state": state,
+                          "evidence": evidence, "tests": t}, indent=2))
 
 # ══ the on-ramp for someone who ALREADY installed ═════════════════════════
 
@@ -24664,9 +24392,7 @@ COMMANDS = _resolve_cmds({
     "restart":         "cmd_restart",
     "status":          "cmd_status",
     "boot":            "cmd_boot",
-    "sync":            "cmd_sync",
-    "propose":         "cmd_propose",
-    "proposals":       "cmd_proposals",
+    "sync":            "cmd_sync",    "propose":         "cmd_propose",
     "contribute":      "cmd_contribute",
     "contributors":    "cmd_contributors",
     "review-diff":     "cmd_review_diff",
@@ -24859,15 +24585,6 @@ def main(argv: list[str]) -> None:
     if cmd_name in ("sala", "salat"):
         cmd_name = "salah"
         argv[0] = "salah"
-
-    # `proposal` is how people naturally spell `propose` ("hivv proposal
-    # mypro.txt"). Without it the word falls through to the smart-default CHAT
-    # and gets sent to the LLM as a message — the same trap family as
-    # upgrade/capability/sala. NOTE: `proposals` (plural) is a DIFFERENT
-    # command (the list) and must NOT be rewritten.
-    if cmd_name == "proposal":
-        cmd_name = "propose"
-        argv[0] = "propose"
 
     # `upgrade` is a friendlier alias for `update`. Without this, `hivv upgrade`
     # would fall through to the smart-default chat and send the literal word
@@ -25362,10 +25079,9 @@ def _print_sub_help(cmd: str) -> None:
         "remove":    "delete one part of hivv — llm | models | agent | config | logs | state | everything\n  usage: hivv remove [part] [--yes]   bare lists the parts with sizes\n  every delete shows what dies and asks first (non-TTY needs --yes)",
         "salah":     "prayer times for this region + attendance streak + moon (alias: sala)\n  usage: hivv salah [--node BEE] [--lat X --lon Y] [--json]\n  times shown in THIS machine's local clock · attendance = your heartbeats inside the window",
         "watch":     "the watchdog — restart a stuck local service, never in a loop\n  usage: hivv watch [status|on|off|run|reset]\n  watches: tools · llama · agent(report-only)\n  restarts only what you turned ON; 2 failed probes then a restart,\n  growing backoff, and a hard budget → QUARANTINE (a human looks)",
-        "fallback":  "the escape hatch — where to get the CLI if hivv.org is down\n  usage: hivv fallback [--json]\n  prints the GitHub copy of every entry point + how to verify a download\n  works with NO network at all",
+        "fallback":  "the escape hatch — where to get the CLI if hivv.org is down\n  usage: hivv fallback [--json]\n  prints the GitHub copy of every entry point (install · rescue · update ·\n  help) + how to verify a download. Works with NO network at all.\n  The automatic update path never contacts GitHub (the flood law).",
         "feedback":  "list or send feedback — bugs, suggestions, complaints\n  usage: hivv feedback [list|submit] [type] [message]\n  alias: hivv help list · hivv help submit <type> <msg>\n  an MCP client calls the same thing as the tool `feedback`",
         "help":      "submit or list feedback (this command) — BARE hivv help prints root help\n  usage: hivv help list | hivv help submit <type> <msg>\n  easier spelling: hivv feedback",
-        "fallback":  "the escape hatch — where to get the CLI if hivv.org is down\n  usage: hivv fallback [--json]\n  prints the GitHub copy of every entry point (install · rescue · update ·\n  help) + how to verify a download. Works with NO network at all.\n  The automatic update path never contacts GitHub (the flood law).",
         "health":    "GET /api/health",
         "metrics":   "GET /api/control/metrics/global\n  flag: --local   print this bee's local CPU/GPU/MEM/DISK snapshot",
         "nodes":     "table view of all registered nodes (fits your terminal) + hive TOTALS\n  flag: --json   output raw JSON",
@@ -25378,8 +25094,7 @@ def _print_sub_help(cmd: str) -> None:
         "contributors": "who is helping — contributors by commit count\n  flag: --github  read straight from the GitHub API",
         "sync":      "two-way check against GitHub (read-only — never merges)\n  flag: --fetch  fetch origin first\n  flag: --check  exit non-zero when out of sync (for CI)",
         "review-diff": "ask the hive whether a change looks safe\n  usage: hivv review-diff [--staged] [--file F] [--votes N]",
-        "propose":    "send a PROPOSAL to the hive — signed, screened, deduped, filed\n  usage: hivv propose \"the thing I noticed\" --evidence \"pid 42335, Sep 16\"\n         hivv propose mypro.md        (a WRITTEN-UP proposal: .md, .txt, .rst…\n                                       the first heading becomes the title)\n         hivv propose \"title\" --type suggestion|bug|patch [--patch FILE]\n         hivv propose \"title\" --staged | --file F | --stdin [--dry-run]\n  alias: hivv proposal <file>\n  flags: --check      ask the HUB to run the whole funnel and report what\n                      WOULD happen — creates nothing, mints no grant\n         --dry-run    local only, talk to nobody\n         --red-team   TAG as hostile-testing traffic: recorded + badged,\n                      kept off the public page, NEVER weakens a check\n  the node only SIGNS and reports. the HUB does everything else:\n         verify -> rate limit -> dedupe -> fastScan -> model board -> policy gate\n         -> filed as a GitHub issue, held for a human, or never filed\n  five bees with the same idea become ONE issue carrying +5 votes\n  read them all in the open: https://hivv.org/proposals/\n  nodes never hold a GitHub credential: --push is refused by design",
-        "proposals":  "what I sent to the hive, and where each one got to\n  usage: hivv proposals [--all] [--contributors] [--json]\n  prints each proposal's state, verdict, vote count and issue URL\n  a merged one prints:  ✓ merged — lands in your next hivv update\n  flag: --contributors   who is changing the hive, ranked by merged",
+        "propose":    "raise a change to the SOURCE, with the evidence\n  usage: hivv propose [--staged] [--file F] [--patch FILE] [--stdin]\n         [--votes N] [--no-review] [--dry-run] [--patch-out FILE]\n         [--push] [--no-tests]\n  the gates: scan (deterministic) -> review (the hive) -> authorize (policy)\n         -> test (the BASELINE suite) -> approve (quorum) -> merge (a human)\n  no credential is needed - the patch is handed back to a machine that can write\n  --push opens a PR only if git + gh are ALREADY set up and authenticated",
         "contribute": "set up to change the source of the hive\n  usage: hivv contribute [--install] [--clone DIR] [--json]\n  reports git / gh / clone / gh auth, and prints the whole loop\n  nothing here needs a credential - that is the point",
         "node":      "show details about a specific node\n  usage: hivv node <name> [--json]\n  also: hivv node chat <bee> <msg>  → chats with that bee instead",
         "ask":       "chat with ONE bee — or a whole HIVE when the name is a brand/domain\n  usage: hivv ask <bee|hive> <message>\n  e.g.  hivv ask yalla \"whas up\"  ·  hivv ask kwaai \"whats up homes?\"\n  alias: talk · node-chat\n  note: `hivv chat <msg>` asks this hive's own bees; `hivv ask <hive>` crosses the bridge",

@@ -1455,6 +1455,179 @@ paths:
           description: The trust breakdown
 
 
+  /api/proposals:
+    post:
+      summary: Raise a proposal — one proposed change to the source
+      description: >
+        A proposal carries a patch and the evidence about it. It only ever
+        ADVANCES through the gates (study -> authorize -> test -> approve ->
+        merge); the state machine refuses to skip one. A patch is DATA, never
+        an instruction. See HIVV_SELF_MODIFICATION_PLAN.md.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [repo, patch]
+              properties:
+                repo: { type: string, example: htmlfarmer/hivv }
+                patch: { type: string, description: unified diff }
+                base_sha: { type: string }
+                branch: { type: string }
+                title: { type: string }
+                summary: { type: string }
+                files_changed: { type: array, items: { type: string } }
+                baseline_suite_digest:
+                  type: string
+                  description: sha256 of the test suite AT base_sha — the
+                    test gate refuses a run whose suite digest differs
+      responses:
+        '201':
+          description: "The proposal (state: draft)"
+        '400':
+          description: missing repo or patch
+        '429':
+          description: rate limit
+    get:
+      summary: List proposals
+      responses:
+        '200':
+          description: proposals, newest first
+  /api/proposals/{id}:
+    get:
+      summary: One proposal with its gates and receipt chain
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: the proposal
+        '404':
+          description: no such proposal
+  /api/proposals/{id}/verify:
+    get:
+      summary: Verify the signed receipt chain
+      description: >
+        Checks every gate receipt signature against the hub key and the chain
+        hash over them. A tampered receipt is caught.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: the chain verifies
+        '409':
+          description: a receipt does not verify
+  /api/proposals/{id}/study:
+    post:
+      summary: "G1 — what does this change do?"
+      description: >
+        Deterministic findings (hard_danger, secrets, injection) plus model
+        votes. hard_danger and secrets block. An injection finding or a RISKY
+        vote does NOT block — it sets needs_human, which the approve gate
+        requires a signature for.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: study passed
+        '409':
+          description: the study gate refused it
+  /api/proposals/{id}/authorize:
+    post:
+      summary: "G2 — may this change happen? (policy gate)"
+      description: >
+        Runs the existing policy gate with capability source.modify (tier
+        side-effect, default ask). A MAYBE keeps the proposal alive and
+        returns the grant to approve. Fails CLOSED.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: allowed
+        '202':
+          description: MAYBE — run hivv approve G_xxx
+        '409':
+          description: denied, or an earlier gate has not passed
+  /api/proposals/{id}/test:
+    post:
+      summary: "G3 — does it work? (the BASELINE suite is authoritative)"
+      description: >
+        The evidence must carry base_sha matching the proposal and the
+        baseline suite digest pinned at intake — a change cannot pass by
+        shipping its own weakened tests.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: tests passed
+        '409':
+          description: refused (wrong suite, failing tests, out of order)
+  /api/proposals/{id}/approve:
+    post:
+      summary: "G4 — do enough independent parties say yes?"
+      description: >
+        Quorum + distinct model families + no bee holding over half of it +
+        the author never approving their own change + a human for a protected
+        path or a flagged diff.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: approved
+        '403':
+          description: the author cannot approve their own proposal
+        '409':
+          description: quorum / diversity / human requirement not met
+  /api/proposals/{id}/merge:
+    post:
+      summary: "G5 — land it, signed, and undoable"
+      description: >
+        Operator only. Requires every earlier gate plus a merge sha and a
+        rollback artifact that lives outside the changed tree.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: merged
+        '403':
+          description: merging needs an operator
+        '409':
+          description: a gate has not passed, or no rollback artifact
+  /api/proposals/{id}/reject:
+    post:
+      summary: Kill a proposal, with a reason
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: rejected
+        '409':
+          description: already finished
+
 components:
   securitySchemes:
     bearerAuth:
