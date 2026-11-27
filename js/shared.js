@@ -53,7 +53,17 @@ const HIVV = {
     if (this.csrfToken) headers['X-CSRF-Token'] = this.csrfToken;
 
     const res = await fetch(this.API_BASE + path, { ...options, headers });
-    const data = await res.json();
+    // A gateway that is restarting answers with an HTML error page; the
+    // body is NOT json and `res.json()` throws a raw SyntaxError. Parse
+    // defensively — a failed call returns {ok:false, data:null}, never a
+    // throw. (THE LAW: a blocked or failed request may degrade the page,
+    // never break it.)
+    let data = null;
+    try {
+      data = await res.json();
+    } catch (_e) {
+      data = null;
+    }
     if (!res.ok && res.status === 401) {
       const onBee = window.location.pathname === '/bee' || window.location.pathname === '/bee.html';
       if (!onBee) {
@@ -313,6 +323,32 @@ const HIVV = {
     }).join('\n');
 
     return text;
+  },
+
+  // ===== A fetch that NEVER throws on a broken response =====
+  //
+  // THE LAW (2026-11-26): a blocked or failed request may DEGRADE the
+  // page, never BREAK it.
+  //
+  // `await res.json()` on a response that is not JSON throws a raw
+  // `SyntaxError: Unexpected token <` — because Caddy answers a dead
+  // upstream with an HTML error page, and an adblocker answers with a
+  // network error. The page then freezes on STALE data while the console
+  // fills with errors that look like the site fault (they are not: the
+  // gateway was restarting, and the beacon was blocked).
+  //
+  // So: check the status, check the content type, and return null for
+  // anything that is not a JSON body. The caller renders "unavailable".
+  async json(url, opts = {}) {
+    try {
+      const res = await fetch(url, {cache: 'no-store', ...opts});
+      if (!res || !res.ok) return null;                       // 4xx/5xx -> null
+      const type = (res.headers && res.headers.get('content-type')) || '';
+      if (type && type.indexOf('json') === -1) return null;    // an HTML error page
+      return await res.json();
+    } catch (_e) {
+      return null;   // offline | blocked | DNS | CORS | aborted
+    }
   },
 
   copyCode(btn) {

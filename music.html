@@ -89,7 +89,7 @@ personality is sovereign, and this is how you meet it. 🎶</footer>
 // roster + votes (server counts; your own vote remembered locally)
 async function loadRoster(){
   const [r,v] = await Promise.all([
-    fetch('/music-roster.json',{cache:'no-store'}).then(r=>r.json()),
+    fetch('/music-roster.json',{cache:'no-store'}).then(r=>r.ok?r.json():{entries:[]}),
     fetch('/api/music/votes',{cache:'no-store'}).then(r=>r.json()).catch(()=>({votes:{}}))
   ]);
   const mine = JSON.parse(localStorage.getItem('music_votes')||'[]');

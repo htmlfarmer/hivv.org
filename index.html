@@ -2829,8 +2829,10 @@ curl https://hivv.org/v1/chat/completions \
     // Center draws).
     let data = [];
     try {
-      const res = await fetch('/api/hive/timeline?hours=12', {cache: 'no-store'});
-      const j = await res.json();
+      // A failed/HTML/blocked response must not throw here — the chart
+      // keeps the last good buckets instead of dying mid-render.
+      const j = await HIVV.json('/api/hive/timeline?hours=12');
+      if (!j) return;
       const buckets = Array.isArray(j.timeline) ? j.timeline : [];
       data = buckets.map((b, i) => ({
         hour: i === buckets.length - 1
@@ -2922,8 +2924,8 @@ curl https://hivv.org/v1/chat/completions \
       // /api/hive/timeline counts them; the old code INVENTED percentages
       // (`30 - i * 3` for local, `20 - i * 2` for cloud) and printed them
       // as if they were measurements.
-      const res = await fetch('/api/hive/timeline?hours=72', {cache: 'no-store'});
-      const d = await res.json();
+      const d = await HIVV.json('/api/hive/timeline?hours=72');
+      if (!d) return;
       const models = Array.isArray(d.models) ? d.models.filter(m => (Number(m.n) || 0) > 0) : [];
       if (models.length) {
         const colors = ['#a855f7', '#00f0ff', '#00ff88', '#74b9ff', '#ffd93d', '#ff9f43', '#c084fc', '#fb7185'];
@@ -3021,8 +3023,10 @@ curl https://hivv.org/v1/chat/completions \
   // ========== LIVE ACTIVITY FEED ==========
   async function refreshLiveActivity() {
     try {
-      const res = await fetch('/api/public/activity');
-      const d = await res.json();
+      // HIVV.json() returns null for a failed / HTML / blocked response —
+      // no raw SyntaxError, and the feed keeps its last good state.
+      const d = await HIVV.json('/api/public/activity');
+      if (!d) return;
       const feed = document.getElementById('live-activity-feed');
       const countEl = document.getElementById('activity-count');
 
@@ -3432,14 +3436,15 @@ curl https://hivv.org/v1/chat/completions \
   // ========== LIVE STATUS REFRESH ==========
   async function refreshLiveStatus() {
     try {
-      const [statusRes, dashboardRes] = await Promise.all([
-        fetch('/api/public/status'),
-        fetch('/api/public/dashboard-stats')
-      ]);
-      const d = await statusRes.json();
-      const dash = await dashboardRes.json();
-
-      if (!d.ok) return;
+      // Two INDEPENDENT calls, not a Promise.all: one blocked/failed
+      // endpoint must not take the other one down with it (that is what
+      // made BOTH panels go stale when the gateway was restarting).
+      // HIVV.json() returns null for a failed / HTML / blocked response,
+      // so nothing here throws a raw SyntaxError any more.
+      const d = await HIVV.json('/api/public/status');
+      const dash = await HIVV.json('/api/public/dashboard-stats');
+      if (!d || !d.ok) return;
+      if (!dash) return;
 
       // The bee counts, the throughput, the providers, the requests and the
       // tokens are bound by HIVVLive (see /js/hivv-live.js) from the ONE
@@ -3524,14 +3529,12 @@ curl https://hivv.org/v1/chat/completions \
     const authBtn = $('auth-status-btn');
     if (!authBtn) return;
     if (token) {
-      fetch('/api/auth/me', { headers: { 'X-Session-Token': token } })
-        .then(r => r.json())
+      HIVV.json('/api/auth/me', { headers: { 'X-Session-Token': token } })
         .then(d => {
-          if (d.logged_in) {
+          if (d && d.logged_in) {
             authBtn.textContent = (d.user?.username || 'Account') + ' ⚙️';
           }
-        })
-        .catch(() => {});
+        });
     }
   }
 

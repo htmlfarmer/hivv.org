@@ -214,7 +214,7 @@ devised on the first hive-to-hive bridge night, 2026-11-23 ·
 const FACTORS=[["music","🎵 Music","rasa & raga — what moves it"],["adab","🕌 Adab","manners & courtesy (Urdu/Arabic)"],["hikmat","🦉 Hikmat","wisdom (Arabic/Persian)"],["ruhaniyat","🕯 Ruhaniyat","spirituality (Urdu)"],["mazaq","😄 Mazaq","humor with timing (Urdu)"],["haqeeqat","🔬 Haqeeqat","honesty about facts (Urdu/Arabic)"]];
 async function load(){
   const [r,v]=await Promise.all([
-    fetch('/music-roster.json',{cache:'no-store'}).then(r=>r.json()),
+    fetch('/music-roster.json',{cache:'no-store'}).then(r=>r.ok?r.json():{entries:[]}),
     fetch('/api/music/votes',{cache:'no-store'}).then(r=>r.json()).catch(()=>({votes:{},factors:{}}))
   ]);
   const mine=JSON.parse(localStorage.getItem('style_votes')||'[]');
