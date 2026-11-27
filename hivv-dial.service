@@ -1,0 +1,50 @@
+# hivv dial shim — USER SCOPE (non-root) systemd unit.
+#
+# The dial shim is the piece that turns this machine from "a machine with
+# the CLI installed" into "a bee that can be called directly". It exposes a
+# local OpenAI-compatible port and proxies to the bee the hub routes to.
+#
+# Install (as your own user, no sudo):
+#   cp hivv-dial.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now hivv-dial.service
+#   loginctl enable-linger $USER     # start at boot without a login session
+#
+# Rules that prevent crash loops:
+#   1. NEVER run the same port under BOTH system and user scope — the loser
+#      spins forever on "couldn't bind HTTP server socket". One scope only.
+#   2. Restart=on-failure (not always): a config error stays visible instead
+#      of looping.
+#   3. The crash-loop breaker below turns "restart forever" into "sit in
+#      failed and say so". systemd's default limit (5 starts / 10 s) can
+#      never trip when RestartSec >= 10, which is exactly how a unit loops
+#      every 5 s indefinitely.
+#
+# The two ExecStart paths differ ON PURPOSE:
+#   * the AGENT runs from the installed client (~/.local/lib/hivv), because
+#     that is the copy install-hivv.sh keeps up to date;
+#   * the DIAL runs from the checkout, because it is the one that has to be
+#     restarted after a code change to the router.
+#
+# If you move this unit to another machine, copy ~/.local/share/hivv with
+# it: the dial id, the instance id and the identity live there. A dial shim
+# without that state is a new bee with a new address.
+
+[Unit]
+Description=hivv dial shim (local OpenAI proxy → direct-to-bee)
+After=network.target
+# crash-loop bound: 3 starts / 5 min then failed, not an endless restart storm
+StartLimitIntervalSec=300
+StartLimitBurst=3
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /var/www/vhosts/hivv.org/public_html/hivv-cli.py dial --port 3911 --hub https://hivv.org
+Restart=on-failure
+RestartSec=10
+WorkingDirectory=/var/www/vhosts/hivv.org
+StandardOutput=append:/home/asher/.local/share/hivv/dial.log
+StandardError=append:/home/asher/.local/share/hivv/dial.log
+
+[Install]
+WantedBy=default.target
