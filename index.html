@@ -17,7 +17,10 @@
   <script src="/lib/leaflet/leaflet.js"></script>
   <!-- d3 is served from OUR box: the CSP (script-src 'self') blocks every
        CDN, so the charts were loading nothing. The CDN stays as a fallback. -->
-  <script src="/lib/d3/d3.v7.min.js"></script>
+  <!-- d3 is 92KB and blocks the parser for ~160ms on this page. DEFERRED:
+       it executes after parsing (before DOMContentLoaded), so the charts
+       below wait for it instead of the parser waiting for d3. -->
+  <script src="/lib/d3/d3.v7.min.js" defer></script>
   <style>
     :root {
       --accent: #00ff88;
@@ -2289,14 +2292,15 @@ curl https://hivv.org/v1/chat/completions \
       <a href="/docs">API Docs</a> ·
       <a href="/terms.html">Terms</a> ·
       <a href="/privacy.html">Privacy</a> ·
-      <a href="/about.html">About &amp; Contact</a>
+      <a href="/about.html">About &amp; Contact</a> ·
+      <a href="https://github.com/htmlfarmer/hivv" rel="noopener">GitHub</a> ·
+      <a href="/ai.txt">ai.txt</a>
     </p>
     <p style="margin-top:8px;color:#8f9aa8;font-size:.82rem">
       Reach a human: <a href="sms:+17733218181" style="color:#00ff88;text-decoration:none;font-weight:700">text +1 773-321-8181</a>
       <span style="color:#6b7684">(fastest — email is old school)</span> ·
       <a href="mailto:ashermartin@gmail.com" style="color:#74b9ff;text-decoration:none">ashermartin@gmail.com</a> ·
       or just <a href="/about.html" style="color:#a855f7;text-decoration:none">stop over at the house</a> 🙂
-    </p>
     </p>
   </footer>
 
@@ -3490,10 +3494,31 @@ curl https://hivv.org/v1/chat/completions \
     // Initialize visualizations with real data
     initWorldMap();
     updateNodeMarkers();
-    await initUniverseGraph();
-    renderProviderRings(realNodes || []);
-    renderThroughputChart();
-    renderProviderChart();
+    renderProviderRings(realNodes || []);   // no d3 — draw it now
+
+    // The three that need d3. Deferred scripts execute BEFORE
+    // DOMContentLoaded, so this is never a long wait — but until d3 has
+    // landed, calling them would throw and take the rest of init with it.
+
+    // Wait for d3 however it arrives. Deferred scripts run before
+    // DOMContentLoaded — but init() is async and may resume AFTER it, so a
+    // DOMContentLoaded listener alone never fires (that is exactly how this
+    // broke). Poll briefly instead: d3 is local, it lands in one round trip,
+    // and a bounded wait can never hang the page.
+    const whenD3 = (fn) => {
+      if (window.d3) return fn();
+      let tries = 0;
+      const t = setInterval(() => {
+        if (window.d3) { clearInterval(t); fn(); }
+        else if (++tries > 200) { clearInterval(t); }   // ~2s: never hang
+      }, 10);
+    };
+    const drawD3 = async () => {
+      await initUniverseGraph();
+      renderThroughputChart();
+      renderProviderChart();
+    };
+    whenD3(drawD3);
 
     // Refresh intervals
     setInterval(refreshLiveStatus, 15000);

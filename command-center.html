@@ -9,7 +9,8 @@
   <script src="/lib/leaflet/leaflet.js"></script>
   <!-- d3 + Chart.js are served from OUR box: the CSP (script-src 'self')
        blocks every CDN, so these charts never ran. The CDNs stay as fallbacks. -->
-  <script src="/lib/d3/d3.v7.min.js"></script>
+  <!-- d3 is 92KB; deferred so it stops blocking this page's parser. -->
+  <script src="/lib/d3/d3.v7.min.js" defer></script>
   <script src="/lib/chartjs/chart.umd.min.js"></script>
   <style>
     :root {
@@ -1533,7 +1534,20 @@ async function init() {
   await refreshMetrics();
   initMap();
   initCharts();
-  refreshNetworkGraph();
+  // refreshNetworkGraph is the only d3 caller here. Deferred scripts run
+  // BEFORE DOMContentLoaded, so this waits at most that long — and it
+  // cannot throw before d3 has landed.
+  // d3 is deferred; init() is async and may resume after DOMContentLoaded,
+  // so a listener alone never fires. Poll briefly (bounded - never hang).
+  const whenD3 = (fn) => {
+    if (window.d3) return fn();
+    let tries = 0;
+    const t = setInterval(() => {
+      if (window.d3) { clearInterval(t); fn(); }
+      else if (++tries > 200) clearInterval(t);
+    }, 10);
+  };
+  whenD3(refreshNetworkGraph);
   refreshNodeCards();
   refreshFeed();
   refreshPulse();

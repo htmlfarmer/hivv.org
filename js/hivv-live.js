@@ -223,7 +223,11 @@
       if (opts.endpoint) this.endpoint = opts.endpoint;
       if (opts.intervalMs) this.intervalMs = opts.intervalMs;
       var self = this;
-      if (this._started) { this.refresh(); return this; }
+      // Idempotent. hivv-nav.js starts this AND the page starts it, so a
+      // second call used to fire a second immediate fetch — every page
+      // requested /api/hivv/stats two or three times on load. Already
+      // running? Say so and do nothing; the interval covers it.
+      if (this._started) return this;
       this._started = true;
 
       var boot = function () { self.refresh(); };
@@ -240,8 +244,14 @@
         if (!document.hidden) self.refresh();
       });
 
-      // A page restored from bfcache gets the same treatment.
-      global.addEventListener('pageshow', function () { self.refresh(); });
+      // A page restored from bfcache gets the same treatment — and ONLY
+      // then. `pageshow` fires on EVERY load, including the first, so an
+      // unguarded handler doubled the very first fetch: every page asked
+      // /api/hivv/stats twice before anything had changed. `persisted` is
+      // true only when the browser is handing back a page it froze.
+      global.addEventListener('pageshow', function (e) {
+        if (e && e.persisted) self.refresh();
+      });
 
       return this;
     },

@@ -79,7 +79,10 @@ body{margin:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,
 
 <div id="swagger-ui"></div>
 
-<script src="/lib/swaggerui/swagger-ui-bundle.js"></script>
+<!-- 400KB, and it does not need to block the parse: the page's own
+     script only sets window.onload, which fires after deferred scripts
+     have run. -->
+<script src="/lib/swaggerui/swagger-ui-bundle.js" defer></script>
 <script>
 window.onload = () => {
   window.ui = SwaggerUIBundle({
