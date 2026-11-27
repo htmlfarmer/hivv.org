@@ -8814,8 +8814,15 @@ TYPEmoji = {
 
 def cmd_help(args) -> None:
     """Submit or list help requests, suggestions, complaints, and bugs.
-    hivv help                    — list your submitted items
-    hivv help submit <type> <msg>  — submit feedback (type: suggestion, complaint, help_request, bug, praise, other)
+
+    hivv help list               — list your submitted items (and any reply)
+    hivv help submit <type> <msg> — submit (type: suggestion, complaint,
+                                    help_request, bug, praise, other)
+
+    BARE `hivv help` prints the ROOT help, not this list — main() intercepts
+    it (people type `hivv help` expecting help). The docstring used to claim
+    otherwise, so every document built from it sent readers to a command that
+    printed the wrong thing. The list door is `hivv help list`.
     """
     action = getattr(args, "action", "list")
 
@@ -23298,6 +23305,20 @@ def build_parser() -> argparse.ArgumentParser:
     sp_d.add_argument("action", nargs="?", default="diagnose",
                      choices=["diagnose", "history"],
                      help="diagnose / history (default: diagnose)")
+    # `hivv feedback` — the obvious name, matching the MCP tool an AI calls.
+    # `hivv help list` is the original door and still works, but nobody
+    # guesses it: bare `hivv help` prints the ROOT help, so the list is one
+    # level down behind a word that means something else entirely.
+    sp_fb = sub.add_parser("feedback",
+                           help="list or send feedback (the obvious name for `hivv help list`)")
+    sp_fb.add_argument("action", nargs="?", default="list",
+                       choices=["list", "submit"],
+                       help="list / submit (default: list)")
+    sp_fb.add_argument("type", nargs="?",
+                       choices=["suggestion", "complaint", "help_request", "bug", "praise", "other"],
+                       help="type: suggestion, complaint, help_request, bug, praise, other")
+    sp_fb.add_argument("message", nargs=argparse.REMAINDER, help="your message")
+
     sp_h = sub.add_parser("help",  help="submit help requests, suggestions, complaints, and bugs — or list what you've submitted")
     sp_h.add_argument("action", nargs="?", default="list",
                      choices=["list", "submit"],
@@ -24320,6 +24341,7 @@ COMMANDS = _resolve_cmds({
     "firewall":        "cmd_firewall",
     "donate":          "cmd_donate",
     "help":            "cmd_help",
+    "feedback":        "cmd_help",   # the obvious alias for `hivv help list`
     "up":              "cmd_up",
     "speed":           "cmd_speed",
     "eval":            "cmd_eval",
@@ -24940,8 +24962,9 @@ def _print_sub_help(cmd: str) -> None:
         "remove":    "delete one part of hivv — llm | models | agent | config | logs | state | everything\n  usage: hivv remove [part] [--yes]   bare lists the parts with sizes\n  every delete shows what dies and asks first (non-TTY needs --yes)",
         "salah":     "prayer times for this region + attendance streak + moon (alias: sala)\n  usage: hivv salah [--node BEE] [--lat X --lon Y] [--json]\n  times shown in THIS machine's local clock · attendance = your heartbeats inside the window",
         "watch":     "the watchdog — restart a stuck local service, never in a loop\n  usage: hivv watch [status|on|off|run|reset]\n  watches: tools · llama · agent(report-only)\n  restarts only what you turned ON; 2 failed probes then a restart,\n  growing backoff, and a hard budget → QUARANTINE (a human looks)",
-        "fallback":  "the escape hatch — where to get the CLI if hivv.org is down\n  usage: hivv fallback [--json]\n  prints the GitHub copy of every entry point + how to verify a download\n  works with NO network at all",
         "fallback":  "the escape hatch — where to get the CLI if hivv.org is down\n  usage: hivv fallback [--json]\n  prints the GitHub copy of every entry point (install · rescue · update ·\n  help) + how to verify a download. Works with NO network at all.\n  The automatic update path never contacts GitHub (the flood law).",
+        "feedback":  "list or send feedback — bugs, suggestions, complaints\n  usage: hivv feedback [list|submit] [type] [message]\n  alias: hivv help list · hivv help submit <type> <msg>\n  an MCP client calls the same thing as the tool `feedback`",
+        "help":      "submit or list feedback (this command) — BARE hivv help prints root help\n  usage: hivv help list | hivv help submit <type> <msg>\n  easier spelling: hivv feedback",
         "health":    "GET /api/health",
         "metrics":   "GET /api/control/metrics/global\n  flag: --local   print this bee's local CPU/GPU/MEM/DISK snapshot",
         "nodes":     "table view of all registered nodes (fits your terminal) + hive TOTALS\n  flag: --json   output raw JSON",

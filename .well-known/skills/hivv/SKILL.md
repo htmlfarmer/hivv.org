@@ -47,6 +47,33 @@ Notes:
 - `smart` is an alias for `quality`, `cheap` for `cost`; `hivv route --mode=…` previews the
   same modes without sending anything.
 
+## Reporting a problem or asking for a change
+
+The user found a bug, or wants something different — **file it instead of only saying so**.
+A filed report gets a real id and a status (`open → reviewed → in_progress → resolved`), so it
+is trackable rather than lost in chat.
+
+| Command | What it does |
+|---|---|
+| `hivv submit "what you saw"` | file a bug report |
+| `hivv request "what you want"` | file a suggestion (alias: `hivv suggest`) |
+| `hivv flag <target> "what they're doing"` | flag a node / user / content |
+| `hivv feedback` | list your submissions **and any reply** from the maintainers (alias: `hivv help list`) |
+| `hivv help submit <type> "<msg>"` | typed: suggestion · complaint · help_request · bug · praise |
+| `hivv propose "<idea>"` | a signed proposal the hub screens and files for you |
+
+From an MCP client (OpenCode, Claude Code, …) connected to `https://hivv.org/mcp`, use the
+**`feedback`** tool instead: `action=submit` files it, `action=list` reads it back with the
+status and any reply. It is the same report either way — same visitor identity, same table.
+
+```bash
+hivv submit "chat hangs on an empty message" --json
+hivv feedback                # …and see whether anyone answered
+```
+
+If hivv.org itself is unreachable, the GitHub issue tracker is the fallback — `hivv fallback`
+prints the address (and works with no network at all).
+
 ## Receipts
 
 Every answer says which bee served it:
