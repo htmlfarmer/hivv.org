@@ -3776,6 +3776,33 @@ def _clean_model_name(raw: str) -> str:
         return f"model:{last[:8]}"
     return last
 
+def _llama_slot_ctx(port: int) -> tuple[int, int]:
+    """(n_ctx_slot, n_slots) of a llama.cpp server on this port.
+
+    THE NUMBER NOBODY ELSE CAN GUESS. A llama.cpp server divides its context
+    across its parallel slots: "-c 4096 -np 4" is FOUR slots of 1024 tokens
+    each, and the MODEL NAME says nothing about that -- two boxes serving the
+    same "gemma-4-E2B" can hold 1024 tokens or 131072. The hub used to guess
+    from the name (gemma-4 -> 32768) and routed a 5k-token OpenCode prompt
+    into a 1024-token slot, which answered HTTP 400 "request (4702 tokens)
+    exceeds the available context size (1024 tokens)" (yalla 2026-11-27).
+
+    It reads the SAME endpoint _ctx_size already reads (and already caches
+    for five minutes): one probe path, one cache, no second copy to drift.
+
+    Returns (0, 0) when the server does not say (not llama.cpp, no /props).
+    0 means UNKNOWN, and an unknown window is never published as a number.
+    """
+    _info: dict = {}
+    _ctx = _ctx_size("127.0.0.1", port, margin=0, info=_info)
+    if not _info.get("ok"):
+        return (0, 0)
+    try:
+        return (int(_ctx or 0), int(_info.get("slots") or 0))
+    except (TypeError, ValueError):
+        return (0, 0)
+
+
 def _detect_local_ai() -> list[dict]:
     """Detect running local AI servers (llama.cpp, lm-studio, ollama) and
     return model info.
@@ -3801,11 +3828,17 @@ def _detect_local_ai() -> list[dict]:
             for m in (data.get("data") or []):
                 raw_id = m.get("id", "unknown")
                 clean = _clean_model_name(raw_id)
+                # The REAL window of THIS server, published so the router can
+                # route around a slot that cannot hold the prompt. The model
+                # name is the same on every box; the window is not.
+                ctx_slot, slots = _llama_slot_ctx(port)
                 results.append({
                     "provider": label,
                     "model": clean,
                     "loaded": True,
-                    "port": port
+                    "port": port,
+                    "ctx_slot": ctx_slot,
+                    "slots": slots
                 })
         except urllib.error.HTTPError as e:
             # Distinguish "our LLM demands a key" from "some web app 401s":
@@ -14593,8 +14626,13 @@ def cmd_history(args) -> None:
     print(f"  \033[2mfull ledger: {APP} speeds · board: {APP} iq --board\033[0m\n")
 
 
-def _ctx_size(ip, port, margin=512):
+def _ctx_size(ip, port, margin=512, info: dict | None = None):
     """The REAL per-slot context of an endpoint, from llama-server's /props.
+
+    The 'info' dict (optional) is FILLED IN with {'ok': bool, 'slots': int}:
+    ok=False means the probe did not answer, so a caller must NOT publish a
+    number it did not read; slots is llama.cpp's parallel-slot count (a
+    "-c 4096 -np 4" server is FOUR slots of 1024).
 
     MODULE LEVEL ON PURPOSE: `_do_chat` (hivv chat) and `cmd_node_chat`
     (hivv ask) both need it, and nested copies drift apart.
@@ -14614,6 +14652,10 @@ def _ctx_size(ip, port, margin=512):
     key = (ip, port, margin)
     hit = _CTX_CACHE.get(key)
     if hit is not None and (time.time() - hit[1]) < 300:
+        if info is not None:
+            _ok = bool(hit[2]) if len(hit) > 2 else True
+            _slots = int(hit[3]) if len(hit) > 3 else 0
+            info.update(ok=_ok, slots=_slots)
         return hit[0]
     val = 8192  # safe default when the server doesn't expose ctx size
     try:
@@ -14629,12 +14671,17 @@ def _ctx_size(ip, port, margin=512):
             d = json.loads(r.read().decode("utf-8", errors="replace"))
         gen = d.get("default_generation_settings") or {}
         n_ctx = int(d.get("n_ctx") or gen.get("n_ctx") or 0)
+        slots = int(d.get("total_slots") or 0)
         if n_ctx > 0:
             val = (min(max(n_ctx - margin, 128), 32768) if margin
                    else min(n_ctx, 32768))
     except Exception:
+        if info is not None:
+            info.update(ok=False, slots=0)
         return 8192
-    _CTX_CACHE[key] = (val, time.time())
+    _CTX_CACHE[key] = (val, time.time(), True, slots)
+    if info is not None:
+        info.update(ok=True, slots=slots)
     return val
 
 
