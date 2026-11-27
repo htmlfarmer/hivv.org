@@ -21482,14 +21482,25 @@ def _dial_ensure(port: int | None = None, hub: str | None = None,
         info["how"] = "foreign"
         info["error"] = f"port {port} is in use by another app"
         return info
-    # persistent service first (survives reboot), detached spawn as fallback
+    # persistent service first (survives reboot), detached spawn as fallback.
+    #
+    # The wait is 8s, not 3s. Each poll costs ~0.75s (0.5s healthz timeout +
+    # 0.25s sleep), so the old 3.0s got about FOUR chances to see a shim that
+    # is still importing a 25k-line CLI — on a loaded box (CI, or two test
+    # suites at once) that cold start blows past it and the start reports
+    # "failed" for a shim that was about to answer. It also used to be
+    # tighter than _dial_wait's own 4.0s default, which is how long a wait
+    # should never be shorter than the thing it waits on.
+    #
+    # 8s only ever costs time on the ERROR path (the shim genuinely cannot
+    # start); a healthy shim answers in well under a second.
     svc = _dial_install_service(port, hub, pin)
     info["service"] = svc
-    if _dial_wait(port, seconds=3.0):
+    if _dial_wait(port, seconds=8.0):
         info.update(running=True, how="service", pid=_dial_pid(port))
         return info
     pid = _dial_spawn(port, hub, pin)
-    if _dial_wait(port, seconds=3.0):
+    if _dial_wait(port, seconds=8.0):
         info.update(running=True, how="spawned", pid=pid)
         return info
     info["how"] = "failed"
