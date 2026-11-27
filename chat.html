@@ -643,12 +643,10 @@
       <span class="welcome-icon">🧠</span>
       <h1>Chat with HIVV</h1>
       <p>A distributed AI gateway — your questions routed across a network of intelligent nodes.</p>
-      <div class="suggestions">
-        <div class="suggestion" onclick="sendSuggestion(this)">Explain how the HIVV network works</div>
-        <div class="suggestion" onclick="sendSuggestion(this)">What nodes are currently online?</div>
-        <div class="suggestion" onclick="sendSuggestion(this)">Compare local vs cloud AI providers</div>
-        <div class="suggestion" onclick="sendSuggestion(this)">Help me write a Python script</div>
-      </div>
+      <!-- The suggestions: ONE component, LIVE chips (related to what you
+           are typing — including the stats pivot — plus something different).
+           A chip FILLS the input; it never posts for you. -->
+      <div class="suggestions" id="suggest-row"></div>
     </div>
 
   </div>
@@ -723,6 +721,7 @@
   // ============ INIT ============
   async function init() {
     loadModel();
+    mountSuggestions();
     input.focus();
   }
 
@@ -1057,9 +1056,28 @@
     showToast('💾 Chat exported');
   }
 
-  window.sendSuggestion = function(el) {
-    sendMessage(el.textContent.trim());
-  };
+  // ── THE SUGGESTIONS ── one component, live chips ─────────────────────
+  // A chip FILLS the input; it never posts for you. The conversation view is
+  // READ-ONLY and short: the hub grounds the suggestions in it and stores
+  // nothing.
+  function mountSuggestions() {
+    if (!window.HIVVSuggest) return;
+    var row = document.getElementById('suggest-row');
+    if (!row) return;
+    window.HIVVSuggest.mount({
+      target: row,
+      input: input,
+      getDraft: function() { return input.value; },
+      getConversation: function() {
+        return (conversation || []).slice(-4).map(function(m) { return { role: m.role, content: m.content }; });
+      },
+      onPick: function(text) {
+        input.value = text;
+        input.focus();
+        if (typeof autoResize === 'function') autoResize(input);
+      },
+    });
+  }
 
   function loadModel() {
     const saved = localStorage.getItem('hivv_model') || 'auto';
@@ -1084,5 +1102,6 @@
 })();
 </script>
   <script src="/js/hivv-nav.js"></script>
+  <script src="/js/hivv-suggest.js"></script>
 </body>
 </html>

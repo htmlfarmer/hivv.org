@@ -64,6 +64,31 @@
   const speedSelect = document.getElementById('speedSelect');
   const voiceSelect = document.getElementById('voiceSelect');
 
+  // ── THE SUGGESTIONS ── one component, live chips ─────────────────────
+  // A chip FILLS the input; it never posts for you. The conversation view is
+  // READ-ONLY and short: the hub sees the last few turns to ground the
+  // suggestions, and never stores them.
+  function mountSuggestions() {
+    if (!window.HIVVSuggest) return;
+    const row = document.getElementById('suggest-row');
+    if (!row) return;
+    window.HIVVSuggest.mount({
+      target: row,
+      input: input,
+      getDraft: () => input.value,
+      getConversation: () => {
+        const conv = getActive();
+        if (!conv || !conv.messages || !conv.messages.length) return [];
+        return conv.messages.slice(-4).map((m) => ({ role: m.role, content: m.content }));
+      },
+      onPick: (text) => {
+        input.value = text;
+        input.focus();
+        autoResize(input);
+      },
+    });
+  }
+
   // ── INIT ──
   function init() {
     if (!conversations.length) createConversation();
@@ -76,6 +101,7 @@
     bindDrawerControls();
     setupDragDrop();
     setupClipboardPaste();
+    mountSuggestions();
     input.focus();
   }
 
@@ -924,7 +950,8 @@
     a.download = 'hivv-chat-' + Date.now() + '.txt'; a.click();
     showToast('💾 Exported');
   }
-  function sendSuggestion(el) { sendMessage(el.textContent.trim()); }
+  // (the old hard-coded suggestion chips are gone — the live component
+  //  /js/hivv-suggest.js fills the input instead; see mountSuggestions())
 
   // ── DRAWER ──
   function openDrawer() { drawerOverlay.classList.add('open'); drawer.classList.add('open'); }
@@ -943,7 +970,6 @@
   window.toggleVoiceMode = toggleVoiceMode;
   window.clearChat = clearChat;
   window.exportChat = exportChat;
-  window.sendSuggestion = sendSuggestion;
   window.autoResize = autoResize;
   window.handleKeyDown = handleKeyDown;
   window.toggleMute = toggleMute;

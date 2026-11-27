@@ -535,6 +535,10 @@
       <div class="panel" style="height:calc(100vh - 120px);display:flex;flex-direction:column">
         <div class="panel-header"><h3>💬 AI Chat</h3></div>
         <div class="panel-body" style="flex:1;overflow-y:auto" id="chat-messages"></div>
+        <!-- The suggestions: ONE component, live chips (related to what you are
+             typing — including the stats pivot — plus something different).
+             A chip FILLS the input; it never posts for you. -->
+        <div id="suggest-row" class="hivv-suggest-row" style="padding:0 18px 8px;display:flex;gap:8px;flex-wrap:wrap"></div>
         <div style="padding:12px 18px;border-top:1px solid var(--border);display:flex;gap:8px">
           <input id="chat-input" placeholder="Type a message..." style="flex:1;background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px 14px;color:var(--text);font-size:.9rem;outline:none" onkeydown="if(event.key==='Enter')sendChat()">
           <button class="btn btn-green" onclick="sendChat()">Send</button>
@@ -1414,6 +1418,28 @@ async function refreshFeed() {
 }
 
 // ── CHAT ──
+// ── THE SUGGESTIONS ── one component, live chips ─────────────────────
+// A chip FILLS the input; it never posts for you. The conversation view is
+// READ-ONLY and short: the hub grounds the suggestions in it and stores
+// nothing.
+(function mountSuggestions() {
+  if (!window.HIVVSuggest) return;
+  var row = document.getElementById('suggest-row');
+  if (!row) return;
+  var input = document.getElementById('chat-input');
+  window.HIVVSuggest.mount({
+    target: row,
+    input: input,
+    getDraft: function() { return input ? input.value : ''; },
+    getConversation: function() { return []; },
+    onPick: function(text) {
+      if (!input) return;
+      input.value = text;
+      input.focus();
+    }
+  });
+})();
+
 async function sendChat() {
   const input = document.getElementById('chat-input');
   const msg = input.value.trim();
@@ -1527,5 +1553,6 @@ async function init() {
 init();
 </script>
   <script src="/js/hivv-nav.js"></script>
+  <script src="/js/hivv-suggest.js"></script>
 </body>
 </html>

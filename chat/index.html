@@ -71,12 +71,10 @@
         <span class="welcome-icon">🐝</span>
         <h1>Chat with HIVV</h1>
         <p>A distributed AI gateway — your questions routed across a network of intelligent nodes. Attach files, tune generation params, and control every aspect of the response.</p>
-        <div class="suggestions">
-          <div class="suggestion" onclick="sendSuggestion(this)">Explain how the HIVV network works</div>
-          <div class="suggestion" onclick="sendSuggestion(this)">What nodes are currently online?</div>
-          <div class="suggestion" onclick="sendSuggestion(this)">Help me write a Python script</div>
-          <div class="suggestion" onclick="sendSuggestion(this)">Compare local vs cloud AI providers</div>
-        </div>
+        <!-- The suggestions: ONE component, LIVE chips. Related to what
+             you are typing (including the stats pivot), plus something
+             different. A chip FILLS the input — it never posts for you. -->
+        <div class="suggestions" id="suggest-row"></div>
       </div>
     </div>
 
@@ -239,5 +237,6 @@
 <!-- App -->
 <script src="app.js"></script>
   <script src="/js/hivv-nav.js"></script>
+  <script src="/js/hivv-suggest.js"></script>
 </body>
 </html>
