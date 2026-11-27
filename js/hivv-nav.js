@@ -39,6 +39,7 @@
         { href: '/live/',       icon: '📡',      label: 'Live',       desc: 'the hive doing things, this second' },
         { href: '/logs/',       icon: '📜',      label: 'Logs',       desc: 'the traffic, in the open' },
         { href: '/bugs/',       icon: '🐛',      label: 'Bugs',       desc: 'the open issues, and the bridge failures' },
+        { href: '/proposals/',  icon: '📝',      label: 'Proposals',  desc: 'what the hive is asked to change, and the verdict on each' },
         { href: '/bridge.html', icon: '🌉',      label: 'Bridge',     desc: 'hive-to-hive, the simple explanation' },
         { href: '/connect.html',icon: '🔗',      label: 'Connect',    desc: 'join your hive to the network' },
         { href: '/party/',      icon: '🎉',      label: 'Party',      desc: 'the offline party — for when the network is not' },

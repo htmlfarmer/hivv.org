@@ -125,6 +125,149 @@ paths:
         '503':
           description: Degraded
 
+  # ── the proposal funnel ──────────────────────────────────────────────────
+  /api/proposals:
+    post:
+      tags: [Proposals]
+      summary: File a proposal (signed)
+      description: |
+        Six-stage funnel, in order, each stage able only to make the outcome worse:
+        verify (Ed25519, kind `proposal.create`) → rate limit (per node/day) →
+        dedupe (sha256 of normalized title+body; five bees become ONE proposal with +5 votes)
+        → fastScan (secrets/hard patterns reject) → model board (SAFE/REVIEW/RISKY)
+        → policy gate on `github.write` (auto-file / needs-human / never-file).
+        The node only signs and reports; the hub holds the single GitHub credential.
+        Pass `?dry_run=1` to run EVERY stage and write nothing — no record, no issue,
+        no comment, no grant, and the rate-limit allowance is not spent.
+      parameters:
+        - name: dry_run
+          in: query
+          required: false
+          description: Run the whole funnel and report what WOULD happen; create nothing.
+          schema: { type: string, enum: ['1', 'true'] }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [title, identity, node_id]
+              properties:
+                title: { type: string, maxLength: 300 }
+                body: { type: string, description: 'The written proposal (a .md write-up lands here).' }
+                evidence: { type: string }
+                type: { type: string, enum: [suggestion, bug, patch] }
+                patch: { type: string, description: 'Unified diff, capped at 400 KB.' }
+                node_id: { type: string }
+                red_team: { type: boolean, description: 'LABEL for hostile-testing traffic. Recorded and badged, kept off the public list, NEVER weakens a check.' }
+                identity:
+                  type: object
+                  description: 'Ed25519 envelope {algorithm, public_key, statement{v,kind,node_id,ts,nonce,…}, signature}.'
+      responses:
+        '200':
+          description: Deduped — the same idea already existed; your identity was added as a vote.
+        '201':
+          description: Created (or held for a human, or never filed — see `filing.action`).
+        '403':
+          description: Signature refused (unsigned, forged, wrong kind, wrong node, or replayed).
+        '422':
+          description: The deterministic screen found a hard danger or an embedded secret.
+        '429':
+          description: Per-node daily rate limit.
+    get:
+      tags: [Proposals]
+      summary: List proposals
+      description: |
+        Public list. Hostile-testing (`red_team`) rows are recorded but EXCLUDED by default
+        so the public view and /stats always describe the same population.
+        Every page on https://hivv.org/proposals/ reads this door.
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, default: 50, maximum: 500 }
+        - name: state
+          in: query
+          schema:
+            type: string
+            enum: [draft, studied, authorized, tested, approved, merged, deployed, rejected, expired, failed]
+        - name: red_team
+          in: query
+          description: 'Set to 1 to INCLUDE hostile-testing rows.'
+          schema: { type: string, enum: ['1', 'true'] }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  proposals: { type: array, items: { type: object } }
+                  red_team_excluded: { type: integer, description: 'How many hostile-testing rows were hidden.' }
+
+  /api/proposals/stats:
+    get:
+      tags: [Proposals]
+      summary: Counts by state (same population as the list)
+      responses:
+        '200': { description: OK }
+
+  /api/proposals/mine:
+    get:
+      tags: [Proposals]
+      summary: What this caller sent, and where each got to
+      description: 'Powers `hivv proposals` in the CLI.'
+      responses:
+        '200': { description: OK }
+
+  /api/proposals/contributors:
+    get:
+      tags: [Proposals]
+      summary: Who is changing the hive (ranked by merged proposals)
+      description: 'Separate from /api/hive/contributors (GitHub commits): a bee whose patch merged may have no GitHub identity.'
+      responses:
+        '200': { description: OK }
+
+  /api/proposals/{id}:
+    get:
+      tags: [Proposals]
+      summary: One proposal
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - name: include_patch
+          in: query
+          description: 'Include the full unified diff (never carried by default — up to 400 KB).'
+          schema: { type: string, enum: ['1', 'true'] }
+      responses:
+        '200': { description: OK }
+        '404': { description: Not found }
+
+  /api/proposals/{id}/study:
+    get:
+      tags: [Proposals]
+      summary: The interconnected study of ONE proposal
+      description: |
+        One request, one graph: the hive's reasoning (screen + every model's verdict/risk/notes),
+        every bee that agreed with its honey and rank, the artifacts (issue, PR, branch, files,
+        patch sha256), all five gates with their problems, whether the signed receipt chain still
+        verifies, the honey the merge paid out, and related proposals (same author, same idea).
+        Also served by the MCP tool `proposals` with an `id`.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: OK }
+        '404': { description: Not found }
+
+  /api/proposals/{id}/verify:
+    get:
+      tags: [Proposals]
+      summary: Verify the signed receipt chain
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: The chain verifies }
+        '409': { description: The chain does not verify }
+
   /api/public/status:
     get:
       tags: [Health]
@@ -307,6 +450,59 @@ paths:
                   data: {"delta": "Hello"}
                   data: {"delta": "!"}
                   data: [DONE]
+
+  /api/prefs:
+    get:
+      tags: [Routing]
+      summary: Your routing defaults (verified identity required)
+      description: |
+        K3/K4: stored per-principal defaults. A mode and a privacy value that
+        fill in ONLY the fields a request leaves out — an explicit route.mode
+        from the caller always wins (a pref is a default, never an override).
+        Identity is VERIFIED (signed session · SIGNED hivv_visitor cookie ·
+        proven x-node-secret); the spoofable x-visitor-id header is never a
+        scope. Returns 403 NO_IDENTITY without one.
+      responses:
+        '200':
+          description: scopes + defaults + self_nodes for the caller
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  scopes: { type: array, items: { type: string }, example: ["visitor:v_ab12…"] }
+                  defaults: { type: object, example: { mode: fast, privacy: self } }
+                  self_nodes: { type: array, items: { type: string }, description: "Bees you claimed for privacy self." }
+        '403':
+          description: NO_IDENTITY — no verified scope on this request
+    put:
+      tags: [Routing]
+      summary: Set your routing defaults (mode / privacy / self bees)
+      description: |
+        All fields optional and nullable. privacy 'self' = the "only when I
+        talk" switch: only your own bees (proven node scope or claimed via
+        self_nodes) plus the hub's local model may answer you — other bees
+        and ALL cloud providers are hard-filtered out. self_nodes REPLACES
+        your claim list and must name bees that exist (404 UNKNOWN_NODE).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                mode: { type: string, nullable: true, enum: [balanced, quality, fast, cost, private, trusted] }
+                privacy: { type: string, nullable: true, enum: [localhost, hive, self, any] }
+                self_nodes: { type: array, items: { type: string }, example: ["ashy"] }
+      responses:
+        '200':
+          description: saved — echoes the stored defaults for this scope
+        '400':
+          description: nothing to set, or an unknown mode/privacy value
+        '403':
+          description: NO_IDENTITY — no verified scope on this request
+        '404':
+          description: UNKNOWN_NODE — a self_nodes entry names no such bee
 
   /v1/chat/completions:
     post:

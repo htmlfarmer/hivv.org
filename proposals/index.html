@@ -1,0 +1,679 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>hivv.org — Proposals</title>
+<meta name="description" content="Every proposal the hive has received, what each brain thought of it, and who agreed — in the open.">
+<style>
+:root{--bg:#07090f;--card:#10141f;--line:#1e2637;--txt:#e8ecf4;--dim:#7d8798;--green:#22c55e;--gold:#f5c542;--red:#ff6b6b;--amber:#f5c542}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--txt);font:14.5px/1.55 ui-sans-serif,system-ui,sans-serif}
+.wrap{max-width:1040px;margin:0 auto;padding:26px 18px 70px}
+h1{font-size:25px;margin:0 0 5px}
+.sub{color:var(--dim);margin:0 0 6px;font-size:13.5px}
+.lede{color:var(--dim);font-size:13.5px;margin:0 0 22px;max-width:70ch}
+.lede code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;background:#0b0e16;border:1px solid var(--line);border-radius:5px;padding:1px 6px;color:var(--gold)}
+.stats{display:flex;flex-wrap:wrap;gap:9px;margin:0 0 20px}
+.stat{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:9px 14px;min-width:96px}
+.stat b{display:block;font-size:21px;line-height:1.2}
+.stat span{color:var(--dim);font-size:11.5px;text-transform:uppercase;letter-spacing:.05em}
+.filters{display:flex;flex-wrap:wrap;gap:7px;margin:0 0 16px}
+.filters button{background:#0b0e16;color:var(--dim);border:1px solid var(--line);border-radius:20px;
+  padding:5px 13px;font-size:12.5px;cursor:pointer;font-family:inherit}
+.filters button:hover{color:var(--txt);border-color:#2c3752}
+.filters button.on{background:var(--gold);color:#07090f;border-color:var(--gold);font-weight:700}
+.item{background:var(--card);border:1px solid var(--line);border-radius:11px;padding:15px 17px;margin-bottom:11px}
+.item:hover{border-color:#2c3752}
+.title{font-size:15.5px;font-weight:700;margin:0 0 7px;display:flex;gap:9px;align-items:flex-start;flex-wrap:wrap}
+.title a{color:var(--txt);text-decoration:none}.title a:hover{color:var(--gold)}
+.row{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:8px}
+.lbl{display:inline-block;font-size:11px;padding:1.5px 9px;border-radius:20px;border:1px solid var(--line);
+  color:var(--dim);white-space:nowrap}
+.lbl.safe{color:#4ade80;border-color:#14532d;background:#052e16}
+.lbl.review{color:var(--amber);border-color:#4a3a10;background:#1c1608}
+.lbl.risky{color:var(--red);border-color:#5c1e1e;background:#1c0a0a}
+.lbl.merged{color:#4ade80;border-color:#14532d;background:#052e16}
+.lbl.draft{color:var(--dim)}
+.ev{color:var(--dim);font-size:13px;margin:0 0 9px}
+.ev b{color:#aab4c6;font-weight:600}
+.reply{background:#0b0e16;border:1px solid var(--line);border-left:2px solid var(--gold);
+  border-radius:0 8px 8px 0;padding:9px 13px;margin:9px 0;font-size:13px;color:#c3cbdb}
+.reply .h{color:var(--gold);font-weight:700;font-size:12px;text-transform:uppercase;letter-spacing:.05em;margin-bottom:5px}
+.reply table{width:100%;border-collapse:collapse;font-size:12.5px;margin-top:5px}
+.reply th,.reply td{text-align:left;padding:4px 7px;border-bottom:1px solid var(--line);vertical-align:top}
+.reply th{color:var(--dim);font-weight:600;font-size:11.5px}
+.reply td:first-child{font-family:ui-monospace,Menlo,monospace;font-size:11.5px}
+.body{white-space:pre-wrap;font-size:13px;color:#c3cbdb;background:#0b0e16;
+  border:1px solid var(--line);border-radius:8px;padding:10px 13px;margin:0 0 9px;
+  max-height:150px;overflow:hidden;position:relative}
+.body.open{max-height:none}
+.more{background:none;border:none;color:var(--gold);cursor:pointer;font-size:12.5px;
+  padding:0 0 9px;font-family:inherit}
+.agree{display:flex;flex-wrap:wrap;gap:6px;margin-top:9px;align-items:center}
+.agree .who{font-size:12px;color:var(--dim);background:#0b0e16;border:1px solid var(--line);
+  border-radius:20px;padding:2.5px 10px;font-family:ui-monospace,Menlo,monospace}
+.agree .who i{font-style:normal;color:#4ade80}
+.agree .who i.no{color:var(--red)}
+.foot{margin-top:26px;color:var(--dim);font-size:13px;border-top:1px solid var(--line);padding-top:16px}
+.foot code{font-family:ui-monospace,Menlo,monospace;color:var(--gold)}
+.empty{background:var(--card);border:1px dashed var(--line);border-radius:11px;padding:26px;text-align:center;color:var(--dim)}
+.compose input,.compose select,.compose textarea{width:100%;background:#0b0e16;border:1px solid var(--line);
+  border-radius:8px;color:var(--txt);padding:9px 11px;font-family:inherit;font-size:13.5px;margin:0 0 8px}
+.compose textarea{min-height:120px;resize:vertical}
+.compose input:focus,.compose textarea:focus,.compose select:focus{outline:none;border-color:var(--gold)}
+.compose button{background:var(--gold);color:#07090f;border:none;border-radius:8px;padding:10px 20px;
+  font-weight:700;font-size:14px;cursor:pointer;font-family:inherit}
+.compose button:disabled{opacity:.5;cursor:default}
+.compose .who{font-size:12px;color:var(--dim);font-family:ui-monospace,Menlo,monospace;margin-bottom:10px}
+.ferr{color:var(--red);font-size:13px;margin:6px 0}
+.fok{color:#4ade80;font-size:13px;margin:6px 0}
+.fwarn{color:var(--amber);font-size:13px;margin:6px 0}
+.err{color:var(--red)}
+a{color:var(--gold)}
+</style></head><body>
+<div class="wrap">
+
+<h1>📜 Proposals</h1>
+<p class="sub">everything the hive has been asked to change — and what each brain thought of it</p>
+<p class="lede">Any bee can file a proposal from its own terminal with
+<code>hivv propose "…" --evidence "…"</code> or <code>hivv propose mypro.md</code>.
+It is signed by that bee, screened deterministically, put to a model board, then
+published here. Five bees with the same idea become <b>one</b> proposal carrying
+five votes — one issue beats five.</p>
+
+<div class="item compose" id="compose">
+  <div class="reply"><div class="h">file one, from this browser</div>
+    <div id="compose-status" style="color:#7d8798;font-size:13px">checking Ed25519 support…</div>
+    <div id="compose-form" style="display:none">
+      <div class="who" id="who"></div>
+      <input id="f-title" maxlength="300" placeholder="title — what should change">
+      <select id="f-type">
+        <option value="suggestion">suggestion</option>
+        <option value="bug">bug</option>
+        <option value="patch">patch</option>
+      </select>
+      <input id="f-evidence" maxlength="4000" placeholder="what you saw — a pid, a log line, a date, a symptom">
+      <textarea id="f-body" placeholder="the proposal itself. A paragraph is fine; a pasted write-up works too."></textarea>
+      <button id="f-send">sign &amp; send</button>
+      <div id="f-result"></div>
+    </div>
+  </div>
+</div>
+<div class="item" id="activity">
+  <div class="reply"><div class="h">what is going on</div>
+    <div id="activity-list" style="font-size:13px;color:#7d8798">loading…</div>
+  </div>
+</div>
+<div class="stats" id="stats"></div>
+<div class="filters" id="filters"></div>
+<div id="list"><div class="empty">loading…</div></div>
+
+<div class="foot">
+  <p><b>How to send one.</b> From any machine running the CLI:</p>
+  <p><code>hivv propose "the watchdog never notices a wedged tools server" --evidence "pid 42335, Sep 16"</code></p>
+  <p><code>hivv propose mypro.md</code> &nbsp;·&nbsp; <code>hivv proposals</code> to watch your own</p>
+  <p>Every number on this page is read live from
+  <code>GET /api/proposals</code> — nothing here is typed in by hand.</p>
+</div>
+
+</div>
+
+<script src="/js/hivv-sign.js"></script>
+<script>
+(function () {
+  var ALL = [];
+  var filter = 'all';
+
+  function esc(s) {
+    return String(s == null ? '' : s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  // verdict + state are closed vocabularies, so colouring is a lookup, never
+  // a guess on free text.
+  function vClass(v) {
+    v = String(v || '').toUpperCase();
+    if (v === 'SAFE') return 'safe';
+    if (v === 'RISKY') return 'risky';
+    if (v === 'REVIEW') return 'review';
+    return '';
+  }
+  function sClass(s) {
+    s = String(s || '');
+    if (s === 'merged' || s === 'deployed') return 'merged';
+    return 'draft';
+  }
+
+  function statsBar() {
+    var counts = {}, total = 0, i;
+    for (i = 0; i < ALL.length; i++) {
+      total++;
+      var st = ALL[i].state || 'draft';
+      counts[st] = (counts[st] || 0) + 1;
+    }
+    var safe = 0, review = 0, risky = 0, votes = 0;
+    for (i = 0; i < ALL.length; i++) {
+      var v = String(ALL[i].verdict || '').toUpperCase();
+      if (v === 'SAFE') safe++; else if (v === 'RISKY') risky++; else review++;
+      votes += Number(ALL[i].vote_count) || 0;
+    }
+    // Every figure below is DERIVED from the fetched rows — the law is that a
+    // number claiming to describe now is measured, never typed.
+    var html = '';
+    html += '<div class="stat"><b>' + total + '</b><span>proposals</span></div>';
+    html += '<div class="stat"><b style="color:#4ade80">' + safe + '</b><span>SAFE</span></div>';
+    html += '<div class="stat"><b style="color:#f5c542">' + review + '</b><span>review</span></div>';
+    html += '<div class="stat"><b style="color:#ff6b6b">' + risky + '</b><span>risky</span></div>';
+    html += '<div class="stat"><b>' + votes + '</b><span>votes cast</span></div>';
+    var merged = (counts.merged || 0) + (counts.deployed || 0);
+    html += '<div class="stat"><b style="color:#4ade80">' + merged + '</b><span>merged</span></div>';
+    document.getElementById('stats').innerHTML = html;
+
+    // If the page hit the API's ceiling it does NOT know the true total, so
+    // it must say so rather than publish the capped figure as if it were all.
+    if (total >= 500) {
+      document.getElementById('stats').insertAdjacentHTML('beforeend',
+        '<div class="stat" style="border-color:#4a3a10"><b style="color:#f5c542">500+</b>' +
+        '<span>latest shown</span></div>');
+    }
+
+    var opts = [['all', 'all ' + total]];
+    Object.keys(counts).sort().forEach(function (k) {
+      opts.push([k, k + ' ' + counts[k]]);
+    });
+    document.getElementById('filters').innerHTML = opts.map(function (o) {
+      return '<button data-f="' + esc(o[0]) + '" class="' +
+        (filter === o[0] ? 'on' : '') + '">' + esc(o[1]) + '</button>';
+    }).join('');
+    Array.prototype.forEach.call(document.querySelectorAll('#filters button'), function (b) {
+      b.onclick = function () { filter = b.getAttribute('data-f'); render(); };
+    });
+  }
+
+  function wireToggles() {
+    Array.prototype.forEach.call(document.querySelectorAll('.more'), function (btn) {
+      btn.onclick = function () {
+        var el = document.getElementById('b-' + btn.getAttribute('data-t'));
+        if (!el) return;
+        var open = el.classList.toggle('open');
+        btn.textContent = open ? 'collapse ↑' : 'read the whole proposal ↓';
+      };
+    });
+  }
+
+  function votesRow(p) {
+    var vs = p.votes || [];
+    if (!vs.length) return '';
+    var out = '<div class="agree"><span style="font-size:12px;color:#7d8798">who agreed:</span>';
+    out += vs.map(function (v) {
+      var who = v.node_id || v.principal || 'unknown';
+      var good = String(v.verdict || '').toUpperCase() === 'SAFE';
+      return '<span class="who"><i class="' + (good ? '' : 'no') + '">' +
+        (good ? '✓' : '·') + '</i> ' + esc(who) + '</span>';
+    }).join('');
+    return out + '</div>';
+  }
+
+  function replyBox(p) {
+    var sc = p.screen || {};
+    var rv = p.reviews || [];
+    var ok = rv.filter(function (v) { return v && v.ok; });
+    var body = '<div class="reply"><div class="h">the hive&#39;s review</div>';
+
+    if (ok.length) {
+      body += '<table><tr><th>brain</th><th>verdict</th><th>risk</th><th>notes</th></tr>';
+      body += ok.map(function (v) {
+        return '<tr><td>' + esc(v.model) + '</td><td><b>' + esc(v.verdict) +
+          '</b></td><td>' + esc(v.risk || '—') + '</td><td>' +
+          esc(v.notes || '—') + '</td></tr>';
+      }).join('');
+      body += '</table>';
+    } else {
+      body += '<div>No brain returned a usable verdict — this one is routed for ' +
+        'human review. That is not the same as being approved.</div>';
+    }
+
+    if (sc && sc.risks) {
+      body += '<div style="margin-top:7px;color:#7d8798;font-size:12.5px">deterministic screen: ' +
+        '<b style="color:#c3cbdb">' + esc(sc.verdict || 'n/a') + '</b> · score ' +
+        esc(sc.risks.score) + ' · ' + esc(sc.risks.level || '') + '</div>';
+    }
+    return body + '</div>';
+  }
+
+  function card(p) {
+    var id = esc(p.id || '');
+    var title = esc(p.title || '(untitled)');
+    var url = p.issue_url ? esc(p.issue_url) : '';
+    var h = '<div class="item">';
+    h += '<div class="title"><a href="/api/proposals/' + id + '">' + title + '</a></div>';
+    h += '<div class="row">';
+    h += '<span class="lbl ' + vClass(p.verdict) + '">' + esc(p.verdict || '—') + '</span>';
+    h += '<span class="lbl ' + sClass(p.state) + '">' + esc(p.state || 'draft') + '</span>';
+    h += '<span class="lbl">' + esc(p.type || 'suggestion') + '</span>';
+    h += '<span class="lbl">' + (Number(p.vote_count) || 0) + ' vote(s)</span>';
+    if (p.protected_hit) h += '<span class="lbl risky">protected — a human must sign</span>';
+    h += '</div>';
+
+    if (p.evidence) {
+      h += '<div class="ev"><b>evidence:</b> ' + esc(p.evidence) + '</div>';
+    }
+
+    // THE PROPOSAL ITSELF. A written-up .md arrives as the body — without
+    // it a reviewer would judge a title and a one-line evidence field and
+    // never read what was actually written. Clamped, because some write-ups
+    // are long, and escaped first because it is untrusted text.
+    if (p.body) {
+      h += '<div class="body" id="b-' + id + '">' + esc(p.body) + '</div>';
+      h += '<button class="more" data-t="' + id + '">read the whole proposal ↓</button>';
+    }
+
+    h += replyBox(p);
+    h += votesRow(p);
+
+    h += '<div class="row" style="margin-top:9px;margin-bottom:0">';
+    if (p.node_id) h += '<span class="lbl">from ' + esc(p.node_id) + '</span>';
+    if (p.created_at) {
+      h += '<span class="lbl">' + new Date(Number(p.created_at)).toLocaleString() + '</span>';
+    }
+    if (url) h += '<a class="lbl" href="' + url + '" target="_blank" rel="noopener">issue ↗</a>';
+    // A reviewer cannot judge a diff they cannot see. 400 KB never rides
+    // along on the list read, so it is one flag away.
+    if (Number(p.patch_bytes) > 0) {
+      h += '<a class="lbl" href="/api/proposals/' + id + '?include_patch=1">full diff</a>';
+    }
+    h += '<a class="lbl" href="/api/proposals/' + id + '">json</a>';
+    h += '</div></div>';
+    return h;
+  }
+
+  function render() {
+    var rows = ALL.filter(function (p) {
+      return filter === 'all' || (p.state || 'draft') === filter;
+    });
+    if (!rows.length) {
+      document.getElementById('list').innerHTML =
+        '<div class="empty">No proposals' + (filter === 'all' ? ' yet' : ' in "' + esc(filter) + '"') +
+        '.<br><br>Send the first one: <code style="color:#f5c542">hivv propose "what you noticed" --evidence "what you saw"</code></div>';
+      return;
+    }
+    document.getElementById('list').innerHTML = rows.map(card).join('');
+    // Cards were just rebuilt, so their handlers have to be re-bound —
+    // calling this only from statsBar would leave every toggle dead after
+    // the first filter click.
+    wireToggles();
+  }
+
+
+  // ══ THE STUDY VIEW — /proposals/?id=prop_x ═══════════════════════════════
+  //
+  // One file serves both: the list at /proposals/, the study at ?id=.
+  // A separate .html would have to be added to the shared nav inventory
+  // (every page is), and a drill-down detail page does not belong in a
+  // site menu.
+
+  function esc2(s) { return esc(s); }
+
+  function studyId() {
+    var m = /[?&]id=([^&]+)/.exec(location.search);
+    return m ? decodeURIComponent(m[1]) : null;
+  }
+
+  function backLink() {
+    return '<p style="margin:0 0 16px"><a href="/proposals/">&larr; all proposals</a></p>';
+  }
+
+  function beeChip(b) {
+    if (!b) return '';
+    var h = '<span class="who">' + esc(b.node_id);
+    if (b.bee_rank) h += ' · ' + esc(b.bee_rank);
+    if (typeof b.honey === 'number') h += ' · ' + b.honey + ' honey';
+    h += '</span>';
+    return h;
+  }
+
+  function renderStudy(d) {
+    var p = d.proposal || {};
+    var h = backLink();
+    h += '<div class="item">';
+    h += '<div class="title"><a href="/api/proposals/' + esc(p.id) + '">' +
+         esc(p.title || '(untitled)') + '</a></div>';
+    h += '<div class="row">';
+    h += '<span class="lbl ' + vClass(p.verdict) + '">' + esc(p.verdict || '-') + '</span>';
+    h += '<span class="lbl ' + sClass(p.state) + '">' + esc(p.state || 'draft') + '</span>';
+    h += '<span class="lbl">' + esc(p.type || 'suggestion') + '</span>';
+    h += '<span class="lbl">' + (Number(p.vote_count) || 0) + ' vote(s)</span>';
+    if (p.protected_hit) h += '<span class="lbl risky">protected — a human must sign</span>';
+    if (p.red_team) h += '<span class="lbl risky">RED TEAM</span>';
+    h += '</div>';
+
+    if (p.evidence) h += '<div class="ev"><b>evidence:</b> ' + esc(p.evidence) + '</div>';
+    if (p.body) h += '<div class="body open">' + esc(p.body) + '</div>';
+    h += '</div>';
+
+    // ── the hive's reasoning ──
+    h += '<div class="item"><div class="reply"><div class="h">the hive&#39;s review</div>';
+    var rv = (d.said && d.said.reviews) || [];
+    var ok = rv.filter(function (v) { return v && v.ok; });
+    if (ok.length) {
+      h += '<table><tr><th>brain</th><th>family</th><th>verdict</th><th>risk</th><th>notes</th></tr>';
+      h += ok.map(function (v) {
+        return '<tr><td>' + esc(v.model) + '</td><td>' + esc(v.family) +
+          '</td><td><b>' + esc(v.verdict) + '</b></td><td>' + esc(v.risk || '-') +
+          '</td><td>' + esc(v.notes || '-') + '</td></tr>';
+      }).join('');
+      h += '</table>';
+    } else {
+      h += '<div>No brain returned a usable verdict — routed for human review, ' +
+           'which is not the same as approved.</div>';
+    }
+    var sc = (d.said && d.said.screen) || {};
+    if (sc.risks) {
+      h += '<div style="margin-top:7px;color:#7d8798;font-size:12.5px">deterministic screen: <b style="color:#c3cbdb">' +
+           esc(sc.verdict) + '</b> · score ' + esc(sc.risks.score) + ' · ' + esc(sc.risks.level || '') + '</div>';
+    }
+    h += '</div></div>';
+
+    // ── who agreed, and who they are ──
+    var bees = d.bees || [];
+    if (bees.length) {
+      h += '<div class="item"><div class="reply"><div class="h">the bees behind it</div>';
+      h += '<div class="agree">' + bees.map(beeChip).join('') + '</div>';
+      var mine = (d.related && d.related.same_author) || [];
+      if (mine.length) {
+        h += '<div style="margin-top:9px;font-size:12.5px;color:#7d8798">this author has filed ' +
+             mine.length + ' other proposal(s): ' +
+             mine.map(function (x) {
+               return '<a href="/proposals/?id=' + esc(x.id) + '">' + esc(x.title || x.id) + '</a>';
+             }).join(' · ') + '</div>';
+      }
+      h += '</div></div>';
+    }
+
+    // ── artifacts ──
+    var a = d.artifacts || {};
+    h += '<div class="item"><div class="reply"><div class="h">artifacts</div>';
+    if (a.issue_url) h += '<div><a href="' + esc(a.issue_url) + '" target="_blank" rel="noopener">issue / PR &#8599;</a></div>';
+    if (a.branch) h += '<div style="font-family:ui-monospace,Menlo,monospace">branch: ' + esc(a.branch) + '</div>';
+    if (a.files && a.files.length) {
+      h += '<div style="margin-top:5px">touches ' + a.file_count + ' file(s): ' +
+           a.files.slice(0, 12).map(function (f) { return '<code>' + esc(f) + '</code>'; }).join(' ') +
+           (a.file_count > 12 ? ' …' : '') + '</div>';
+    }
+    if (a.patch_sha256) {
+      h += '<div style="margin-top:5px;color:#7d8798;font-size:12.5px">patch sha256: ' +
+           esc(a.patch_sha256) + ' · ' + esc(a.patch_bytes) + ' bytes</div>';
+      h += '<div style="margin-top:5px"><a href="/api/proposals/' + esc(p.id) +
+           '?include_patch=1">view the full diff</a></div>';
+    }
+    h += '</div></div>';
+
+    // ── the gates + the receipt chain ──
+    var g = d.gates || {};
+    h += '<div class="item"><div class="reply"><div class="h">the gates</div>';
+    // The gate order is the machine's law (api/lib/proposal.js). The page
+    // cannot import a Node module, so it is stated here — and the response
+    // carries the real statuses, so only the ORDER is mirrored.
+    var GATES = ['study', 'authorize', 'test', 'approve', 'merge'];
+    h += GATES.map(function (name) {
+      var gate = g[name] || {};
+      var st = gate.status || 'pending';
+      var col = st === 'passed' ? '#4ade80' : (st === 'failed' ? '#ff6b6b' : '#7d8798');
+      var s = '<div style="margin:3px 0"><b style="color:' + col + '">' +
+              esc(name) + '</b> — ' + esc(st);
+      if (gate.problems && gate.problems.length) {
+        s += '<div style="color:#ff9b9b;font-size:12.5px">' +
+             gate.problems.map(esc).join('; ') + '</div>';
+      }
+      return s + '</div>';
+    }).join('');
+    var ch = d.chain || {};
+    h += '<div style="margin-top:8px;font-size:12.5px;color:' +
+         (ch.ok ? '#4ade80' : '#ff6b6b') + '">receipt chain: ' +
+         (ch.ok ? 'verifies' : 'BROKEN — ' + esc((ch.problems || []).join('; '))) + '</div>';
+    if (ch.chain_hash) {
+      h += '<div style="font-family:ui-monospace,Menlo,monospace;font-size:11.5px;color:#7d8798">' +
+           esc(ch.chain_hash) + '</div>';
+    }
+    h += '</div></div>';
+
+    // ── what shipped ──
+    if (d.shipped) {
+      h += '<div class="item"><div class="reply"><div class="h">what shipped</div>';
+      h += '<div>merged — this proposal earned <b>' +
+           esc(d.shipped.amount == null ? '?' : d.shipped.amount) + ' honey</b> for ' +
+           esc(d.shipped.to || 'the author') + '.</div>';
+      h += '<div style="margin-top:5px;color:#7d8798">it lands on every bee with its next <code>hivv update</code>.</div>';
+      h += '</div></div>';
+    }
+
+    // ── related ──
+    var rel = d.related || {};
+    if ((rel.same_idea || []).length) {
+      h += '<div class="item"><div class="reply"><div class="h">the same idea, elsewhere</div>' +
+           '<div>' + rel.same_idea.map(function (x) {
+             return '<a href="/proposals/?id=' + esc(x.id) + '">' + esc(x.title || x.id) + '</a>';
+           }).join(' · ') + '</div></div></div>';
+    }
+
+    h += '<div class="foot"><p>raw: <a href="/api/proposals/' + esc(p.id) +
+         '">json</a> · <a href="/api/proposals/' + esc(p.id) +
+         '/verify">verify receipts</a></p></div>';
+
+    document.getElementById('list').innerHTML = h;
+    document.getElementById('stats').innerHTML = '';
+    document.getElementById('filters').innerHTML = '';
+  }
+
+  function loadStudy(id) {
+    fetch('/api/proposals/' + encodeURIComponent(id) + '/study', { cache: 'no-store' })
+      .then(function (r) {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+      })
+      .then(renderStudy)
+      .catch(function (e) {
+        document.getElementById('list').innerHTML =
+          backLink() + '<div class="empty err">Could not load that study (' +
+          esc(e.message) + ').</div>';
+      });
+  }
+
+  // ══ COMPOSE — file a proposal from the browser, SIGNED ══════════════════
+  //
+  // The browser mints its own Ed25519 keypair (hivv-sign.js) and signs the
+  // same canonical statement the CLI signs, so there is no unsigned side
+  // door: identity.verifyIncoming treats a browser bee exactly like a CLI bee.
+
+  function hexNonce() {
+    var a = new Uint8Array(8);
+    crypto.getRandomValues(a);
+    return Array.prototype.map.call(a, function (b) {
+      return b.toString(16).padStart(2, '0');
+    }).join('');
+  }
+
+  function initCompose() {
+    var status = document.getElementById('compose-status');
+    var form = document.getElementById('compose-form');
+    if (!status || !form) return;
+    var S = window.HIVVSign;
+    if (!S) {
+      status.textContent = 'signing module missing — file it from the terminal instead.';
+      return;
+    }
+    S.subtleEd25519Supported().then(function (ok) {
+      if (!ok) {
+        status.innerHTML = 'This browser has no Ed25519 support, so it cannot sign. ' +
+          'File it from the terminal instead: <code>hivv propose "title" --evidence "..."</code>';
+        return null;
+      }
+      return S.loadIdentity().then(function (id) {
+        status.textContent = '';
+        form.style.display = '';
+        document.getElementById('who').textContent =
+          'signing as ' + id.node_id + '  ·  ' + id.principal +
+          (id.fresh ? '   (a new identity, created just now)' : '');
+        wireSend(id);
+      });
+    }).catch(function (e) {
+      status.innerHTML = 'Could not set up a key: ' + esc(e.message) +
+        ' — file it from the terminal: <code>hivv propose …</code>';
+    });
+  }
+
+  function wireSend(identity) {
+    var btn = document.getElementById('f-send');
+    var out = document.getElementById('f-result');
+    if (!btn) return;
+    btn.onclick = function () {
+      var title = document.getElementById('f-title').value.trim();
+      var body = document.getElementById('f-body').value.trim();
+      var evidence = document.getElementById('f-evidence').value.trim();
+      var type = document.getElementById('f-type').value;
+      if (!title) { out.innerHTML = '<div class="ferr">a title is required</div>'; return; }
+      if (!body && !evidence) {
+        out.innerHTML = '<div class="ferr">say something — a body, or at least the evidence</div>';
+        return;
+      }
+      btn.disabled = true;
+      out.innerHTML = '<div class="fwarn">signing…</div>';
+
+      var statement = {
+        v: 1, kind: 'proposal.create', node_id: identity.node_id,
+        ts: Math.floor(Date.now() / 1000), nonce: hexNonce(),
+        type: type,
+        title: title.slice(0, 300),
+        body: body.slice(0, 40000),
+        evidence: evidence.slice(0, 4000),
+      };
+
+      window.HIVVSign.sign(identity, statement).then(function (block) {
+        return fetch('/api/proposals', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            node_id: identity.node_id, identity: block,
+            type: type, title: statement.title,
+            body: statement.body, evidence: statement.evidence,
+          }),
+        }).then(function (r) {
+          return r.json().catch(function () { return {}; }).then(function (j) {
+            return { status: r.status, body: j };
+          });
+        });
+      }).then(function (res) {
+        out.innerHTML = renderSent(res);
+        if (res.status === 201 || res.body.deduped) {
+          setTimeout(function () { location.reload(); }, 2200);
+        }
+      }).catch(function (e) {
+        out.innerHTML = '<div class="ferr">' + esc(e.message) + '</div>';
+      }).then(function () {
+        btn.disabled = false;
+      });
+    };
+  }
+
+  function renderSent(res) {
+    var b = res.body || {};
+    if (b.deduped) {
+      return '<div class="fok">≡ the same idea was already here — your identity was added ' +
+        'as vote #' + esc(b.votes) + '.</div>';
+    }
+    if (res.status === 201 && b.proposal) {
+      var filing = b.filing || {};
+      var h = '<div class="fok">✓ sent — ' + esc(b.verdict || '') + ' · ' +
+        esc(filing.action || '') + '</div>';
+      if (filing.action === 'needs_human') {
+        h += '<div class="fwarn">held for a human.</div>';
+      }
+      h += '<div style="font-size:12.5px;margin-top:5px"><a href="/proposals/?id=' +
+        esc(b.proposal.id) + '">see the study →</a></div>';
+      return h;
+    }
+    var probs = b.problems || [];
+    var msg = probs.length ? probs.join('; ') : (b.error || ('HTTP ' + res.status));
+    return '<div class="ferr">' + esc(msg) + '</div>';
+  }
+  // ══ ACTIVITY — a chronological stream of what the hive just did ══════════
+  //
+  // Every event is derived from a timestamp we already store, so the feed
+  // can never disagree with the records it summarizes.
+  var FEED_ICONS = {
+    filed: '\ud83d\udddd', voted: '\u2713', gate: '\u2699',
+    merged: '\u2705', published: '\ud83d\dd17',
+  };
+
+  function loadActivity() {
+    var el = document.getElementById('activity-list');
+    if (!el) return;
+    fetch('/api/proposals/activity?limit=25', { cache: 'no-store' })
+      .then(function (r) {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+      })
+      .then(function (d) {
+        var ev = d.events || [];
+        if (!ev.length) { el.textContent = 'nothing yet'; return; }
+        el.innerHTML = ev.map(function (e) {
+          var icon = FEED_ICONS[e.kind] || '\u00b7';
+          var line;
+          if (e.kind === 'filed') {
+            line = '<b>' + esc(e.node_id || 'someone') + '</b> filed \u201c' +
+              esc(e.title) + '\u201d';
+          } else if (e.kind === 'voted') {
+            line = '<b>' + esc(e.by || '?') + '</b> ' +
+              (e.verdict ? 'agreed with ' + esc(e.verdict) + ' on ' : 'voted on ') +
+              '\u201c' + esc(e.title) + '\u201d';
+          } else if (e.kind === 'gate') {
+            line = 'gate <b>' + esc(e.gate) + '</b> passed for \u201c' +
+              esc(e.title) + '\u201d';
+          } else if (e.kind === 'merged') {
+            line = '<b>merged</b> \u2014 \u201c' + esc(e.title) + '\u201d lands on every bee';
+          } else if (e.kind === 'published') {
+            line = 'published to <a href="' + esc(e.issue_url) + '" target="_blank" rel="noopener">the issue tracker</a> \u2014 \u201c' +
+              esc(e.title) + '\u201d';
+          } else {
+            line = esc(e.kind) + ' \u2014 \u201c' + esc(e.title) + '\u201d';
+          }
+          return '<div style="margin:4px 0">' + icon + ' ' + line +
+            ' <a href="/proposals/?id=' + esc(e.id) + '" style="font-size:11.5px">\u2192</a>' +
+            '<span style="color:#5c667a;font-size:11.5px"> ' +
+            new Date(Number(e.at)).toLocaleString() + '</span></div>';
+        }).join('');
+      })
+      .catch(function (e) { el.textContent = 'unreachable: ' + e.message; });
+  }
+  function fail(msg) {
+    document.getElementById('list').innerHTML =
+      '<div class="empty err">' + esc(msg) + '</div>';
+  }
+
+  // One file, two views: ?id= is a STUDY, otherwise the list. Both fetch
+  // live — a number claiming to describe now is measured, never typed.
+  initCompose();
+  loadActivity();
+
+  var wanted = studyId();
+  if (wanted) {
+    loadStudy(wanted);
+  } else {
+    // 500 is the API's ceiling. Anything less would silently under-count once
+    // the hive has filed more than the page asked for.
+    fetch('/api/proposals?limit=500', { cache: 'no-store' })
+      .then(function (r) {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+      })
+      .then(function (d) {
+        ALL = (d && d.proposals) || [];
+        statsBar();
+        render();
+      })
+      .catch(function (e) {
+        fail('Could not reach the proposals API (' + e.message + '). Reload to try again.');
+      });
+  }
+})();
+</script>
+<script src="/js/hivv-nav.js"></script>
+</body></html>

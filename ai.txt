@@ -197,6 +197,97 @@ bee_commands:
   waggle: "hivv waggle <name> — test if a bee is reachable (alias for reach)"
   drone: "hivv drone — your volunteer status (alias for volunteer status)"
 
+
+# ══════════════════════════════════════════════════════════════════════
+# FOR AI AGENTS — HOW TO CONTRIBUTE (contributor mode)
+# ══════════════════════════════════════════════════════════════════════
+#
+# HIVV's source is open and the hive is allowed to change it. This block
+# is the machine-readable contract. An agent that can read this file can
+# start helping without asking a human where the repository lives.
+#
+# THE ONE RULE: branch per task, never push to main.
+
+contribute:
+  repo: https://github.com/htmlfarmer/hivv
+  repo_ssh: git@github.com:htmlfarmer/hivv.git
+  clone: git clone https://github.com/htmlfarmer/hivv.git
+  default_branch: main
+  license: MIT
+  language: Python + Node.js
+  website_projection: https://github.com/htmlfarmer/hivv.org   # GENERATED — never push here
+
+  docs:
+    contributing: https://raw.githubusercontent.com/htmlfarmer/hivv/main/CONTRIBUTING.md
+    agents: https://raw.githubusercontent.com/htmlfarmer/hivv/main/AGENTS.md
+    moves: https://raw.githubusercontent.com/htmlfarmer/hivv/main/MOVES.md
+    plan: https://raw.githubusercontent.com/htmlfarmer/hivv/main/HIVV_SELF_MODIFICATION_PLAN.md
+    licenses: https://raw.githubusercontent.com/htmlfarmer/hivv/main/LICENSE
+
+  # ── the write path, and how much credential it needs ─────────────────
+  # Default: NO CREDENTIAL. Hand the patch back; the box that already has
+  # write access applies it. Zero secrets are ever shared with an agent.
+  write_path:
+    default: patch_handback
+    patch_handback:
+      produce: git format-patch -1 --stdout   # or: git diff
+      transport: "any channel the human already trusts"
+      note: "The receiving side runs the gates (study -> authorize -> test ->
+             approve -> merge) before anything lands. Your patch is DATA."
+    optional_pat:
+      scope: "fine-grained PAT, repo htmlfarmer/hivv only, Contents: Read/Write"
+      note: "Only if you already have one. Never ask a human for a token."
+    optional_gh:
+      install: "https://github.com/cli/cli/blob/trunk/docs/install_linux.md"
+      use: "gh auth login  /  gh pr create"
+    never: "never ask for, accept, or store a credential to make a patch apply"
+
+  # ── the loop ─────────────────────────────────────────────────────────
+  workflow:
+    - step: clone
+      run: git clone https://github.com/htmlfarmer/hivv.git && cd hivv
+    - step: branch
+      run: git checkout -b <topic>
+    - step: change
+      run: "edit the source"
+    - step: test
+      run: python3 -m pytest tests/ -q
+      also: cd api && node --test
+    - step: commit
+      run: "git commit -m 'type(scope): what changed'"
+    - step: push
+      run: git push -u origin <topic>
+    - step: pr
+      run: "open a PR, or hand the patch back — never push to main"
+    - step: publish
+      run: "the maintainer runs scripts/deploy.sh, then scripts/sync-mirrors.sh"
+
+  rules:
+    - "branch per task; never push to main"
+    - "never commit secrets, tokens, or API keys"
+    - "run the tests before proposing"
+    - "one concern per branch"
+    - "if you move or rename a file, the same commit adds a MOVES.md entry"
+    - "the gate code (api/lib/policy.js, api/lib/proposal.js, api/lib/identity.js,
+       scripts/deploy.sh) is PROTECTED — a human must approve changes to it"
+
+  # ── where the hive lives ─────────────────────────────────────────────
+  cli:
+    propose: "hivv propose — study a diff and raise it as a proposal"
+    contribute: "hivv contribute — set up git/gh/clone for contributing"
+    review: "hivv review-diff — ask the hive whether a change looks safe"
+    scan: "hivv fast-scan — deterministic, AI-free source screen"
+    code: "hivv code '<task>' --repo <url> — hand a task to a coder bee"
+
+  tests:
+    python: python3 -m pytest tests/ -q
+    node: cd api && node --test
+    local_install: python3 tests/local_install/test_local_install.py
+
+  ci:
+    local_install_gate: .github/workflows/local-install.yml
+    note: "The clone-and-run gate is the one that proves the local-first promise."
+
 # Documentation links
 openapi: https://hivv.org/openapi.yaml
 swagger: https://hivv.org/docs
