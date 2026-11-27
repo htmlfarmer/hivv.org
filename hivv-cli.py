@@ -22469,13 +22469,6 @@ def cmd_dial(args) -> None:
     failover). on/off = start/stop + auto-start across reboots; status =
     probe (exit 0 running, 1 not). --pin locks one bee (or a raw endpoint
     URL) with no rotation and no hub fallback."""
-    # STARTUP CANARY — printed before ANY other work in this command.
-    # The macOS CI runner reported "alive, 0 bytes, 10s" for weeks, which is
-    # indistinguishable between "stuck importing the module" and "stuck
-    # inside cmd_dial". This line bisects the two on the very next run: if it
-    # appears, main() dispatched and the hang is downstream; if it does not,
-    # the hang is in the import.
-    print(f"[{APP}] dial starting (pid {os.getpid()})", flush=True)
     what = (getattr(args, "dial_cmd", None) or "run").lower()
     port = int(getattr(args, "port", 0) or _dial_port())
     hub = (getattr(args, "hub", None) or HUB).rstrip("/")
@@ -22484,6 +22477,15 @@ def cmd_dial(args) -> None:
     if what in ("on", "off", "status"):
         _dial_manage(what, port, hub, pin)
         return
+
+    # STARTUP CANARY — the FIRST thing the server path does, after the
+    # management commands have returned (they must stay parseable: status
+    # output and setup --json are asserted on). The macOS CI runner reported
+    # "alive, 0 bytes, 10s" for weeks, which cannot distinguish "stuck
+    # importing the module" from "stuck inside cmd_dial". This line bisects
+    # them on the very next run: present -> main() dispatched and the hang is
+    # downstream; absent -> the hang is in the import.
+    print(f"[{APP}] dial starting (pid {os.getpid()})", flush=True)
 
     # ── stable shim id: sha1(user@host)[:12], written once ────────
     shim_file = STATE_DIR / "dial-id"
