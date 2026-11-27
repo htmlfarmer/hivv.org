@@ -10387,7 +10387,7 @@ _FAST_HARD = [
     ("shell_true", "critical", "shell command interpolation", re.compile(r"shell\s*=\s*True")),
     ("os_system", "critical", "shell command execution", re.compile(r"\bos\.system\s*\(")),
     ("subprocess_shell", "high", "process spawning", re.compile(r"\bsubprocess\.(?:run|call|Popen|check_output|check_call)\s*\(")),
-    ("destructive_delete", "critical", "recursive/destructive delete", re.compile(r"\b(?:shutil\.rmtree|fs\.rmSync|rm\s+-[rf])\b")),
+    ("destructive_delete", "critical", "recursive/destructive delete", re.compile(r"\b(?:shutil\.rmtree|fs\.rmSync|rm\s+-[a-z]*[rf][a-z]*)\b")),
     ("credential_paths", "critical", "credential file access", re.compile(r"(?:^|[\s\"'=])(?:/etc/(?:passwd|shadow)|\.ssh/id_[a-z0-9]+|~?/\.aws/credentials)", re.M | re.I)),
     ("env_secret_read", "high", "secret environment variable read", re.compile(r"\b(?:os\.environ(?:\.get)?\s*\(?\s*['\"][^'\"]*(?:SECRET|TOKEN|PASSWORD|KEY)|process\.env\.[A-Z_]*(?:SECRET|TOKEN|PASSWORD|KEY))")),
     ("network_socket", "high", "network request", re.compile(r"\b(?:socket\.socket|socket\.create_connection|requests\.(?:get|post|put|delete)|urllib\.request\.urlopen|httpx\.(?:get|post))\s*\(")),
@@ -22922,6 +22922,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--title", default=None, help="one-line title")
     sp.add_argument("--summary", default=None, help="what this change does")
     sp.add_argument("--votes", type=int, default=1, help="how many models to ask (default 1)")
+    sp.add_argument("--no-review", action="store_true",
+                    help="deterministic scan only — do not ask a model (a human then signs)")
     sp.add_argument("--dry-run", action="store_true", help="scan and review only — send nothing")
     sp.add_argument("--patch-out", default=None, help="write the patch here (the credential-free handback)")
     sp.add_argument("--push", action="store_true", help="push a branch and open a PR (needs git + gh)")
@@ -23850,7 +23852,9 @@ def cmd_propose(args) -> None:
             base_sha = out.strip().splitlines()[0].strip()
 
     hard, secrets, injection = _propose_scan(files, diff)
-    votes = _propose_votes(diff, int(getattr(args, "votes", 1) or 1))
+    no_review = bool(getattr(args, "no_review", False))
+    votes = [] if no_review else _propose_votes(
+        diff, int(getattr(args, "votes", 1) or 1))
 
     evidence = {
         "hard_danger": hard,
@@ -23859,6 +23863,11 @@ def cmd_propose(args) -> None:
         "votes": [{"verdict": v["verdict"], "model": v["model"],
                    "family": v["family"]} for v in votes],
     }
+    if no_review:
+        # Nobody reviewed it — say so out loud. The hub then demands a human
+        # before it lands, which is the honest answer to a clean scan that
+        # no model ever looked at.
+        evidence["deterministic_only"] = True
     blocked = bool(hard or secrets)
     risky = [v for v in votes if v["verdict"] == "RISKY"]
 
@@ -23868,17 +23877,20 @@ def cmd_propose(args) -> None:
         print(f"  repo:  {getattr(args, 'repo', None) or _PROPOSE_REPO}")
         print(f"  base:  {base_sha or '(unknown)'}")
         print()
-        for label, items in (("hard danger", hard), ("secret", secrets),
-                             ("injection", injection)):
+        for kind, items in (("hard danger", hard), ("secret", secrets),
+                            ("injection", injection)):
             if items:
-                print(f"  \033[31m✗\033[0m {label}: {len(items)} finding(s)")
+                print(f"  \033[31m✗\033[0m {kind}: {len(items)} finding(s)")
                 for it in items[:8]:
-                    label = (it.get("label") or it.get("pattern")
-                             or it.get("finding") or "?")
+                    what = (it.get("label") or it.get("pattern")
+                            or it.get("finding") or "?")
                     sample = it.get("sample") or it.get("match") or ""
-                    print(f"      {it.get('file', '')} {label}"
+                    print(f"      {it.get('file', '')} {what}"
                           + (f" - {sample[:70]}" if sample else ""))
-        if votes:
+        if no_review:
+            print("  \033[33m○\033[0m review skipped by request "
+                  "(--no-review) — a human then signs")
+        elif votes:
             for v in votes:
                 colour = {"SAFE": "\033[32m", "REVIEW": "\033[33m",
                           "RISKY": "\033[31m"}.get(v["verdict"], "")
@@ -23887,25 +23899,8 @@ def cmd_propose(args) -> None:
             print("  \033[33m○\033[0m no model answered the review")
         print()
 
-    if getattr(args, "dry_run", False):
-        if blocked or risky:
-            verdict = "BLOCKED"
-        elif injection:
-            # A diff-borne directive is a low-confidence signal: it does not
-            # kill the change, it routes it to a human.
-            verdict = "NEEDS A HUMAN"
-            print("    the diff carries something that could be read as an")
-            print("    instruction - a human signs this one before it lands.")
-        else:
-            verdict = "CLEAR"
-        if not as_json:
-            print(f"  \033[1m{verdict}\033[0m — dry run, nothing was sent")
-        else:
-            print(json.dumps({"dry_run": True, "verdict": verdict,
-                              "files": files, "evidence": evidence}, indent=2))
-        sys.exit(0 if verdict == "CLEAR" else 1)
-
-    # ── the credential-free artifact ──────────────────────────────────────
+    # the credential-free artifact -- written FIRST, so a dry run still
+    # produces the thing the contributor actually needs to hand back
     patch_out = getattr(args, "patch_out", None)
     if patch_out:
         try:
@@ -23914,6 +23909,28 @@ def cmd_propose(args) -> None:
                 print(f"  patch written: {patch_out}")
         except Exception as e:
             warn(f"could not write {patch_out}: {e}")
+
+    if getattr(args, "dry_run", False):
+        if blocked:
+            verdict = "BLOCKED"
+        elif injection or risky:
+            # Low-confidence signals: a diff-borne directive, or a model that
+            # voted RISKY. Neither kills the change - both route it to a
+            # human. Only the deterministic findings block.
+            verdict = "NEEDS A HUMAN"
+            if injection:
+                print("    the diff carries something that could be read as an")
+                print("    instruction - a human signs this one before it lands.")
+            if risky:
+                print("    a reviewer voted RISKY - a human signs this one too.")
+        else:
+            verdict = "CLEAR"
+        if not as_json:
+            print(f"  \033[1m{verdict}\033[0m — dry run, nothing was sent")
+        else:
+            print(json.dumps({"dry_run": True, "verdict": verdict,
+                              "files": files, "evidence": evidence}, indent=2))
+        sys.exit(0 if verdict == "CLEAR" else 1)
 
     body = {
         "repo": getattr(args, "repo", None) or _PROPOSE_REPO,
@@ -24229,8 +24246,7 @@ COMMANDS = _resolve_cmds({
     "restart":         "cmd_restart",
     "status":          "cmd_status",
     "boot":            "cmd_boot",
-    "sync":            "cmd_sync",
-    "propose":         "cmd_propose",
+    "sync":            "cmd_sync",    "propose":         "cmd_propose",
     "contribute":      "cmd_contribute",
     "contributors":    "cmd_contributors",
     "review-diff":     "cmd_review_diff",
@@ -24927,7 +24943,7 @@ def _print_sub_help(cmd: str) -> None:
         "contributors": "who is helping — contributors by commit count\n  flag: --github  read straight from the GitHub API",
         "sync":      "two-way check against GitHub (read-only — never merges)\n  flag: --fetch  fetch origin first\n  flag: --check  exit non-zero when out of sync (for CI)",
         "review-diff": "ask the hive whether a change looks safe\n  usage: hivv review-diff [--staged] [--file F] [--votes N]",
-        "propose":    "raise a change to the SOURCE, with the evidence\n  usage: hivv propose [--staged] [--file F] [--patch FILE] [--stdin]\n         [--votes N] [--dry-run] [--patch-out FILE] [--push] [--no-tests]\n  the gates: scan (deterministic) -> review (the hive) -> authorize (policy)\n         -> test (the BASELINE suite) -> approve (quorum) -> merge (a human)\n  no credential is needed - the patch is handed back to a machine that can write\n  --push opens a PR only if git + gh are ALREADY set up and authenticated",
+        "propose":    "raise a change to the SOURCE, with the evidence\n  usage: hivv propose [--staged] [--file F] [--patch FILE] [--stdin]\n         [--votes N] [--no-review] [--dry-run] [--patch-out FILE]\n         [--push] [--no-tests]\n  the gates: scan (deterministic) -> review (the hive) -> authorize (policy)\n         -> test (the BASELINE suite) -> approve (quorum) -> merge (a human)\n  no credential is needed - the patch is handed back to a machine that can write\n  --push opens a PR only if git + gh are ALREADY set up and authenticated",
         "contribute": "set up to change the source of the hive\n  usage: hivv contribute [--install] [--clone DIR] [--json]\n  reports git / gh / clone / gh auth, and prints the whole loop\n  nothing here needs a credential - that is the point",
         "node":      "show details about a specific node\n  usage: hivv node <name> [--json]\n  also: hivv node chat <bee> <msg>  → chats with that bee instead",
         "ask":       "chat with ONE bee — or a whole HIVE when the name is a brand/domain\n  usage: hivv ask <bee|hive> <message>\n  e.g.  hivv ask yalla \"whas up\"  ·  hivv ask kwaai \"whats up homes?\"\n  alias: talk · node-chat\n  note: `hivv chat <msg>` asks this hive's own bees; `hivv ask <hive>` crosses the bridge",
