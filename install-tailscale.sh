@@ -391,8 +391,33 @@ main() {
             warn "tailscaled is not running — start it with: sudo systemctl start tailscaled"
         fi
         say ""
-        say "  next:  sudo tailscale up"
-        say "         hivv firewall --apply --mode tailscale"
+        # Same four-step ladder as the CLI and install-hivv.sh: a finished
+        # step must name what follows it, or the reader stops at the line
+        # they just read (the gap this whole feature exists to close).
+        if have tailscale && tailscale ip -4 >/dev/null 2>&1; then
+            _next=4
+        else
+            _next=2
+        fi
+        say "  tailscale setup — four steps, in order:"
+        if [ "$_next" -le 2 ]; then
+            say "    1. hivv install tailscale"
+            say "  -> 2. sudo tailscale up             — then OPEN the URL it prints"
+            say "    3. tailscale ip -4               — expect a 100.x.x.x address"
+            say "    4. hivv firewall --apply --mode tailscale"
+        else
+            say "    1. hivv install tailscale              done"
+            say "    2. sudo tailscale up                   done"
+            say "    3. tailscale ip -4                     done"
+            say "  -> 4. hivv firewall --apply --mode tailscale"
+        fi
+        say ""
+        if [ "$_next" -le 2 ]; then
+            say "  next:  sudo tailscale up"
+        else
+            say "  next:  hivv firewall --apply --mode tailscale"
+            say "  then:  hivv reach <this-bee>   (from ANOTHER machine)"
+        fi
         return 0
     fi
 
