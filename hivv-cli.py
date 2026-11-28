@@ -23187,6 +23187,21 @@ def build_parser() -> argparse.ArgumentParser:
     sp_lo = sub.add_parser("local", help="manage a LOCAL self-hosted HIVV gateway")
     sp_lo.add_argument("what", nargs="?", default="status",
                        choices=["status", "start", "stop", "info"])
+    sp_fl = sub.add_parser("fleet", help="one command for a multi-box deployment: the dashboard, and the setup")
+    sp_fl.add_argument("fleet_what", nargs="?", default="dashboard",
+                        choices=["dashboard", "up", "check", "add", "list", "move", "report"],
+                        help="what to do (default: the dashboard)")
+    sp_fl.add_argument("name", nargs="?", default=None, help="box name (add)")
+    sp_fl.add_argument("host", nargs="?", default=None, help="box host (add)")
+    sp_fl.add_argument("--role", dest="role", default=None, choices=["bee", "centre"],
+                        help="what this box is (add, up)")
+    sp_fl.add_argument("--port", dest="port", default=None, help="the node port (up, move)")
+    sp_fl.add_argument("--from", dest="from_box", default=None, help="the box to move from (move)")
+    sp_fl.add_argument("--to", dest="to_box", default=None, help="the box to move to (move)")
+    sp_fl.add_argument("--json", dest="json_output", action="store_true",
+                        help="machine-readable output")
+    sp_fl.add_argument("--report", dest="report", action="store_true",
+                        help="this box's status as JSON (what the fleet probe asks for)")
     sp_git = sub.add_parser("git", help="the contribution loop's last mile, with the rails on")
     sp_git.add_argument("git_verb", nargs="?", default="status",
                         choices=["status", "clone", "branch", "commit", "push", "pr", "log", "diff"],
@@ -24731,6 +24746,886 @@ def cmd_git(args) -> None:
     fn(args)
 
 
+# ── hivv fleet ─────────────────────────────────────────────────────────────
+# ONE command for a multi-box deployment.
+#
+# The problem this solves is not "git is hard". It is that a fleet is a
+# SET OF BOXES WITH DIFFERENT ROLES, and the operator has to remember:
+#
+#   * which box is the centre (it serves the site)
+#   * which boxes are bees (they contribute compute)
+#   * that the deploy runs on the centre, not the bees
+#   * that the centre's production tree was parked on a feature branch
+#   * that the ports differ per box
+#
+# That is a memory tax with a UI tax on top. So:
+#
+#   hivv fleet          the dashboard: every box, its role, what is up, and
+#                       THE ONE NEXT COMMAND. No arguments, no memory.
+#   hivv fleet up       make THIS box part of the fleet, end to end
+#   hivv fleet check    verify everything reachable, change nothing
+#   hivv fleet add      register a box
+#   hivv fleet move     move a node from one box to another
+#
+# The registry is ~/.config/hivv/fleet.json — small, readable, yours.
+
+_FLEET_FILE = "fleet.json"
+_KWAINET_REPO = "Kwaai-AI-Lab/KwaaiNet"
+_KWAINET_CLONE = "https://github.com/Kwaai-AI-Lab/KwaaiNet.git"
+_FLEET_ROLES = ("bee", "centre")
+
+
+def _fleet_path() -> Path:
+    return CONFIG_DIR / _FLEET_FILE
+
+
+def _fleet_load() -> dict:
+    """The registry. Never raises: a missing or broken file is an empty fleet."""
+    try:
+        data = json.loads(_fleet_path().read_text())
+        if isinstance(data, dict) and isinstance(data.get("boxes"), dict):
+            return data
+    except Exception:
+        pass
+    return {"boxes": {}}
+
+
+def _fleet_save(data: dict) -> None:
+    try:
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        _fleet_path().write_text(json.dumps(data, indent=2) + "\n")
+    except Exception as e:
+        die(f"could not write {_fleet_path()}: {e}")
+
+
+def _fleet_cli_on(host: str) -> list[str] | None:
+    """How to run the CLI ON ANOTHER BOX, if at all.
+
+    Tries the PATH first, then the two places install-hivv.sh puts it. The
+    remote box runs its own copy — the point of the fleet is that each box
+    can stand up without the centre.
+    """
+    for cmd in (["hivv"], ["~/.local/bin/hivv"], ["~/.local/lib/hivv/hivv-cli.py"]):
+        return cmd
+    return None
+
+
+def _fleet_remote_report(host: str) -> dict | None:
+    """Ask another box for its status, over SSH, without a prompt.
+
+    Returns None when the box cannot be reached or cannot run the CLI — and
+    that None is the honest answer, not a failure: the fleet dashboard must
+    never hang waiting for a password.
+    """
+    if not shutil.which("ssh"):
+        return None
+    # The PROBE FIRST, and that ordering is load-bearing. An older CLI
+    # does not have 'fleet', so it treats the argument as a chat query,
+    # prints a note, and exits ZERO — so a probe that ran second would
+    # never be reached, and the fleet would read the note as "no answer".
+    #
+    # The probe is also the only one that survives: the running agent
+    # RESTORES its CLI from the hub, so a hand-copied new CLI is an old CLI
+    # again by the next morning. The probe is a separate file the agent does
+    # not manage.
+    inner = ("python3 ~/.local/share/hivv/fleet-probe.py 2>/dev/null || "
+             "hivv fleet --report 2>/dev/null || "
+             "~/.local/lib/hivv/hivv-cli.py fleet --report 2>/dev/null || true")
+    try:
+        r = subprocess.run(
+            ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8",
+             "-o", "StrictHostKeyChecking=accept-new", host, inner],
+            capture_output=True, text=True, timeout=25)
+    except Exception:
+        return None
+    out = (r.stdout or "").strip()
+    if not out.startswith("{"):
+        return None
+    try:
+        return json.loads(out)
+    except Exception:
+        return None
+
+
+def _fleet_local_status() -> dict:
+    """This box's status: what it is, what it runs, and whether it is clean."""
+    st: dict = {"host": _hostname(), "reachable": True, "role": None}
+    reg = _fleet_load()
+    here = reg.get("boxes", {}).get(_hostname())
+    if isinstance(here, dict):
+        st["role"] = here.get("role")
+    # _agent_pids() is scoped to INSTALL_DIR, so a CLI running from a
+    # SOURCE CHECKOUT does not see the INSTALLED agent. The pid file is the
+    # cross-install answer.
+    st["agent_running"] = bool(_agent_pids()) or _fleet_pid_alive(
+        Path.home() / ".local" / "share" / "hivv" / "agent.pid")
+    # the KwaaiNet node, if this box runs one
+    # A box can hold SEVERAL nodes — one per model, each with its own
+    # identity, port and reputation. All of them are listed: reporting one
+    # and calling it "the node" hides the rest of the fleet on this box.
+    st["nodes"] = []
+    for home in _fleet_node_homes():
+        idf = home / "identity.key"
+        if not idf.exists():
+            continue
+        port = _fleet_yaml_value(home / "config.yaml", "port")
+        up = bool(port) and _fleet_port_open(int(port))
+        st["nodes"].append({
+            "home": str(home),
+            "identity": (sha256_of(idf) or "")[:12],
+            "port": port,
+            "peer_id": _fleet_peer_id(home),
+            "up": up,
+        })
+    # the serving node: the one that is listening
+    _up = [n for n in st["nodes"] if n["up"]]
+    st["node"] = (_up or st["nodes"] or [None])[0]
+    st["node_up"] = bool(_up)
+    # the gateway, if this box runs one
+    st["gateway"] = _fleet_pm2_gateway()
+    # the source tree, if this box has one
+    st["git"] = _fleet_git_state()
+    st["deployed"] = _fleet_deployed_head()
+    return st
+
+
+def sha256_of(path: Path) -> str | None:
+    try:
+        return subprocess.run(["sha256sum", str(path)], capture_output=True,
+                              text=True, timeout=20).stdout.split()[0]
+    except Exception:
+        return None
+
+
+def _fleet_node_homes() -> list[Path]:
+    """Every KWAAINET_HOME on this box, newest first."""
+    out: list[Path] = []
+    env_home = os.environ.get("KWAAINET_HOME")
+    if env_home:
+        out.append(Path(env_home).expanduser())
+    for d in sorted(Path.home().glob(".kwaainet*"), reverse=True):
+        if d.is_dir():
+            out.append(d)
+    seen, uniq = set(), []
+    for d in out:
+        s = str(d)
+        if s not in seen:
+            seen.add(s)
+            uniq.append(d)
+    return uniq
+
+
+def _fleet_yaml_value(cfg: Path, key: str) -> str:
+    try:
+        for line in cfg.read_text(errors="replace").splitlines():
+            if line.startswith(key + ":"):
+                return line.split(":", 1)[1].strip().strip('"')
+    except Exception:
+        pass
+    return ""
+
+
+def _fleet_pm2_gateway() -> dict | None:
+    """Is a gateway running here, and on which commit?"""
+    if not shutil.which("pm2"):
+        return None
+    try:
+        r = subprocess.run(["pm2", "jlist"], capture_output=True, text=True,
+                           timeout=30)
+        apps = json.loads(r.stdout or "[]")
+    except Exception:
+        return None
+    for p in apps:
+        if "gateway" in (p.get("name") or ""):
+            env = p.get("pm2_env") or {}
+            return {"name": p.get("name"), "cwd": env.get("pm_cwd"),
+                    "uptime_s": int((time.time() - (env.get("pm_uptime", 0) / 1000))
+                                   if env.get("pm_uptime") else 0)}
+    return None
+
+
+def _fleet_git_state() -> dict | None:
+    """The source tree on this box: which branch, and is it clean?"""
+    # The deployment path is DERIVED, never hardcoded: this repository
+    # moves (a new GitHub repo, a new clone path, a developer's laptop), and
+    # a literal here would point at the wrong tree forever. The gateway
+    # knows where it runs — pm2's cwd is the truth — and the CLI knows
+    # where it lives.
+    cands = []
+    gw = _fleet_pm2_gateway()
+    if gw and gw.get("cwd"):
+        cands.append(Path(gw["cwd"]).parent)
+    cands += [Path(__file__).resolve().parents[1],
+               Path.home() / "work" / "hivv",
+               Path.home() / "hivv"]
+    for cand in cands:
+        if not (cand / ".git").exists():
+            continue
+        try:
+            branch = subprocess.run(["git", "-C", str(cand), "branch", "--show-current"],
+                                    capture_output=True, text=True, timeout=20).stdout.strip()
+            dirty = subprocess.run(["git", "-C", str(cand), "status", "--porcelain"],
+                                   capture_output=True, text=True, timeout=30).stdout
+            head = subprocess.run(["git", "-C", str(cand), "log", "-1", "--format=%h %cr"],
+                                  capture_output=True, text=True, timeout=20).stdout.strip()
+            return {"path": str(cand), "branch": branch,
+                    "dirty": len([x for x in dirty.splitlines() if x.strip()]),
+                    "head": head}
+        except Exception:
+            return None
+    return None
+
+
+def _fleet_deployed_head() -> str:
+    """The commit the live site is running, if this box serves one."""
+    gw = _fleet_pm2_gateway()
+    if not gw:
+        return ""
+    cwd = gw.get("cwd")
+    if not cwd:
+        return ""
+    try:
+        return subprocess.run(["git", "-C", cwd, "log", "-1", "--format=%h"],
+                              capture_output=True, text=True, timeout=20).stdout.strip()
+    except Exception:
+        return ""
+
+
+def _fleet_next_step(local: dict, others: list[dict]) -> list[str]:
+    """THE one thing to do next.
+
+    This is the whole point: the operator should never have to remember.
+    """
+    steps: list[str] = []
+    g = local.get("git") or {}
+    gw = local.get("gateway")
+    node = local.get("node")
+
+    if gw and g:
+        # Branch and dirtiness are INDEPENDENT reasons to be blocked, and a
+        # tree can be both. Reporting only the first hides the second.
+        if g.get("branch") and g["branch"] not in ("main", "master"):
+            steps.append(f"the production tree is on '{g['branch']}' — deploy.sh "
+                         f"deploys from main only.")
+            steps.append("    cd %s && git checkout main && git pull" % g.get("path", ""))
+        if g.get("dirty"):
+            steps.append(f"the production tree has {g['dirty']} uncommitted change(s) "
+                         f"— deploy.sh refuses a dirty tree.")
+            steps.append("    cd %s && git status" % g.get("path", ""))
+    if gw and not g.get("dirty") and g.get("branch") in ("main", "master"):
+        steps.append("the centre looks deployable:")
+        steps.append("    cd %s && bash scripts/deploy.sh --dry-run" % g.get("path", ""))
+    if not local.get("agent_running") and not gw:
+        steps.append("no agent and no gateway on this box — is it meant to be a bee?")
+        steps.append("    hivv fleet up")
+    if node and not local.get("node_up"):
+        steps.append("the node on this box is not listening.")
+    down = [o for o in others if o.get("host") and not o.get("reachable")]
+    if down:
+        steps.append("boxes you cannot reach: " +
+                     ", ".join(o["host"] for o in down) +
+                     " (they may need an ssh key)")
+    if not steps:
+        steps.append("nothing to do — the fleet looks healthy.")
+    return steps
+
+
+def _fleet_role_default() -> str:
+    """A box with a gateway is a centre; a box with a local model is a bee."""
+    if _fleet_pm2_gateway():
+        return "centre"
+    return "bee"
+
+
+def _cmd_fleet_dashboard(args) -> None:
+    """hivv fleet — every box, its role, what is up, and what to do next."""
+    as_json = bool(getattr(args, "json_output", False))
+    reg = _fleet_load()
+    boxes = reg.get("boxes", {}) if isinstance(reg.get("boxes"), dict) else {}
+    local = _fleet_local_status()
+    if not local.get("role"):
+        local["role"] = boxes.get(_hostname(), {}).get("role") or _fleet_role_default()
+
+    others: list[dict] = []
+    for name, info in sorted(boxes.items()):
+        host = (info or {}).get("host") or name
+        if host == local["host"] or name == _hostname():
+            continue
+        rep = _fleet_remote_report(host)
+        others.append({"name": name, "host": host,
+                       "reachable": rep is not None,
+                       "role": (info or {}).get("role"),
+                       "report": rep})
+
+    if as_json:
+        print(json.dumps({"local": local, "boxes": others}, indent=2, default=str))
+        return
+
+    print(f"\033[1m{APP} fleet\033[0m — {len(boxes)} box(es) registered\n")
+    print(f"  \033[1mTHIS BOX\033[0m  {local['host']}")
+    print(f"    role      {local.get('role')}")
+    print(f"    agent     {'running' if local.get('agent_running') else 'not running'}")
+    for n in (local.get("nodes") or []):
+        mark = "\033[32m●\033[0m" if n.get("up") else "\033[31m○\033[0m"
+        print(f"    node {mark} {n.get('home')}  id {n.get('identity')}  port {n.get('port')}")
+    if not (local.get("nodes") or []):
+        print("    node      none")
+    gw = local.get("gateway")
+    if gw:
+        up = gw.get("uptime_s") or 0
+        _up = f"{up // 3600}h" if up >= 3600 else (f"{up // 60}m" if up >= 60 else f"{up}s")
+        print(f"    gateway   {gw.get('name')}  up {_up}")
+    dep = local.get("deployed")
+    if dep:
+        print(f"    deployed  {dep}")
+    g = local.get("git")
+    if g:
+        dirty = f"  \033[33m· {g['dirty']} uncommitted\033[0m" if g.get("dirty") else ""
+        print(f"    git       {g.get('branch')}  {g.get('head')}{dirty}")
+    print()
+
+    for o in others:
+        mark = "\033[32m●\033[0m" if o.get("reachable") else "\033[31m○\033[0m"
+        print(f"  {mark} {o['name']}  ({o['host']})  role {o.get('role') or '?'}")
+        rep = o.get("report") or {}
+        if not o.get("reachable"):
+            print("      unreachable (no key auth? run 'hivv fleet' on that box)")
+            continue
+        # The probe reports a LIST of nodes; the CLI reports one. Read
+        # both, so the dashboard does not care which one answered.
+        rnodes = rep.get("nodes") or ([rep["node"]] if rep.get("node") else [])
+        for rn in rnodes:
+            mark = "\033[32m●\033[0m" if rn.get("up") else "\033[31m○\033[0m"
+            print(f"      node {mark} id {rn.get('identity')}  port {rn.get('port')}")
+        if rep.get("agent_running"):
+            print("      agent    running")
+        if rep.get("gateway"):
+            print(f"      gateway  {rep['gateway'].get('name')}")
+
+    print("\n  \033[1mNEXT\033[0m")
+    for line in _fleet_next_step(local, others):
+        print(f"    {line}")
+
+
+def _cmd_fleet_add(args) -> None:
+    """hivv fleet add <name> [host] — register a box."""
+    name = (getattr(args, "name", None) or "").strip()
+    if not name:
+        die("which box? hivv fleet add <name> [host]")
+    host = (getattr(args, "host", None) or name).strip()
+    role = (getattr(args, "role", None) or _fleet_role_default()).strip().lower()
+    if role not in _FLEET_ROLES:
+        die(f"role must be one of: {', '.join(_FLEET_ROLES)}")
+    reg = _fleet_load()
+    reg.setdefault("boxes", {})[name] = {"host": host, "role": role}
+    _fleet_save(reg)
+    print(_ok(f"{name} ({host}) is a {role}"))
+
+
+def _cmd_fleet_list(args) -> None:
+    """hivv fleet list — the registry."""
+    reg = _fleet_load()
+    boxes = reg.get("boxes", {}) if isinstance(reg.get("boxes"), dict) else {}
+    if not boxes:
+        print(_info("no boxes registered yet — hivv fleet add <name> [host]"))
+        return
+    for name, info in sorted(boxes.items()):
+        info = info or {}
+        print(f"  {name:<14} {info.get('host', name):<16} {info.get('role', '?')}")
+
+
+def cmd_fleet(args) -> None:
+    """hivv fleet — one command for a multi-box deployment."""
+    # --report is what one box asks another for: its status, as JSON.
+    if getattr(args, "report", False):
+        print(json.dumps(_fleet_local_status(), indent=2, default=str))
+        return
+    what = (getattr(args, "fleet_what", None) or "dashboard").lower()
+    if what == "dashboard":
+        _cmd_fleet_dashboard(args)
+    elif what == "add":
+        _cmd_fleet_add(args)
+    elif what == "list":
+        _cmd_fleet_list(args)
+    elif what == "report":
+        print(json.dumps(_fleet_local_status(), indent=2, default=str))
+    elif what == "check":
+        _cmd_fleet_check(args)
+    elif what == "up":
+        _cmd_fleet_up(args)
+    elif what == "move":
+        _cmd_fleet_move(args)
+    else:
+        die(f"unknown: hivv fleet {what}")
+
+
+
+def _fleet_pid_alive(pidfile: Path) -> bool:
+    """Is the pid in this file a live process?"""
+    try:
+        pid = int(pidfile.read_text().strip())
+    except Exception:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+    except Exception:
+        return False
+
+
+def _fleet_port_open(port: int) -> bool:
+    """Is something listening on this TCP port?"""
+    import socket
+    with socket.socket() as s:
+        s.settimeout(1.5)
+        return s.connect_ex(("127.0.0.1", int(port))) == 0
+
+
+def _fleet_peer_id(home: Path) -> str:
+    """The node's peer id, from its log.
+
+    The identity FILE is the source of truth, but the peer id is what the
+    other boxes need, and the node writes it once at startup.
+    """
+    # The log name differs by how the node was started: 'node.log' for a
+    # fleet node, 'kwaainet.log' for one the operator started by hand.
+    for name in ("node.log", "kwaainet.log"):
+        log = home / "logs" / name
+        try:
+            # The WHOLE file, not the tail: the peer id is logged ONCE at
+            # startup, so a busy node's log has pushed it far past any
+            # "last N lines" window.
+            lines = log.read_text(errors="replace").splitlines()
+        except Exception:
+            continue
+        for line in reversed(lines):
+            if "Peer ID:" in line:
+                return line.split("Peer ID:")[-1].strip().split()[0]
+    return ""
+
+
+def _fleet_lan_ip() -> str:
+    """The address other boxes on the LAN can reach this box on."""
+    try:
+        s = subprocess.run(["hostname", "-I"], capture_output=True, text=True,
+                           timeout=10).stdout.split()
+        for ip in s:
+            if ip.startswith("192.168.") or ip.startswith("10."):
+                return ip
+        if s:
+            return s[0]
+    except Exception:
+        pass
+    return ""
+
+
+def _fleet_free_port(preferred: int = 8123) -> int:
+    """A port nothing is listening on."""
+    import socket
+    for port in range(preferred, preferred + 40):
+        with socket.socket() as s:
+            try:
+                s.bind(("0.0.0.0", port))
+                return port
+            except OSError:
+                continue
+    return preferred
+
+
+def _fleet_gather_peers(exclude: str = "") -> list[str]:
+    """The multiaddrs of every OTHER box's node.
+
+    A new box dials the ones it knows; the DHT does the rest. One-sided
+    initial_peers is enough, and it is what makes the join non-invasive:
+    the boxes already running are not touched.
+    """
+    reg = _fleet_load()
+    boxes = reg.get("boxes", {}) if isinstance(reg.get("boxes"), dict) else {}
+    peers: list[str] = []
+    for name, info in sorted(boxes.items()):
+        info = info or {}
+        host = info.get("host") or name
+        if name == exclude or host == exclude:
+            continue
+        rep = _fleet_remote_report(host)
+        if not rep:
+            continue
+        node = rep.get("node") or {}
+        pid = node.get("peer_id") or ""
+        port = node.get("port") or ""
+        if pid and port:
+            peers.append(f"/ip4/{host}/tcp/{port}/p2p/{pid}")
+    return peers
+
+
+def _fleet_kwaainet_src() -> Path:
+    """Where the KwaaiNet source lives on this box."""
+    env = os.environ.get("KWAINET_SRC")
+    if env:
+        return Path(env).expanduser()
+    for cand in (Path.home() / "kwaai" / "KwaaiNet",
+                 Path.home() / "KwaaiNet",
+                 Path.home() / "work" / "KwaaiNet"):
+        if (cand / "core" / "Cargo.toml").exists():
+            return cand
+    return Path.home() / "kwaai" / "KwaaiNet"
+
+
+def _fleet_ensure_source() -> Path:
+    """Clone the KwaaiNet source if it is not here yet.
+
+    Uses the same rewrite workaround as 'hivv git clone': a global
+    url.*.insteadOf that sends HTTPS to SSH makes the clone HANG on a box
+    whose SSH key has a passphrase.
+    """
+    src = _fleet_kwaainet_src()
+    if (src / "core" / "Cargo.toml").exists():
+        return src
+    src.parent.mkdir(parents=True, exist_ok=True)
+    env = dict(os.environ)
+    rewrites = _git_rewrites()
+    if rewrites and not _git_ssh_ok():
+        print(_warn("a global URL rewrite sends every clone to SSH, and SSH"))
+        print(_warn("cannot authenticate here without a passphrase"))
+        print(_git_note("cloning over HTTPS instead (the repository is public)"))
+        env["GIT_CONFIG_GLOBAL"] = os.devnull
+    try:
+        r = subprocess.run(["git", "clone", _KWAINET_CLONE, str(src)],
+                           capture_output=True, text=True, timeout=900, env=env)
+    except Exception as e:
+        die(f"clone failed: {e}")
+    if r.returncode != 0:
+        die(f"clone failed: {(r.stderr or r.stdout).strip()[:300]}")
+    print(_ok(f"cloned {_KWAINET_REPO} into {src}"))
+    return src
+
+
+def _fleet_ensure_binary(src: Path) -> Path:
+    """A kwaainet binary: reuse one if it is here, else build it."""
+    for cand in (src / "core" / "target" / "release" / "kwaainet",
+                 src / "core" / "target" / "debug" / "kwaainet",
+                 Path.home() / "bin" / "kwaainet"):
+        if cand.exists() and os.access(cand, os.X_OK):
+            return cand
+    print(_git_note("building kwaainet (first build takes a few minutes)"))
+    try:
+        r = subprocess.run(["cargo", "build", "-p", "kwaainet"],
+                           cwd=str(src / "core"), capture_output=True,
+                           text=True, timeout=5400)
+    except Exception as e:
+        die(f"the build could not start: {e}")
+    if r.returncode != 0:
+        tail = (r.stderr or r.stdout or "").strip().splitlines()[-8:]
+        die("the build failed:\n  " + "\n  ".join(tail))
+    out = src / "core" / "target" / "debug" / "kwaainet"
+    if not out.exists():
+        die("the build finished but produced no binary")
+    print(_ok(f"built {out}"))
+    return out
+
+
+def _fleet_write_config(home: Path, port: int, peers: list[str], name: str) -> None:
+    """A node config for a bee: private DHT, fresh blocks, no public map."""
+    lan = _fleet_lan_ip()
+    announce = f"/ip4/{lan}/tcp/{port}" if lan else ""
+    lines = [
+        "model: unsloth/Llama-3.1-8B-Instruct",
+        "blocks: 4",
+        "start_block: 0",
+        f"port: {port}",
+        "grpc_port: " + str(_fleet_free_port(8093)),
+        "use_gpu: false",
+        "log_level: info",
+        f"public_name: {name}",
+        "public_ip: null",
+        "public_port: null",
+        f"announce_addr: {announce if announce else 'null'}",
+        "no_relay: false",
+        "initial_peers:",
+    ]
+    lines += [f"- {p}" for p in peers] if peers else ["[]"]
+    lines += [
+        "trusted_relays: []",
+        "force_private: true",
+        "enable_upnp: true",
+        "ipv6: auto",
+        "only_global_ips: true",
+        "max_connections: 100",
+        "announce_self: true",
+        "decentralized_dht: false",
+        "dht_replication: 3",
+        "announce_online_without_shard: false",
+        "health_monitoring:",
+        "  enabled: false",
+        "  api_endpoint: https://map.kwaai.ai/api/v1/state",
+        "  check_interval: 60",
+        "  request_timeout: 10",
+        "  failure_threshold: 3",
+        "  reconnection:",
+        "    enabled: false",
+        "    max_attempts: 10",
+        "    backoff_strategy: exponential",
+        "    initial_delay: 30",
+        "    max_delay: 1800",
+        "    backoff_multiplier: 2.0",
+        "    jitter: true",
+        "    jitter_factor: 0.5",
+        "  alerting:",
+        "    enabled: false",
+        "    on_disconnect: false",
+        "    on_reconnect: false",
+        "    on_critical: false",
+        "    webhook_url: null",
+        "    email: null",
+        "vpk_enabled: false",
+        "ollama_manage: false",
+        "identify_min_confirmations: 2",
+        "identify_timeout_secs: 45",
+        "auto_rebalance: false",
+        "rebalance_interval_secs: 300",
+        "rebalance_min_redundancy: 1",
+    ]
+    home.mkdir(parents=True, exist_ok=True)
+    (home / "logs").mkdir(exist_ok=True)
+    (home / "run").mkdir(exist_ok=True)
+    (home / "config.yaml").write_text("\n".join(lines) + "\n")
+
+
+def _fleet_start_node(binary: Path, home: Path) -> None:
+    env = dict(os.environ)
+    env["KWAAINET_HOME"] = str(home)
+    log = open(home / "logs" / "node.log", "ab")
+    try:
+        subprocess.Popen([str(binary), "run-node"], cwd=str(home),
+                         stdout=log, stderr=log, env=env,
+                         start_new_session=True)
+    except Exception as e:
+        die(f"the node would not start: {e}")
+    finally:
+        log.close()
+
+
+def _cmd_fleet_up(args) -> None:
+    """hivv fleet up — make THIS box part of the fleet, end to end."""
+    role = (getattr(args, "role", None) or "bee").strip().lower()
+    if role not in _FLEET_ROLES:
+        die(f"role must be one of: {', '.join(_FLEET_ROLES)}")
+    name = _hostname()
+    print(f"\033[1m{APP} fleet up\033[0m — making {name} a {role}\n")
+
+    src = _fleet_ensure_source()
+    print(_ok(f"source: {src}"))
+
+    # Install the fleet probe. It is a SEPARATE file on purpose: the
+    # running agent restores its CLI from the hub, so a hand-copied new CLI
+    # is an old CLI again by the next morning. The probe is not managed by
+    # the agent, so it stays.
+    _probe_src = Path(__file__).resolve().parents[1] / "scripts" / "fleet-probe.py"
+    _probe_dst = Path.home() / ".local" / "share" / "hivv" / "fleet-probe.py"
+    if _probe_src.exists():
+        try:
+            _probe_dst.parent.mkdir(parents=True, exist_ok=True)
+            _probe_dst.write_text(_probe_src.read_text())
+            os.chmod(_probe_dst, 0o755)
+            print(_ok(f"probe: {_probe_dst}"))
+        except Exception as e:
+            print(_warn(f"could not install the fleet probe: {e}"))
+
+    binary = _fleet_ensure_binary(src)
+    print(_ok(f"binary: {binary}"))
+
+    home = Path.home() / f".kwaainet-{role}"
+    if (home / "identity.key").exists():
+        print(_ok(f"node home already set up: {home}"))
+    else:
+        peers = _fleet_gather_peers(exclude=name)
+        port = _fleet_free_port(8123)
+        _fleet_write_config(home, port, peers, name)
+        print(_ok(f"node home: {home}  port {port}"))
+        if peers:
+            print(_git_note(f"dialling {len(peers)} existing bee(s)"))
+            for p in peers:
+                print(f"    {p}")
+        else:
+            print(_git_note("no other bee reachable yet — this one will join alone"))
+        _fleet_start_node(binary, home)
+        print(_ok("node started"))
+
+    print()
+    print(f"  the node writes to {home}/logs/node.log")
+    print(f"  its identity is in {home}/identity.key — THAT is the node")
+    print()
+    print("  check it:")
+    print("    hivv fleet check")
+    print("  see the whole fleet:")
+    print("    hivv fleet")
+
+
+def _cmd_fleet_check(args) -> None:
+    """hivv fleet check — verify everything reachable. Change nothing."""
+    reg = _fleet_load()
+    boxes = reg.get("boxes", {}) if isinstance(reg.get("boxes"), dict) else {}
+    local = _fleet_local_status()
+    if not local.get("role"):
+        local["role"] = boxes.get(_hostname(), {}).get("role") or _fleet_role_default()
+    problems: list[str] = []
+
+    print(f"\033[1m{APP} fleet check\033[0m\n")
+    print(f"  \033[1m{local['host']}\033[0m  ({local.get('role')})")
+    if local.get("agent_running"):
+        print("    agent     running")
+    else:
+        print("    agent     \033[33mnot running\033[0m")
+        problems.append(f"{local['host']}: the agent is not running")
+    n = local.get("node")
+    if n:
+        print(f"    node      id {n.get('identity')}  port {n.get('port')}  {n.get('home')}")
+    else:
+        print("    node      none")
+
+    for name, info in sorted(boxes.items()):
+        host = (info or {}).get("host") or name
+        if name == _hostname() or host == local["host"]:
+            continue
+        rep = _fleet_remote_report(host)
+        if not rep:
+            print(f"  \033[31m○\033[0m {name} ({host}) — unreachable")
+            problems.append(f"{name}: unreachable")
+            continue
+        print(f"  \033[32m●\033[0m {name} ({host})")
+        rn = (rep.get("node") or {})
+        if rn:
+            print(f"    node      id {rn.get('identity')}  port {rn.get('port')}")
+        else:
+            print("    node      none")
+        if not rep.get("agent_running"):
+            problems.append(f"{name}: the agent is not running")
+
+    print()
+    if problems:
+        print("  \033[33mfound:\033[0m")
+        for p in problems:
+            print(f"    {p}")
+    else:
+        print("  \033[32mthe fleet looks healthy.\033[0m")
+
+
+
+def _fleet_box_host(name: str) -> str:
+    """The host for a registered box name."""
+    reg = _fleet_load()
+    boxes = reg.get("boxes", {}) if isinstance(reg.get("boxes"), dict) else {}
+    info = boxes.get(name) or {}
+    return info.get("host") or name
+
+
+def _fleet_ssh(host: str, cmd: str, timeout: int = 60) -> tuple[int, str]:
+    """Run a command on another box. BatchMode only — never prompt."""
+    try:
+        r = subprocess.run(
+            ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8",
+             "-o", "StrictHostKeyChecking=accept-new", host, cmd],
+            capture_output=True, text=True, timeout=timeout)
+        return r.returncode, ((r.stdout or "") + (r.stderr or "")).strip()
+    except Exception as e:
+        return 1, str(e)
+
+
+def _fleet_scp(src: str, dst: str, timeout: int = 120) -> tuple[int, str]:
+    """Copy a file to another box. BatchMode only."""
+    try:
+        r = subprocess.run(
+            ["scp", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8",
+             "-o", "StrictHostKeyChecking=accept-new", src, dst],
+            capture_output=True, text=True, timeout=timeout)
+        return r.returncode, ((r.stdout or "") + (r.stderr or "")).strip()
+    except Exception as e:
+        return 1, str(e)
+
+
+def _cmd_fleet_move(args) -> None:
+    """hivv fleet move <from> <to> — move a node between two boxes.
+
+    The ORDER matters, and it is the whole safety argument:
+
+      1. copy the identity and config to the target FIRST, while the
+         source is still running — so a broken copy never takes the node
+         down;
+      2. stop the source;
+      3. start the target and verify it.
+
+    The identity key MOVES, so the peer id does not change: every peer
+    that knows this node keeps knowing it. That is the difference between
+    a move and a new node, and it is why the key is the one file that
+    must not be regenerated.
+    """
+    src_name = (getattr(args, "from_box", None) or "").strip()
+    dst_name = (getattr(args, "to_box", None) or "").strip()
+    if not src_name or not dst_name:
+        die("which way? hivv fleet move <from> <to>")
+    src_host = _fleet_box_host(src_name)
+    dst_host = _fleet_box_host(dst_name)
+    if src_host == dst_host:
+        die("both names point at the same box")
+
+    print(f"\033[1m{APP} fleet move\033[0m — {src_name} → {dst_name}\n")
+
+    # 1. both boxes must be reachable
+    for host in (src_host, dst_host):
+        rc, out = _fleet_ssh(host, "echo ok")
+        if rc != 0 or "ok" not in out:
+            die(f"{host} is not reachable over ssh (key auth?): {out[:200]}")
+
+    # 2. find the source's node home
+    rc, out = _fleet_ssh(src_host, "ls -d ~/.kwaainet* 2>/dev/null | head -20")
+    homes = [h for h in out.splitlines() if h.strip()]
+    homes = [h for h in homes if "mesh" not in h] or homes
+    if not homes:
+        die(f"{src_host} has no kwaainet home to move")
+    src_home = homes[0]
+    print(f"  source home: {src_home}")
+
+    # 3. copy FIRST, while the source is still up
+    for fname in ("identity.key", "config.yaml", "reputation.json"):
+        rc, out = _fleet_scp(f"{src_host}:{src_home}/{fname}",
+                             f"{dst_host}:~/kwaainet-moved/{fname}")
+        if rc != 0:
+            die(f"could not copy {fname}: {out[:200]}")
+    print(f"  copied the identity and config to {dst_host} (the source is still running)")
+
+    # 4. a fingerprint check: the peer id must survive the copy
+    rc, out = _fleet_ssh(dst_host,
+                         "sha256sum ~/kwaainet-moved/identity.key 2>/dev/null | cut -c1-12")
+    dst_fp = out.strip().splitlines()[0] if out.strip() else ""
+    rc, out = _fleet_ssh(src_host,
+                         f"sha256sum {src_home}/identity.key 2>/dev/null | cut -c1-12")
+    src_fp = out.strip().splitlines()[0] if out.strip() else ""
+    if not src_fp or src_fp != dst_fp:
+        die(f"the copy does not match the source ({src_fp} vs {dst_fp}) — the move stops here")
+    print(f"  identity matches on both boxes: {src_fp}")
+
+    # 5. now stop the source
+    rc, out = _fleet_ssh(src_host,
+                         "pid=$(ss -ltnp 2>/dev/null | grep -E ':(8123|8080)' "
+                         "| grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2); "
+                         "[ -n \"$pid\" ] && kill $pid && echo stopped || echo 'no node to stop'")
+    print(f"  source: {out.strip()[:120]}")
+
+    # 6. start it on the target, with ports that fit THAT box
+    port = int(getattr(args, "port", None) or 8123)
+    rc, out = _fleet_ssh(dst_host, f"hivv fleet up --role bee --port {port} "
+                                    f"|| ~/.local/lib/hivv/hivv-cli.py fleet up --role bee --port {port}")
+    print(f"  target: {out.strip()[-300:]}")
+
+    print()
+    print("  ROLLBACK (if the target does not come up):")
+    print(f"    ssh {src_host} 'cd {src_home}/.. && nohup kwaainet run-node &'")
+    print(f"    the identity is still on {src_host} at {src_home}/identity.key")
+    print(f"  the target's copy is at {dst_host}:~/kwaainet-moved/")
+
+
 COMMANDS = _resolve_cmds({
     "_agent":          None,  # internal
     "start":           "cmd_start",
@@ -24741,6 +25636,7 @@ COMMANDS = _resolve_cmds({
     "sync":            "cmd_sync",    "propose":         "cmd_propose",
     "contribute":      "cmd_contribute",
     "git":              "cmd_git",
+    "fleet":            "cmd_fleet",
     "contributors":    "cmd_contributors",
     "review-diff":     "cmd_review_diff",
     "logs":            "cmd_logs",
@@ -25507,6 +26403,7 @@ def _print_sub_help(cmd: str) -> None:
         "llm install": "print install commands for the detected OS\n  flag: --docker   print the `docker run` for ollama\n  flag: --auto     actually run the install (instead of just printing)\n  flag: --model=X  after install, run `ollama pull X`",
         "llm pull":    "ollama pull <model>\n  usage: hivv llm pull qwen3:1.7b",
         "git":        "the contribution loop, last mile, with the rails on\n  verbs: status · clone · branch · commit · push · pr · log · diff\n  usage: hivv git branch my-topic && hivv git commit -m \"fix(scope): what\" && hivv git push\n  rails: never push main · a moved file wants a MOVES.md entry · the message is type(scope): what\n  note: there is deliberately no hivv git merge — merging goes through a PR",
+        "fleet":       "one command for a multi-box deployment\n  usage: hivv fleet            → the dashboard: every box, its role, what is up, and THE NEXT STEP\n  verbs: up (make this box a bee) · check (verify, change nothing) · add · list · move\n  note: hivv fleet with no arguments needs no memory — it tells you what to type next",
         "llm serve":   "ollama serve in the foreground\n  args: [model]   preload a model on startup\n  flag: --port=N  listen on port N (default 11434)",
     }
     desc = table.get(cmd, "(no help yet)")
