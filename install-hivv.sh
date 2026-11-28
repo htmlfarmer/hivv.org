@@ -542,6 +542,18 @@ ensure_build_tools() {
     printf '  %s!%s missing %s(s): %s\n' "$YLW" "$RST" "$label" "${names[*]}" >&2
     if [[ -n "$hint" ]]; then
         printf '    %sinstall them:%s %s\n' "$DIM" "$RST" "$hint" >&2
+    elif [[ "$(uname -s)" == "Darwin" ]]; then
+        # A Mac with NO Homebrew has no package manager to name, so "with your
+        # package manager" below is a dead end — and it asks for git, a C++
+        # compiler and make, which this Mac already has (Xcode Command Line
+        # Tools). Only cmake was missing, and there was no way to get it.
+        # Same wall the CLI hit (2026-11-28).
+        printf '    %sthis Mac needs cmake — git, your C++ compiler and make are already installed%s\n' "$DIM" "$RST" >&2
+        printf '    %sinstall Homebrew, then cmake:%s\n' "$DIM" "$RST" >&2
+        printf '      %s/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"%s\n' "$CYN" "$RST" >&2
+        printf '      %sbrew install cmake%s\n' "$CYN" "$RST" >&2
+        printf '    %s…or skip the build entirely — llama.cpp ships prebuilt macOS binaries:%s\n' "$DIM" "$RST" >&2
+        printf '      %shivv llm install-llama --auto%s\n' "$CYN" "$RST" >&2
     else
         printf '    %sinstall %s with your package manager, then re-run this command%s\n' "$DIM" "${names[*]}" "$RST" >&2
     fi
