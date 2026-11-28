@@ -13728,11 +13728,24 @@ def _stream_error_hint(text: str) -> str:
     return ""
 
 
-def _local_ask(prompt: str, max_tokens: int = 256, timeout: float = 60.0) -> tuple[str, int]:
+def _local_ask(prompt: str, max_tokens: int = 256, timeout: float = 60.0,
+               why: dict | None = None) -> tuple[str, int]:
     """One bounded, non-stream question to THIS machine's LLM → (reply, port).
-    ('', 0) when nothing local answers — never raises."""
+    ('', 0) when nothing local answers — never raises.
+
+    The 'why' dict (optional) is FILLED IN when nothing answered:
+    {'port': int, 'reason': str, 'kind': 'timeout'|'refused'|'http'|'empty'}.
+
+    WHY THIS EXISTS: ('', 0) cannot tell "the server is dead" from "the
+    server was busy for 25s". The doctor reported the second as the first
+    ("round-trip: empty/no reply from :0") and told the operator to restart
+    a perfectly healthy server, because the single slot was busy with a
+    4.7k-token prompt (yalla 2026-11-27). A caller that wants to say
+    something true needs the reason and the port."""
+    tried: list = []
     for port in _local_llm_ports():
         if not _tcp_ok("127.0.0.1", port, timeout=0.4):
+            tried.append((port, "refused", "nothing is listening"))
             continue
         body = {"model": _real_model(f"http://127.0.0.1:{port}"),
                 "messages": [{"role": "user", "content": prompt}],
@@ -13752,6 +13765,8 @@ def _local_ask(prompt: str, max_tokens: int = 256, timeout: float = 60.0) -> tup
                            .get("message", {}).get("reasoning_content") or "")
             if content.strip():
                 return content, port
+            tried.append((port, "empty",
+                          "the server answered with no text at all"))
         except urllib.error.HTTPError as e:
             _b = ""
             try:
@@ -13760,9 +13775,33 @@ def _local_ask(prompt: str, max_tokens: int = 256, timeout: float = 60.0) -> tup
                 pass
             print(f"  ✗ local LLM HTTP {e.code} on :{port}: {_b} "
                   f"{_http_err_hint(e.code, _b)}", file=sys.stderr)
+            tried.append((port, "http", f"HTTP {e.code} {_b}".strip()[:160]))
             continue
-        except Exception:
+        except TimeoutError:
+            # socket.timeout is TimeoutError since 3.10. A timeout is BUSY,
+            # not broken: one slot, and something long was in front of us.
+            tried.append((port, "timeout",
+                          f"no answer in {timeout:.0f}s (busy, or still loading)"))
             continue
+        except Exception as e:
+            tried.append((port, "error",
+                          f"{type(e).__name__}: {str(e)[:80]}"))
+            continue
+    if why is not None:
+        # Report the port that HAD a server and did not answer, not the last
+        # port we happened to try: a busy :8080 followed by a closed :1234
+        # must not be reported as "nothing is listening on :1234".
+        _pick = None
+        for _entry in tried:
+            if _entry[1] != "refused":
+                _pick = _entry
+        if _pick is None and tried:
+            _pick = tried[-1]
+        if _pick:
+            _port, _kind, _reason = _pick
+            why.update(port=_port, kind=_kind, reason=_reason)
+        else:
+            why.update(port=0, kind="none", reason="no local LLM port answered")
     return "", 0
 
 
@@ -18738,6 +18777,15 @@ def _llm_diagnose(log_text: str) -> list:
             if needle in low]
 
 
+# The smallest slot that can hold a real AGENT session (an OpenCode prompt:
+# system prompt + the full tool catalog). Measured 4702 tokens on yalla
+# 2026-11-27, rounded up. hivv's own toolkit is smaller (~2.9k), and a
+# floor that only knew about hivv's own tools called a 1024-token slot
+# "fine" -- which is exactly how every OpenCode request on that box died
+# with HTTP 400 while the doctor said everything was fine.
+_AGENT_TOOLKIT_FLOOR = 5000
+
+
 def cmd_llm_doctor(args) -> None:
     """Diagnose the local LLM: binary → model → serving → stale pid → log
     autopsy → disk. --fix corrects what is SAFE to correct (relaunch a dead
@@ -18829,25 +18877,51 @@ def cmd_llm_doctor(args) -> None:
                                  if _tl else 1500)
                 except Exception:
                     _tool_cost = 3000   # conservative when we cannot measure
-                _floor = max(512, _tool_cost)
+                # The floor is the BIGGEST toolkit that will land on this
+                # server, not just hivv's own. hivv's tools cost ~2.9k
+                # tokens; an OpenCode session (system prompt + the full tool
+                # catalog) measured 4702 on yalla 2026-11-27 -- and the 2.9k
+                # floor called a 1024-token slot "fine" while every OpenCode
+                # request died with HTTP 400.
+                _floor = max(512, _tool_cost, _AGENT_TOOLKIT_FLOOR)
                 if _nc and _nc < _floor:
-                    _np_now = max(1, round(_eff / _nc)) if _nc else 1
                     print(f"  ✗ slots: {_ns} × n_ctx_slot {_nc} — TOO SMALL for the "
-                          f"toolkit (need ~{_floor}) — tool requests WILL 400!")
+                          f"toolkit (need ~{_floor}: hivv's own ~{_tool_cost}, "
+                          f"an agent session ~{_AGENT_TOOLKIT_FLOOR}) — "
+                          f"tool requests WILL 400!")
                     problems.append(
                         f"slot context {_nc} < {_floor} — {APP} llm config --set np=1 "
-                        f"(→ {_eff}/slot) or --set ctx={max(_eff, _floor * _np_now)} "
-                        f"&& {APP} restart llm")
+                        f"--set ctx={max(_eff, _floor)} && {APP} restart llm "
+                        f"(np=1 gives the slot the WHOLE context; keeping "
+                        f"np={_ns} would need ctx>={_floor * max(1, _ns)})")
                 else:
                     print(f"  ✓ slots: {_ns} × n_ctx_slot {_nc}   (hivv config ctx: -c{_eff})")
             else:
                 print(f"  · slots: {len(_slots) if isinstance(_slots, list) else 0} slot(s), no n_ctx exposed")
         except Exception as e:
             print(f"  · slots: unavailable ({str(e)[:60]})")
-        _reply, _rp = _local_ask("Reply with exactly: OK", max_tokens=8, timeout=25)
+        _why: dict = {}
+        _reply, _rp = _local_ask("Reply with exactly: OK", max_tokens=8,
+                                 timeout=25, why=_why)
         if not _reply.strip():
-            print(f"  ✗ round-trip: empty/no reply from :{_rp}")
-            problems.append("round-trip returns nothing — see log; try: " + APP + " restart llm")
+            _port = _rp or _why.get("port") or 0
+            _reason = _why.get("reason") or "no answer"
+            _kind = _why.get("kind") or "unknown"
+            print(f"  ✗ round-trip: {_reason} (:{_port})")
+            if _kind == "timeout":
+                # A BUSY server is not a DEAD server. Reporting the first as
+                # the second sent the operator to restart a healthy box
+                # (yalla 2026-11-27): the one slot was busy with a 4.7k-token
+                # prompt and the 25s probe timed out behind it.
+                print("    the server is BUSY, not broken — one slot, and a long "
+                      "prompt was in front of the probe")
+                problems.append(
+                    "round-trip timed out — the server is busy (one slot), not "
+                    "dead; it answers once the request in front of it finishes")
+            else:
+                problems.append(
+                    f"round-trip returns nothing ({_reason}) — see log; try: "
+                    f"{APP} restart llm")
         elif _stream_error_hint(_reply) and not re.search(r"([^\n]{2,14}?)\1{4,}", _reply):
             print(f"  ✗ round-trip: backend error, not an answer: {_reply.strip()[:80]}")
             problems.append(_stream_error_hint(_reply))
