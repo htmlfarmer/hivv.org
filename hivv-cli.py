@@ -44,6 +44,7 @@ import hashlib
 import hmac
 import http.client as http_client
 import http.server as http_server
+import socketserver
 import json
 import math
 import os
@@ -22559,6 +22560,17 @@ def cmd_dial(args) -> None:
     failover). on/off = start/stop + auto-start across reboots; status =
     probe (exit 0 running, 1 not). --pin locks one bee (or a raw endpoint
     URL) with no rotation and no hub fallback."""
+    # STARTUP CANARY — printed before ANY other work in this command.
+    # A startup that hangs is indistinguishable between "stuck importing
+    # the module" and "stuck inside cmd_dial" unless something is printed
+    # first. This line bisects the two on the very next run: if it appears,
+    # main() dispatched and the hang is downstream; if it does not, the hang
+    # is in the import.
+    #
+    # It was added for exactly this and then LOST in a merge
+    # (86a0028 -> 7b0807e), which is why the macOS failure went
+    # undiagnosed for another run.
+    print(f"[{APP}] dial starting (pid {os.getpid()})", flush=True)
     what = (getattr(args, "dial_cmd", None) or "run").lower()
     port = int(getattr(args, "port", 0) or _dial_port())
     hub = (getattr(args, "hub", None) or HUB).rstrip("/")
@@ -22939,6 +22951,27 @@ def cmd_dial(args) -> None:
     class DialServer(http_server.ThreadingHTTPServer):
         daemon_threads = True
         allow_reuse_address = True
+
+        def server_bind(self):
+            # http.server.HTTPServer.server_bind does socket.getfqdn(host) —
+            # a REVERSE DNS lookup — on the bind path. On a machine whose
+            # resolver is slow, or which has no PTR record for 127.0.0.1,
+            # that lookup blocks for tens of seconds.
+            #
+            # The symptom was the macOS CI runner failing with "shim never
+            # became healthy (alive=True, log_bytes=32)": the process was
+            # running, it had printed "[hivv] dial starting", and it had
+            # not reached "dial ready" — because the bind was still waiting
+            # on DNS. The reverse lookup has nothing to do with the shim's
+            # job, and a proxy that cannot answer because the resolver is
+            # slow is worse than useless.
+            #
+            # socketserver.TCPServer.server_bind does the actual bind; we
+            # take the name from the address instead of asking DNS for it.
+            socketserver.TCPServer.server_bind(self)
+            host, port = self.server_address[:2]
+            self.server_name = host
+            self.server_port = port
 
     try:
         srv = DialServer(("127.0.0.1", port), DialHandler)
