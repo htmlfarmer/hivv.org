@@ -25467,7 +25467,7 @@ def _cmd_fleet_list(args) -> None:
     reg = _fleet_load()
     boxes = reg.get("boxes", {}) if isinstance(reg.get("boxes"), dict) else {}
     if not boxes:
-        print(_info("no boxes registered yet — hivv fleet add <name> [host]"))
+        print(_git_note("no boxes registered yet — hivv fleet add <name> [host]"))
         return
     for name, info in sorted(boxes.items()):
         info = info or {}
