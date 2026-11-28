@@ -110,16 +110,16 @@ NO_THINK = False
 # (name, description, {param: (type, description)}, required-params)
 _FALLBACK_TOOL_DEFS = [
     ("current_time",
-     "Today's date and time: unix, ISO-8601, day of week, UTC offset. Pass an IANA timezone (e.g. Asia/Karachi).",
-     {"timezone": ("string", "IANA timezone name (e.g. Europe/Paris)")}, []),
+     "Today's date and time: unix, ISO-8601, day of week, UTC offset. Pass an IANA timezone (Asia/Karachi) OR a place name (Uganda, Jinja, Karachi).",
+     {"timezone": ("string", "IANA timezone name (e.g. Europe/Paris), or a place name (Uganda, Jinja)")}, []),
     ("calculator",
      "Accurate arithmetic: + - * / % ^, parentheses, pi, e, and functions (sqrt, log, sin, abs, min, max, factorial…). Never compute by hand.",
      {"expression": ("string", "The expression to evaluate, e.g. (12 + 8) * 3 / 7")}, ["expression"]),
     ("timezone_convert",
-     "Convert a moment between IANA timezones (DST-correct), or ask for the time in a zone.",
-     {"timezone": ("string", "Target IANA timezone, e.g. America/New_York"),
+     "Convert a moment between timezones (DST-correct), or ask for the time in a zone or a place — IANA names and place names both work.",
+     {"timezone": ("string", "Target IANA timezone, e.g. America/New_York — or a place name like Uganda"),
       "from_timezone": ("string", "Source IANA timezone, when converting between two zones"),
-      "datetime": ("string", "The moment to convert (ISO-8601). Omit for now")}, ["timezone"]),
+      "datetime": ("string", "The moment to convert (ISO-8601). OMIT for the current moment")}, ["timezone"]),
     ("text_parser",
      "Parse JSON, CSV, XML or YAML into structure. operation: parse, pretty, validate, extract (urls/emails/dates).",
      {"input": ("string", "The text to parse"),
@@ -3776,6 +3776,33 @@ def _clean_model_name(raw: str) -> str:
         return f"model:{last[:8]}"
     return last
 
+def _llama_slot_ctx(port: int) -> tuple[int, int]:
+    """(n_ctx_slot, n_slots) of a llama.cpp server on this port.
+
+    THE NUMBER NOBODY ELSE CAN GUESS. A llama.cpp server divides its context
+    across its parallel slots: "-c 4096 -np 4" is FOUR slots of 1024 tokens
+    each, and the MODEL NAME says nothing about that -- two boxes serving the
+    same "gemma-4-E2B" can hold 1024 tokens or 131072. The hub used to guess
+    from the name (gemma-4 -> 32768) and routed a 5k-token OpenCode prompt
+    into a 1024-token slot, which answered HTTP 400 "request (4702 tokens)
+    exceeds the available context size (1024 tokens)" (yalla 2026-11-27).
+
+    It reads the SAME endpoint _ctx_size already reads (and already caches
+    for five minutes): one probe path, one cache, no second copy to drift.
+
+    Returns (0, 0) when the server does not say (not llama.cpp, no /props).
+    0 means UNKNOWN, and an unknown window is never published as a number.
+    """
+    _info: dict = {}
+    _ctx = _ctx_size("127.0.0.1", port, margin=0, info=_info)
+    if not _info.get("ok"):
+        return (0, 0)
+    try:
+        return (int(_ctx or 0), int(_info.get("slots") or 0))
+    except (TypeError, ValueError):
+        return (0, 0)
+
+
 def _detect_local_ai() -> list[dict]:
     """Detect running local AI servers (llama.cpp, lm-studio, ollama) and
     return model info.
@@ -3801,11 +3828,17 @@ def _detect_local_ai() -> list[dict]:
             for m in (data.get("data") or []):
                 raw_id = m.get("id", "unknown")
                 clean = _clean_model_name(raw_id)
+                # The REAL window of THIS server, published so the router can
+                # route around a slot that cannot hold the prompt. The model
+                # name is the same on every box; the window is not.
+                ctx_slot, slots = _llama_slot_ctx(port)
                 results.append({
                     "provider": label,
                     "model": clean,
                     "loaded": True,
-                    "port": port
+                    "port": port,
+                    "ctx_slot": ctx_slot,
+                    "slots": slots
                 })
         except urllib.error.HTTPError as e:
             # Distinguish "our LLM demands a key" from "some web app 401s":
@@ -3844,6 +3877,33 @@ def _detect_local_ai() -> list[dict]:
     return results
 
 
+_EMBED_NAME_HINTS = ("embed", "bge-", "all-minilm", "sentence-transformers",
+                     "gte-")
+
+
+def _is_embed_model(name) -> bool:
+    """True when `name` looks like an EMBEDDING model — vectors, not chat.
+
+    THE BUG THIS CLOSES (ashy, 2026-11-28): the direct chat loop offered
+    `nomic-embed-text:latest` as a chat candidate. The server correctly
+    answered HTTP 400 "does not support chat" — and the hint under it blamed
+    slot/context config, so the user was sent to `hivv llm config --set np=1`
+    on a Mac with no llama.cpp installed at all.
+
+    An embedder can never answer a chat: it turns text into vectors. So it is
+    not a CANDIDATE, and we should never spend a request finding that out.
+
+    Matched on the name only, and only against families that are embedders by
+    construction — no chat model ships with "embed" in its tag, so this cannot
+    take a real answer away. Returns False for an empty/unknown name: a model
+    we cannot identify stays eligible rather than silently vanishing.
+    """
+    n = str(name or "").strip().lower()
+    if not n:
+        return False
+    return any(h in n for h in _EMBED_NAME_HINTS)
+
+
 def _real_model(target: str, timeout: float = 2.0) -> str:
     """REAL model name for an OpenAI-compatible endpoint.
 
@@ -3859,10 +3919,21 @@ def _real_model(target: str, timeout: float = 2.0) -> str:
         req = urllib.request.Request(f"{o.scheme}://{o.netloc}/api/tags",
                                      headers={"User-Agent": f"{APP}/{VERSION}"})
         with urllib.request.urlopen(req, timeout=timeout) as r:
-            names = [m.get("name") for m in
+            names = [str(m.get("name") or "") for m in
                      (json.loads(r.read().decode("utf-8", "replace")).get("models") or [])]
-        if names and names[0]:
-            return str(names[0])
+        names = [n for n in names if n]
+        if names:
+            # Prefer a CHAT model: ollama lists models in pull order, and
+            # nomic-embed-text was first on ashy — so every path that reads
+            # this (_chat_local_only, `hivv ask`, relay jobs, the test probe)
+            # was handed an embedder. If the box only HAS embedders, keep the
+            # old answer: naming the real model gives the server's honest
+            # 400 ("does not support chat") instead of a baffling
+            # `model 'local' not found` 404.
+            for n in names:
+                if not _is_embed_model(n):
+                    return n
+            return names[0]
     except Exception:
         pass
     return "local"
@@ -6742,15 +6813,15 @@ def cmd_status(args) -> None:
     if ts.returncode != 0 or not ts.stdout.strip():
         issues.append("tailscale not installed — nodes on different networks cannot reach you")
 
-    # Check firewall
-    fw_active = False
-    import platform
-    if platform.system() == "Linux":
-        r = _r("ufw status 2>/dev/null")
-        if "Status: active" in r.stdout:
-            fw_active = True
-    if not fw_active and llms:
+    # Check firewall. _firewall_active() reads ufw with escalation and
+    # falls back to the systemd unit state — a non-root `ufw status` has
+    # an EMPTY stdout, and the old test read that as "no firewall" on a
+    # box whose ufw was on (yalla 2026-11-27).
+    fw_active = _firewall_active() if platform.system() == "Linux" else None
+    if fw_active is False and llms:
         issues.append("no firewall — your LLMs are open to the internet")
+    elif fw_active is None and llms and shutil.which("ufw"):
+        issues.append("ufw installed but its state needs root — run: sudo ufw status")
 
     if issues:
         print(f"\n  \033[1m⚠ {len(issues)} issue(s) detected:\033[0m")
@@ -7621,7 +7692,11 @@ def _watch_start_tools_detached() -> tuple[str, str]:
     except Exception as e:
         return ("failed", f"spawn failed: {e}")
     time.sleep(1.5)
-    ok, detail = _watch_probe_tools()
+    # `_watch_probe_tools` never existed; the real prober is `_tools_probe`
+    # (catalog + a real tool call). This NameError fired on the detached
+    # tools-start path -- no systemd, no pm2 -- i.e. exactly the boxes the
+    # detached spawn exists for.
+    ok, detail = _tools_probe()
     return ("restarted" if ok else "failed",
             f"spawned {script.name}" + ("" if ok else f" — but {detail}"))
 
@@ -8696,6 +8771,9 @@ def cmd_donate(args) -> None:
                     ftype = fb.get("type", "?")
                     msg = fb.get("message", "")[:60]
                     print(f"    \033[2m{ts[:16]}\033[0m  [{status:>8}]  \033[33m{ftype}\033[0m  {msg}")
+                    _note = str(fb.get("review_notes") or "").strip()
+                    if _note:
+                        print(f"          \033[36m↳ reply:\033[0m {_note[:200]}")
             else:
                 print(f"  \033[1mFeedback submitted\033[0m  \033[2m(none yet — run: hivv help submit suggestion ...)\033[0m")
         else:
@@ -8851,6 +8929,12 @@ def cmd_help(args) -> None:
                 emoji = TYPEmoji.get(ftype, "💬")
                 short = msg[:70] + ("..." if len(msg) > 70 else "")
                 print(f"  {emoji} \033[1m{ts}\033[0m  [{status:>8}]  {label}")
+                # The reply. Without this the submitter sees a status move and
+                # never reads a word back — hivv.org could answer and nobody
+                # would know.
+                note = str(fb.get("review_notes") or "").strip()
+                if note:
+                    print(f"        \033[36m↳ reply:\033[0m {note[:200]}")
                 print(f"    {short}\n")
         print(f"\033[1m╰────────────────────────────────────────────────────\033[0m\033[0m\n")
         return
@@ -9034,15 +9118,15 @@ def _run_health_checks():
             _r(f"sudo systemctl start {svc}")
             print(f"  \033[32m✓\033[0m started: {svc}")
 
-    # Check Tailscale
+    # Check Tailscale — then show the WHOLE ladder. The old three lines
+    # stopped dead after "install", so a user who had just installed it
+    # had no idea what came next (yalla 2026-11-27).
     ts = _r("tailscale ip -4 2>/dev/null")
     if ts.returncode != 0 or not ts.stdout.strip():
-        print(f"  \033[33m!\033[0m tailscale not installed")
-        print(f"     install: curl -fsSL https://tailscale.com/install.sh | sh")
-        print(f"     then:    sudo tailscale up")
-        print(f"     secure:  {APP} firewall --apply --mode tailscale")
+        print(f"  \033[33m!\033[0m tailscale not up — nodes on different networks cannot reach you")
     else:
         print(f"  \033[32m✓\033[0m tailscale active: {ts.stdout.strip()}")
+    _print_tailscale_ladder(indent="     ")
 
     # Helpful sudo reminders
     print(f"\n\033[1msudo commands you may need\033[0m")
@@ -13391,6 +13475,81 @@ def _bee_chat_with_tools(url: str, messages: list, tools: list | None, max_tok: 
     return answer
 
 
+# The direct-to-bee path sends NO system message at all — just the user's
+# message. That is how "what time is it now in jinja uganda" once came back as
+# a UTC value labelled "Uganda", three hours wrong: with no ground truth in the
+# prompt, the model stamped the place the user named onto whatever it produced.
+#
+# The hub owns the place → IANA zone table (api/lib/place-tz.js), so we ask it
+# for a ready-made clock line — exactly as we already ask it for the tool
+# catalog. ONLY questions that look about time are sent: ordinary chat must not
+# start shipping its text down a path that is meant to bypass the hub.
+_TIME_RE = re.compile(
+    r"\b(?:time|times|hour|hours|minute|minutes|clock|watch|timezone|time\s+zone|tz|"
+    r"midnight|noon|o\s*clock|today|tomorrow|yesterday|tonight|date|dates|"
+    r"dst|daylight|utc|gmt|am|pm|sunrise|sunset|weekday|weekdays|"
+    r"day\s+of\s+(?:the\s+)?week|calendar|elapsed|duration)\b",
+    re.IGNORECASE)
+
+
+def _utc_clock_line() -> str:
+    """The offline fallback: a measured UTC clock plus the rule that stops the lie."""
+    now = time.gmtime()
+    stamp = time.strftime("%Y-%m-%d %H:%M:%S", now)
+    weekday = time.strftime("%A", now)
+    return (
+        "MEASURED CLOCK — trust this over your own memory; it comes from the hub's clock, not a guess. "
+        f"now (UTC): {stamp} ({weekday}). "
+        "If this question names a place, answer with THAT place's local time — resolve it to its IANA "
+        'zone first. UTC is not an answer to "what time is it in X", and an IANA zone must never be '
+        'invented: real ones look like "Africa/Kampala".'
+    )
+
+
+def _time_context_system(msg: str):
+    """A system message carrying the measured clock, for questions about time.
+
+    Returns None for anything that is not about time, so ordinary chat keeps
+    its prompt byte-for-byte as it was — and never sends its text to the hub.
+    Falls back to a locally measured UTC line when the hub is unreachable: an
+    honest partial answer beats silence.
+    """
+    if not _TIME_RE.search(msg or ""):
+        return None
+    try:
+        code, resp = http("POST", "/api/tools/time-context",
+                          body={"text": msg}, timeout=6, sign=False)
+        if code == 200 and isinstance(resp, dict) and resp.get("system"):
+            return resp["system"]
+    except Exception:
+        pass
+    return _utc_clock_line()
+
+
+# The hub's catalog carries the tool schemas AND the briefing that tells a
+# model WHEN to reach for them. Cached briefly so one chat does not fetch the
+# same document twice (schemas + briefing are wanted together on the direct
+# path, and `hivv tools list` fetches it again a moment later).
+_CATALOG_CACHE = {"at": 0.0, "resp": None}
+
+
+def _fetch_catalog(timeout=6):
+    """GET /api/tools/catalog, cached for 60s. None when the hub is away."""
+    now = time.time()
+    cached = _CATALOG_CACHE["resp"]
+    if cached is not None and (now - _CATALOG_CACHE["at"]) < 60:
+        return cached
+    try:
+        code, resp = http("GET", "/api/tools/catalog", timeout=timeout, sign=False)
+        if code == 200 and isinstance(resp, dict) and resp.get("tools"):
+            _CATALOG_CACHE["resp"] = resp
+            _CATALOG_CACHE["at"] = now
+            return resp
+    except Exception:
+        pass
+    return cached
+
+
 def _tool_schemas() -> list:
     """The tool schemas to send with a chat request.
 
@@ -13398,27 +13557,36 @@ def _tool_schemas() -> list:
     schemas instead of keeping a second copy here that could drift. The
     static list below is only the offline fallback.
     """
-    try:
-        code, resp = http("GET", "/api/tools/catalog", timeout=6, sign=False)
-        if code == 200 and isinstance(resp, dict):
-            tools = resp.get("tools") or []
-            out = []
-            for t in tools:
-                if not t.get("advertised", True):
-                    continue
-                out.append({
-                    "type": "function",
-                    "function": {
-                        "name": t.get("name"),
-                        "description": t.get("description", ""),
-                        "parameters": t.get("parameters") or {"type": "object", "properties": {}},
-                    },
-                })
-            if out:
-                return out
-    except Exception:
-        pass
+    cat = _fetch_catalog()
+    if cat:
+        out = []
+        for t in cat.get("tools") or []:
+            if not t.get("advertised", True):
+                continue
+            out.append({
+                "type": "function",
+                "function": {
+                    "name": t.get("name"),
+                    "description": t.get("description", ""),
+                    "parameters": t.get("parameters") or {"type": "object", "properties": {}},
+                },
+            })
+        if out:
+            return out
     return TOOL_SCHEMAS
+
+
+def _tool_briefing():
+    """The hub's toolkit briefing, or None when it cannot be fetched.
+
+    The direct-to-bee path builds its prompt from scratch, so without this a
+    model is handed tool schemas and NO instruction about when to use them —
+    it improvises, which is how a time question ended up calling a tool with a
+    zone it had made up. None (offline) is better than a stale guess.
+    """
+    cat = _fetch_catalog()
+    text = (cat or {}).get("briefing")
+    return text if isinstance(text, str) and text else None
 
 
 def _ensure_tools_running() -> bool:
@@ -13680,11 +13848,40 @@ def _http_err_hint(code: int, body: str = "") -> str:
     (repetition loop)': that mislabel sends users hunting for a bad model when
     it's slot/context config (Stuarts-iMac, 2026-11-18)."""
     if code == 400:
+        # READ THE BODY FIRST. The slot advice below is right often enough to
+        # have become the ONLY 400 answer — so a completely different refusal
+        # ("nomic-embed-text:latest does not support chat", ashy 2026-11-28)
+        # was reported as "the slot is too small", sending the user to
+        # `hivv llm config --set np=1` for a problem that has nothing to do
+        # with context. Followed literally it is also advice they CANNOT take:
+        # the Mac that reported it had no llama.cpp installed at all.
+        low = (body or "").lower()
+        # Refusal language is REQUIRED, so a body that merely mentions
+        # embeddings ("available: chat, embedding") can never land here.
+        if ("does not support chat" in low
+                or "not a chat model" in low
+                or ("embed" in low and ("does not support" in low
+                                        or "unsupported" in low))):
+            return ("→ that model is an EMBEDDER, not a chat model — it turns "
+                    "text into vectors and cannot answer. Pick a chat model: "
+                    "hivv models (an embed model's name usually says so: "
+                    "*embed*, bge-*, all-minilm)")
         # THE OLD HINT DID NOT FIX ANYTHING. `np=2` halves the slot: with
         # ctx=4096 that yields 2048 tokens/slot, still under the ~2100-token
         # auto-attached toolkit, so following the printed advice kept 400ing.
         # np=1 hands every slot the WHOLE context (llama-server only divides
         # -c by -np when -np is given explicitly).
+        if "exceed_context_size" in low or "n_ctx" in low or "context" in low:
+            return ("→ context/slot config — the slot is too small for the "
+                    "prompt/toolkit; run: hivv llm doctor (check n_ctx_slot) · "
+                    "fix: hivv llm config --set np=1 && hivv restart llm "
+                    "(np=2 still halves ctx and keeps 400ing)")
+        # A 400 we cannot classify: say THAT, honestly, instead of asserting
+        # a slot diagnosis the body never mentioned.
+        if low:
+            return "→ the server refused this request — see the message above"
+        # Bodyless 400 (older servers swallow the reason): the slot/size
+        # case is by far the most common, so keep the classic advice.
         return ("→ context/slot config — the slot is too small for the "
                 "prompt/toolkit; run: hivv llm doctor (check n_ctx_slot) · "
                 "fix: hivv llm config --set np=1 && hivv restart llm "
@@ -13709,7 +13906,11 @@ def _stream_error_hint(text: str) -> str:
     if not low or len(low) < 25:
         return ""
     if "exceeds the available context" in low or "bad request" in low:
-        return _http_err_hint(400)
+        # Pass the TEXT as the body: without it every streamed 400 got the
+        # slot advice, so a refusal smuggled into content ("does not support
+        # chat") was diagnosed as context too — the same lie as the direct
+        # path, from the other direction.
+        return _http_err_hint(400, text)
     if "unauthorized" in low or "api-key" in low or "api key" in low:
         return _http_err_hint(401)
     if "loading model" in low or "unavailable_error" in low:
@@ -13719,11 +13920,24 @@ def _stream_error_hint(text: str) -> str:
     return ""
 
 
-def _local_ask(prompt: str, max_tokens: int = 256, timeout: float = 60.0) -> tuple[str, int]:
+def _local_ask(prompt: str, max_tokens: int = 256, timeout: float = 60.0,
+               why: dict | None = None) -> tuple[str, int]:
     """One bounded, non-stream question to THIS machine's LLM → (reply, port).
-    ('', 0) when nothing local answers — never raises."""
+    ('', 0) when nothing local answers — never raises.
+
+    The 'why' dict (optional) is FILLED IN when nothing answered:
+    {'port': int, 'reason': str, 'kind': 'timeout'|'refused'|'http'|'empty'}.
+
+    WHY THIS EXISTS: ('', 0) cannot tell "the server is dead" from "the
+    server was busy for 25s". The doctor reported the second as the first
+    ("round-trip: empty/no reply from :0") and told the operator to restart
+    a perfectly healthy server, because the single slot was busy with a
+    4.7k-token prompt (yalla 2026-11-27). A caller that wants to say
+    something true needs the reason and the port."""
+    tried: list = []
     for port in _local_llm_ports():
         if not _tcp_ok("127.0.0.1", port, timeout=0.4):
+            tried.append((port, "refused", "nothing is listening"))
             continue
         body = {"model": _real_model(f"http://127.0.0.1:{port}"),
                 "messages": [{"role": "user", "content": prompt}],
@@ -13743,6 +13957,8 @@ def _local_ask(prompt: str, max_tokens: int = 256, timeout: float = 60.0) -> tup
                            .get("message", {}).get("reasoning_content") or "")
             if content.strip():
                 return content, port
+            tried.append((port, "empty",
+                          "the server answered with no text at all"))
         except urllib.error.HTTPError as e:
             _b = ""
             try:
@@ -13751,9 +13967,33 @@ def _local_ask(prompt: str, max_tokens: int = 256, timeout: float = 60.0) -> tup
                 pass
             print(f"  ✗ local LLM HTTP {e.code} on :{port}: {_b} "
                   f"{_http_err_hint(e.code, _b)}", file=sys.stderr)
+            tried.append((port, "http", f"HTTP {e.code} {_b}".strip()[:160]))
             continue
-        except Exception:
+        except TimeoutError:
+            # socket.timeout is TimeoutError since 3.10. A timeout is BUSY,
+            # not broken: one slot, and something long was in front of us.
+            tried.append((port, "timeout",
+                          f"no answer in {timeout:.0f}s (busy, or still loading)"))
             continue
+        except Exception as e:
+            tried.append((port, "error",
+                          f"{type(e).__name__}: {str(e)[:80]}"))
+            continue
+    if why is not None:
+        # Report the port that HAD a server and did not answer, not the last
+        # port we happened to try: a busy :8080 followed by a closed :1234
+        # must not be reported as "nothing is listening on :1234".
+        _pick = None
+        for _entry in tried:
+            if _entry[1] != "refused":
+                _pick = _entry
+        if _pick is None and tried:
+            _pick = tried[-1]
+        if _pick:
+            _port, _kind, _reason = _pick
+            why.update(port=_port, kind=_kind, reason=_reason)
+        else:
+            why.update(port=0, kind="none", reason="no local LLM port answered")
     return "", 0
 
 
@@ -14237,12 +14477,117 @@ def _listening_ports() -> list:
     return out
 
 
+def _ufw_status_text(*, allow_prompt: bool = False) -> str | None:
+    """`ufw status` output, or None when it cannot be read from here.
+
+    A normal user's `ufw status` prints "ERROR: You need to be root" on
+    STDERR and leaves stdout EMPTY — and every reader in this file looks
+    at stdout, so empty read as "no firewall, no rules". That is how
+    `hivv firewall --apply --mode tailscale` came to promise rules it
+    never wrote (yalla 2026-11-27).
+
+    Escalation ladder: plain -> `sudo -n` -> `sudo`, the last only when a
+    human is at the terminal AND the caller opted in — a status REPORT
+    must never stop and ask for a password.
+    """
+    def _try(argv):
+        try:
+            r = subprocess.run(argv, capture_output=True, text=True, timeout=8)
+        except Exception:
+            return None
+        out = r.stdout or ""
+        return out if "Status:" in out else None
+
+    got = _try(["ufw", "status"])
+    if got is not None:
+        return got
+    if not shutil.which("sudo"):
+        return None
+    got = _try(["sudo", "-n", "ufw", "status"])
+    if got is not None:
+        return got
+    if allow_prompt and _can_prompt_sudo():
+        return _try(["sudo", "ufw", "status"])
+    return None
+
+
+def _ufw_port_open(status_text: str, port) -> bool:
+    """True when `port` really has a rule in `ufw status` output.
+
+    The old check was `f"{port}" in text` — a SUBSTRING test, so port 80
+    matched the rule for 8080 and a closed port was reported open. Anchor
+    on `port/tcp` with a digit boundary instead.
+    """
+    try:
+        return bool(re.search(rf"(?<![\d.]){int(port)}/tcp\b", status_text or ""))
+    except (TypeError, ValueError):
+        return False
+
+
+def _fw_root_prefix(*, allow_prompt: bool = True) -> str | None:
+    """How to run a firewall command as root on THIS box.
+
+    ""         we ARE root
+    "sudo -n " passwordless sudo (servers, CI, docker)
+    "sudo "    a human is at the terminal and can type the password
+    None       no way to get root — the caller prints the exact commands
+               for a human to run instead of pretending it applied them
+    """
+    if (os.geteuid() == 0) if hasattr(os, "geteuid") else False:
+        return ""
+    if not shutil.which("sudo"):
+        return None
+    if _sudo_passwordless():
+        return "sudo -n "
+    if allow_prompt and _can_prompt_sudo():
+        return "sudo "
+    return None
+
+
+def _fw_run(cmd: str, *, prefix: str | None, timeout: float = 30.0):
+    """Run one firewall command as root. Returns (rc, stderr_text).
+
+    A prompting sudo needs FAR longer than a plain command: the password
+    prompt sits on the tty while a human types, and the generic 10s _run
+    lambda killed it mid-prompt (found live on yalla 2026-11-27 — the
+    traceback was subprocess.TimeoutExpired inside cmd_firewall). So this
+    uses its own budget and turns a timeout into a normal failure line
+    instead of a traceback that aborts the whole report.
+    """
+    if prefix is None:
+        return 1, "no root available"
+    full = f"{prefix}{cmd}"
+    # a human typing a password gets a real budget; passwordless does not
+    budget = 90.0 if prefix.strip() == "sudo" else timeout
+    try:
+        r = subprocess.run(full, shell=True, capture_output=True,
+                           text=True, timeout=budget)
+    except subprocess.TimeoutExpired:
+        return 1, f"timed out after {int(budget)}s (password prompt not answered?)"
+    except Exception as e:                      # noqa: BLE001
+        return 1, str(e)
+    return r.returncode, (r.stderr or r.stdout or "").strip()
+
+
 def _firewall_active():
     """True/False when detectable, None = unknown tooling/OS."""
     try:
         if shutil.which("ufw"):
-            r = subprocess.run(["ufw", "status"], capture_output=True, text=True, timeout=8)
-            return "active" in (r.stdout or "").lower()
+            out = _ufw_status_text()
+            if out is not None:
+                return "active" in out.lower()
+            # Reading the RULES needs root; the ufw SERVICE state does not,
+            # and that is exactly what "is the firewall on" means. Without
+            # this, every non-root run reported an ACTIVE ufw as off.
+            if shutil.which("systemctl"):
+                r = subprocess.run(["systemctl", "show", "ufw",
+                                    "-p", "LoadState", "--value"],
+                                   capture_output=True, text=True, timeout=8)
+                if (r.stdout or "").strip() == "loaded":
+                    r = subprocess.run(["systemctl", "is-active", "ufw"],
+                                       capture_output=True, text=True, timeout=8)
+                    return (r.stdout or "").strip() == "active"
+            return None
         if shutil.which("firewall-cmd"):
             r = subprocess.run(["firewall-cmd", "--state"], capture_output=True, text=True, timeout=8)
             return "running" in (r.stdout or "").lower()
@@ -14584,8 +14929,13 @@ def cmd_history(args) -> None:
     print(f"  \033[2mfull ledger: {APP} speeds · board: {APP} iq --board\033[0m\n")
 
 
-def _ctx_size(ip, port, margin=512):
+def _ctx_size(ip, port, margin=512, info: dict | None = None):
     """The REAL per-slot context of an endpoint, from llama-server's /props.
+
+    The 'info' dict (optional) is FILLED IN with {'ok': bool, 'slots': int}:
+    ok=False means the probe did not answer, so a caller must NOT publish a
+    number it did not read; slots is llama.cpp's parallel-slot count (a
+    "-c 4096 -np 4" server is FOUR slots of 1024).
 
     MODULE LEVEL ON PURPOSE: `_do_chat` (hivv chat) and `cmd_node_chat`
     (hivv ask) both need it, and nested copies drift apart.
@@ -14605,6 +14955,10 @@ def _ctx_size(ip, port, margin=512):
     key = (ip, port, margin)
     hit = _CTX_CACHE.get(key)
     if hit is not None and (time.time() - hit[1]) < 300:
+        if info is not None:
+            _ok = bool(hit[2]) if len(hit) > 2 else True
+            _slots = int(hit[3]) if len(hit) > 3 else 0
+            info.update(ok=_ok, slots=_slots)
         return hit[0]
     val = 8192  # safe default when the server doesn't expose ctx size
     try:
@@ -14620,12 +14974,17 @@ def _ctx_size(ip, port, margin=512):
             d = json.loads(r.read().decode("utf-8", errors="replace"))
         gen = d.get("default_generation_settings") or {}
         n_ctx = int(d.get("n_ctx") or gen.get("n_ctx") or 0)
+        slots = int(d.get("total_slots") or 0)
         if n_ctx > 0:
             val = (min(max(n_ctx - margin, 128), 32768) if margin
                    else min(n_ctx, 32768))
     except Exception:
+        if info is not None:
+            info.update(ok=False, slots=0)
         return 8192
-    _CTX_CACHE[key] = (val, time.time())
+    _CTX_CACHE[key] = (val, time.time(), True, slots)
+    if info is not None:
+        info.update(ok=True, slots=slots)
     return val
 
 
@@ -14786,6 +15145,10 @@ def _do_chat(msg: str, stream: bool = True, mode: str | None = None,
             # no tools attached → "I do not have access to real-time
             # information").
             _tool_schemas_list = _tool_schemas()
+            # Fetched ONCE for the whole direct attempt, not per port: a time
+            # question would otherwise hit the hub again for every candidate.
+            _briefing_line = _tool_briefing() if _tool_schemas_list else None
+            _clock_line = _time_context_system(msg)
 
             for node in online_nodes:
                 ip = node.get("lan_ip") or node.get("ip", "")
@@ -14805,6 +15168,15 @@ def _do_chat(msg: str, stream: bool = True, mode: str | None = None,
 
                 # Find a usable port
                 for m in models:
+                    # An embedder can never answer a chat — do not spend a
+                    # request proving it (ashy's nomic-embed-text:latest,
+                    # 2026-11-28: HTTP 400 "does not support chat", then a
+                    # hint blaming slot config for a model that has no slot).
+                    # Skipped BEFORE the TCP probe, so a bee whose only model
+                    # is an embedder is never marked FAILED — it simply has
+                    # nothing to offer here and the next bee is tried.
+                    if _is_embed_model(m.get("model") or m.get("name")):
+                        continue
                     port = m.get("port", 8080)
                     if not _tcp_ok(ip, port):
                         direct_fails[name.lower()] = time.time()
@@ -14813,12 +15185,27 @@ def _do_chat(msg: str, stream: bool = True, mode: str | None = None,
                     max_tok = _ctx_size(ip, port)
                     try:
                         url = f"http://{ip}:{port}/v1/chat/completions"
+                        # The direct path builds its prompt from scratch, so the
+                        # measured clock has to be put back by hand — without it a
+                        # model answers a time question from memory and labels the
+                        # result with the place the user named.
+                        _direct_msgs = []
+                        # The hub sends identity + briefing + clock. This path
+                        # sends NONE of them, so put back what the model needs
+                        # to answer instead of improvising: schemas with no
+                        # instruction is how a time question ended up citing a
+                        # zone nobody had ever heard of.
+                        if _briefing_line:
+                            _direct_msgs.append({"role": "system", "content": _briefing_line})
+                        if _clock_line:
+                            _direct_msgs.append({"role": "system", "content": _clock_line})
+                        _direct_msgs.append({"role": "user", "content": msg})
                         payload_dict = {
                             # REAL model from the heartbeat: ollama 404s on
                             # 'local'; llama.cpp ignores the field. No probe
                             # needed — the node already told us its model.
                             "model": m.get("model") or m.get("name") or "local",
-                            "messages": [{"role": "user", "content": msg}],
+                            "messages": _direct_msgs,
                             "stream": direct_stream,
                             # Bounded + anti-loop (the missing pair behind the
                             # 'row row row…ogas ogas' runaway on Stuarts-iMac:
@@ -14859,6 +15246,12 @@ def _do_chat(msg: str, stream: bool = True, mode: str | None = None,
                             _need = _tool_tok + (len(msg) // 4) + _max_out + 64
                             if _slot_raw and _need > _slot_raw:
                                 payload_dict.pop("tools", None)
+                                # The briefing names tools we are no longer
+                                # sending — never instruct a model to use
+                                # something it was not given.
+                                _m = payload_dict.get("messages") or []
+                                if _briefing_line and _m and _m[0].get("content") == _briefing_line:
+                                    _m.pop(0)
                                 _warn_tool_fit(name, port, _slot_raw, _need, _tool_tok)
                             else:
                                 payload_dict["tools"] = _tool_schemas_list
@@ -15380,6 +15773,44 @@ def _hostname() -> str:
 def _warn(s): return f"\033[33m!\033[0m {s}"
 def _fail(s): return f"\033[31m✗\033[0m {s}"
 
+def _fix_llama_script(script_path) -> bool:
+    """Fix a llama startup script -- ensure --host 0.0.0.0 is on the right lines.
+
+    MODULE LEVEL, not nested: cmd_doctor --fix calls this, but it used to be
+    defined inside cmd_firewall -- a name in one function is invisible to
+    another, so doctor --fix raised NameError exactly when a box had a broken
+    startup script to repair (yalla 2026-11-27). It also leaned on the local
+    _run lambda of cmd_firewall, so it carries its own runner now.
+    """
+    def _sh(cmd: str):
+        return subprocess.run(cmd, shell=True, capture_output=True,
+                              text=True, timeout=10)
+    if _sh(f"test -f {script_path}").returncode != 0:
+        return False
+    content = _sh(f"cat {script_path}").stdout
+    fixed = False
+    new_lines = []
+    for line in content.split("\n"):
+        stripped = line.strip()
+        # Fix broken LLAMA_BIN= line that has --host attached
+        if stripped.startswith("LLAMA_BIN=") and "--host" in stripped:
+            line = line.replace(" --host 0.0.0.0", "").replace(" --host", "")
+            fixed = True
+        # Add --host 0.0.0.0 to lines that invoke the binary (have -m or --port)
+        if ("$LLAMA_BIN" in line or "llama-server" in line) and ("-m " in line or "--port" in line) and "--host" not in line:
+            line = line.replace("llama-server ", "llama-server --host 0.0.0.0 ", 1) if "llama-server" in line else line.replace("$LLAMA_BIN ", "$LLAMA_BIN --host 0.0.0.0 ", 1)
+            fixed = True
+        new_lines.append(line)
+    if fixed:
+        import tempfile
+        tmp = tempfile.NamedTemporaryFile(mode='w', suffix='.sh', delete=False)
+        tmp.write("\n".join(new_lines))
+        tmp.close()
+        _sh(f"sudo cp {tmp.name} {script_path} && sudo chmod +x {script_path}")
+        _sh(f"rm -f {tmp.name}")
+    return fixed
+
+
 def cmd_doctor(args) -> None:
     """One-glance health report: install + hub + agent + local bee + version.
     Output is pasteable for support — pure text + ANSI colors only."""
@@ -15631,27 +16062,42 @@ def cmd_doctor(args) -> None:
         except Exception:
             print(f"  vpn:    {_ok(f'tailscale active ({ts_ip.stdout.strip()})')}")
     else:
-        print(f"  vpn:    {_warn('tailscale not running')}   install: curl -fsSL https://tailscale.com/install.sh | sh")
+        print(f"  vpn:    {_warn('tailscale not up')}")
+        # The report stays one line; the STEPS live underneath it, so the
+        # reader gets the reminder without the table turning into a wall.
+        _print_tailscale_ladder(indent="          ")
 
     # Firewall — `platform` is module-level; do NOT shadow it here (see the
     # resilience section above: a later local import breaks earlier uses).
+    #
+    # Read the rules through _ufw_status_text(), which escalates: a
+    # non-root `ufw status` leaves stdout EMPTY, and the old code read
+    # that as "no firewall — LLMs open to internet" on a box whose ufw
+    # was on and enforcing (yalla 2026-11-27). Never report a firewall
+    # as absent just because we could not read it.
     fw_ok = False
     if platform.system() == "Linux":
-        r = _r("ufw status 2>/dev/null")
-        if "Status: active" in r.stdout:
-            # Check if LLM ports are allowed
-            blocked = []
-            for port in (llm_ports if llms else []):
-                if f"{port}" not in r.stdout:
-                    blocked.append(port)
+        rules = _ufw_status_text()
+        if rules is not None and "Status: active" in rules:
+            blocked = [p for p in (llm_ports if llms else [])
+                       if not _ufw_port_open(rules, p)]
             if blocked:
                 bp = ", ".join(str(p) for p in blocked)
                 print(f"  fw:     {_warn(f'ufw active but port {bp} blocked')}   run `{APP} firewall --apply`")
             else:
                 print(f"  fw:     {_ok('ufw active, LLM ports open')}")
                 fw_ok = True
-        elif "Status: inactive" in r.stdout:
+        elif rules is not None:
             print(f"  fw:     {_warn('ufw inactive — LLMs open to internet')}   run `{APP} firewall --apply --mode lan`")
+        elif shutil.which("ufw"):
+            # Installed, but reading the rules needs root we did not take.
+            # _firewall_active() falls back to the systemd unit state, so
+            # we can still say whether it is ON without lying either way.
+            if _firewall_active() is True:
+                print(f"  fw:     {_ok('ufw active (rules need root to read)')}   sudo ufw status")
+                fw_ok = True
+            else:
+                print(f"  fw:     {_warn('ufw present — cannot read rules from here')}   sudo ufw status")
         else:
             r2 = _r("firewall-cmd --state 2>/dev/null")
             if "running" in r2.stdout:
@@ -15861,6 +16307,124 @@ WantedBy=default.target
     else:
         print(f"\n  to auto-fix all issues: {APP} doctor --fix")
 
+# ---------------------------------------------------------------------------
+# The tailscale ladder — remind the user what comes AFTER each step.
+
+# Installing tailscale is a SEQUENCE, but every hint in this file printed
+# ONE line of it. So a user who had just run `sudo tailscale up` and seen
+# "Success." had no idea the VPN address still had to be confirmed, or
+# that the firewall rule is a SEPARATE step (yalla 2026-11-27: tailscale
+# was up, `hivv firewall --apply --mode tailscale` crashed on a NameError,
+# and nothing on screen said what to do next).
+
+# One ordered ladder. Every site that mentions a step prints the WHOLE
+# ladder with a marker on the next thing to do, so a finished step can
+# never strand the user.
+# Step 1 names `hivv install tailscale`, NOT the raw tailscale.com curl:
+# that installer cases only on ID= from /etc/os-release and exits 1 on any
+# distro it has never heard of (BOSS GNU/Linux, ID=boss — found live on
+# ashy 2026-11-27). Our door runs three tiers, so it works where theirs
+# refuses. Never point a user at a command that cannot work on their box.
+_TAILSCALE_STEPS = (
+    ("install the client",
+     "hivv install tailscale"),
+    ("start it and log in",
+     "sudo tailscale up   (then OPEN the URL it prints)"),
+    ("confirm your VPN address",
+     "tailscale ip -4     (expect a 100.x.x.x address)"),
+    ("open your LLMs to the tailnet",
+     "hivv firewall --apply --mode tailscale"),
+)
+
+# The LAST thing to do, and the only one this box can never check for
+# itself — it has to be run from somewhere else. Kept out of the progress
+# count on purpose: a step that can never read True would pin the ladder
+# at N-1 forever and cry wolf after every run.
+_TAILSCALE_FINAL = ("check it from another machine",
+                    "hivv reach <this-bee>   (or: curl http://<100.x>:8080/health)")
+
+
+def _tailscale_progress() -> list:
+    """How far through _TAILSCALE_STEPS this box is.
+
+    Returns a list of True (done) / False (not done) / None (cannot tell
+    from here). None is NOT False: the firewall rule needs root to read,
+    and an unknown must never be shown as "not done" — that is what made
+    the old output keep nagging a user who had already finished.
+    """
+    out = [False] * len(_TAILSCALE_STEPS)
+    have = bool(shutil.which("tailscale"))
+    out[0] = have
+    if not have:
+        return out
+    running = False
+    ip = ""
+    try:
+        r = subprocess.run(["tailscale", "status", "--json"],
+                           capture_output=True, text=True, timeout=8)
+        if r.returncode == 0 and r.stdout:
+            try:
+                d = json.loads(r.stdout)
+                running = d.get("BackendState") == "Running"
+            except Exception:
+                pass
+    except Exception:
+        pass
+    try:
+        r = subprocess.run(["tailscale", "ip", "-4"],
+                           capture_output=True, text=True, timeout=8)
+        if r.returncode == 0:
+            ip = (r.stdout or "").strip().splitlines()[:1]
+            ip = ip[0].strip() if ip else ""
+    except Exception:
+        pass
+    out[1] = running
+    # step 3 (confirm the address) is really "did you look at it" — once
+    # we hold an address AND are logged in, the user has what they were
+    # told to confirm.
+    out[2] = bool(ip) and running
+    # step 4 needs root to verify; ask, never guess.
+    rules = _ufw_status_text()
+    if rules is None and shutil.which("ufw"):
+        out[3] = None
+    elif rules is not None:
+        out[3] = "100.64.0.0/10" in rules
+    else:
+        # no ufw at all — nothing to open, so the step is vacuously done
+        out[3] = True
+    return out
+
+
+def _print_tailscale_ladder(progress=None, *, indent="   ") -> None:
+    """Print the whole ladder, then say what to do NEXT — and after that.
+
+    This is the "remind me what comes after each step" surface. Every
+    caller that used to print one line of advice prints this instead, so
+    a finished step can never strand the user at a dead end: the first
+    unfinished step is marked and named, and once every step is done the
+    final cross-machine check is named too.
+    """
+    st = list(progress) if progress is not None else _tailscale_progress()
+    if len(st) < len(_TAILSCALE_STEPS):
+        st = st + [None] * (len(_TAILSCALE_STEPS) - len(st))
+    marks = {True: "\033[32mdone\033[0m", False: "\033[2m\u00b7\033[0m",
+             None: "\033[33m?\033[0m"}
+    nxt = next((i for i, v in enumerate(st) if v is not True), None)
+    print(f"{indent}\033[1mtailscale setup \u2014 {sum(1 for v in st if v is True)}"
+          f"/{len(_TAILSCALE_STEPS)} steps\033[0m")
+    for i, (label, cmd) in enumerate(_TAILSCALE_STEPS):
+        arrow = "\033[1;33m\u2192\033[0m" if i == nxt else " "
+        print(f"{indent} {arrow} {i + 1}. {label:<30} {marks[st[i]]}")
+        print(f"{indent}      {cmd}")
+    if nxt is None:
+        print(f"{indent} \033[32mthen\033[0m {_TAILSCALE_FINAL[1]}")
+    else:
+        print(f"{indent} \033[1;33mnext:\033[0m {_TAILSCALE_STEPS[nxt][1]}")
+        if st[nxt] is None:
+            print(f"{indent}   (needs root to confirm \u2014 run it if you have not)")
+        if nxt == len(_TAILSCALE_STEPS) - 1:
+            print(f"{indent} \033[2mafter that:\033[0m {_TAILSCALE_FINAL[1]}")
+
 def cmd_firewall(args) -> None:
     """Detect local LLM servers and configure firewall to let other hivv nodes reach them.
     Supports: LAN-only (default), Tailscale VPN, or manual rules.
@@ -15885,34 +16449,6 @@ def cmd_firewall(args) -> None:
         r = _run(f"sudo cp {tmp.name} {path}")
         _run(f"rm -f {tmp.name}")
         return r
-
-    # Helper: fix a broken llama startup script
-    def _fix_llama_script(script_path):
-        """Fix a llama startup script — ensure --host 0.0.0.0 is on the right lines."""
-        if _run(f"test -f {script_path}").returncode != 0:
-            return False
-        content = _run(f"cat {script_path}").stdout
-        fixed = False
-        new_lines = []
-        for line in content.split("\n"):
-            stripped = line.strip()
-            # Fix broken LLAMA_BIN= line that has --host attached
-            if stripped.startswith("LLAMA_BIN=") and "--host" in stripped:
-                line = line.replace(" --host 0.0.0.0", "").replace(" --host", "")
-                fixed = True
-            # Add --host 0.0.0.0 to lines that invoke the binary (have -m or --port)
-            if ("$LLAMA_BIN" in line or "llama-server" in line) and ("-m " in line or "--port" in line) and "--host" not in line:
-                line = line.replace("llama-server ", "llama-server --host 0.0.0.0 ", 1) if "llama-server" in line else line.replace("$LLAMA_BIN ", "$LLAMA_BIN --host 0.0.0.0 ", 1)
-                fixed = True
-            new_lines.append(line)
-        if fixed:
-            import tempfile
-            tmp = tempfile.NamedTemporaryFile(mode='w', suffix='.sh', delete=False)
-            tmp.write("\n".join(new_lines))
-            tmp.close()
-            _run(f"sudo cp {tmp.name} {script_path} && sudo chmod +x {script_path}")
-            _run(f"rm -f {tmp.name}")
-        return fixed
 
     if not models:
         print(f"\n{fail} No local LLM servers found running.")
@@ -15981,18 +16517,23 @@ def cmd_firewall(args) -> None:
     else:
         print(f"   {ok} all LLMs bound to 0.0.0.0 — network reachable")
 
-    # Look for stopped LLMs (informational only)
+    # Look for stopped LLMs (informational only).
+    # `_r` only exists in OTHER functions (cmd_up, _run_health_checks, ...);
+    # cmd_firewall binds `_run`. Calling `_r` here raised NameError and
+    # killed `hivv firewall --apply --mode tailscale` on yalla 2026-11-27
+    # -- the one command that turns the tailscale mode on.
     import glob as _glob
     for pattern in ["/home/*/llama.cpp/servers/start-*.sh"]:
         for s in _glob.glob(pattern):
-            content = _r(f"cat {s} 2>/dev/null").stdout
+            content = _run(f"cat {s} 2>/dev/null").stdout
             if content and "llama-server" in content:
                 print(f"  {warn} startup script found: {s}")
 
     print(f"\n  to auto-fix all issues: {APP} doctor --fix")
 
-    # 3. Check for Tailscale
-    # 3. Check for Tailscale
+    # 3. Check for Tailscale — then show the WHOLE ladder, so a finished
+    # step always names the next one (yalla 2026-11-27: tailscale was up,
+    # and nothing on screen said the firewall rule was still outstanding).
     tailscale_ip = None
     tailscale_ok = False
     try:
@@ -16017,9 +16558,8 @@ def cmd_firewall(args) -> None:
 
     if not tailscale_ok:
         print(f"\n\033[1mtailscale\033[0m")
-        print(f"   {warn} not installed — nodes on different networks won't reach you")
-        print(f"   install: curl -fsSL https://tailscale.com/install.sh | sh")
-        print(f"   then:    sudo tailscale up")
+        print(f"   {warn} not up — nodes on different networks won't reach you")
+    _print_tailscale_ladder()
 
     # 3. Detect LAN subnet
     lan_ip = ""
@@ -16048,30 +16588,43 @@ def cmd_firewall(args) -> None:
         print(f"   {ok} LAN IP: {lan_ip}")
         print(f"   {ok} subnet: {lan_subnet}")
 
-    # 4. Check current firewall status
+    # 4. Check current firewall status.
+    # `ufw status` needs ROOT. A normal user's run leaves stdout EMPTY
+    # (the ERROR goes to stderr), and the old code read that emptiness as
+    # "no firewall detected" — then, because fw_tool stayed None, step 5
+    # found no ports needing rules and printed "All LLM ports already have
+    # firewall rules" over rules nobody had written. Say UNKNOWN instead.
     print(f"\n\033[1mfirewall status\033[0m")
 
     fw_tool = None
+    fw_rules = None          # ufw status text when we could read it
+    fw_unreadable = False    # tool present, rules need root to read
     if system == "Linux":
-        r = _run("ufw status 2>/dev/null")
-        if "Status: active" in r.stdout:
-            print(f"   {ok} ufw active")
+        if shutil.which("ufw"):
             fw_tool = "ufw"
-        elif "Status: inactive" in r.stdout:
-            print(f"   {warn} ufw installed but inactive")
-            fw_tool = "ufw"
-        else:
+            fw_rules = _ufw_status_text()
+            if fw_rules is None:
+                fw_unreadable = True
+                print(f"   {warn} ufw installed — rules need root to read")
+                print(f"      read them: sudo ufw status")
+            elif "Status: active" in fw_rules:
+                print(f"   {ok} ufw active")
+            else:
+                print(f"   {warn} ufw installed but inactive")
+        elif shutil.which("firewall-cmd"):
             r2 = _run("firewall-cmd --state 2>/dev/null")
             if "running" in r2.stdout:
                 print(f"   {ok} firewalld active")
                 fw_tool = "firewalld"
             else:
-                r3 = _run("iptables -L INPUT -n 2>/dev/null")
-                if r3.returncode == 0:
-                    print(f"   {warn} iptables active (no ufw/firewalld)")
-                    fw_tool = "iptables"
-                else:
-                    print(f"   {warn} no firewall detected — ports may be open to everyone")
+                fw_tool = None
+        if fw_tool is None:
+            r3 = _run("iptables -L INPUT -n 2>/dev/null")
+            if r3.returncode == 0:
+                print(f"   {warn} iptables active (no ufw/firewalld)")
+                fw_tool = "iptables"
+            else:
+                print(f"   {warn} no firewall detected — ports may be open to everyone")
     elif system == "Darwin":
         r = _run("pfctl -s info 2>/dev/null")
         if "Enabled" in r.stdout:
@@ -16089,12 +16642,19 @@ def cmd_firewall(args) -> None:
             print(f"   {warn} Windows Firewall inactive")
             fw_tool = "windows"
 
-    # 5. Determine which ports need rules
+    # 5. Determine which ports need rules.
+    # When the rules could not be READ, closed_ports stays empty — and an
+    # empty list used to print "All LLM ports already have firewall rules."
+    # That is the exact opposite of what we know. Track it explicitly.
     closed_ports = []
-    if fw_tool == "ufw":
-        r = _run("ufw status numbered 2>/dev/null")
+    if fw_tool == "ufw" and fw_unreadable:
+        # Unknown, not empty: assume none are open so --apply re-writes
+        # them (ufw allow is idempotent — a duplicate is a no-op).
+        closed_ports = list(ports)
+        print(f"\n   {warn} cannot read ufw rules without root — assuming none are set")
+    elif fw_tool == "ufw":
         for port in ports:
-            if f"{port}" not in r.stdout:
+            if not _ufw_port_open(fw_rules or "", port):
                 closed_ports.append(port)
     elif fw_tool == "firewalld":
         for port in ports:
@@ -16112,7 +16672,9 @@ def cmd_firewall(args) -> None:
             if "hivv" not in r.stdout.lower():
                 closed_ports.append(port)
 
-    if not closed_ports:
+    if fw_tool is None:
+        print(f"\n   {warn} no firewall tool found — nothing to apply rules to")
+    elif not closed_ports:
         print(f"\n{ok} All LLM ports already have firewall rules.")
     else:
         print(f"\n   ports needing rules: {', '.join(str(p) for p in closed_ports)}")
@@ -16154,31 +16716,59 @@ def cmd_firewall(args) -> None:
     if not allow_from:
         print(f"   {fail} no valid source for mode '{mode}'")
         if mode == "tailscale" and not tailscale_ip:
-            print(f"   install tailscale first: curl -fsSL https://tailscale.com/install.sh | sh && sudo tailscale up")
+            # The ladder, not one line: installing the client is only
+            # step 1 of 5, and nothing here used to say what follows.
+            _print_tailscale_ladder()
         return
 
+    if fw_tool is None:
+        print(f"\n   {fail} no firewall tool to apply rules to")
+        return
+
+    # Writing rules needs ROOT. Decide that ONCE, before the loop, so we
+    # never print a per-port "✓" for a command that silently failed:
+    # `sudo ufw allow` with no tty answers "a terminal is required to
+    # read the password", and the old code reported each port as allowed
+    # anyway because it never checked the exit code against a real root.
+    root_prefix = _fw_root_prefix(allow_prompt=True)
+    manual: list[str] = []
+    if root_prefix is None:
+        print(f"\n   {warn} cannot get root from here — printing the rules for you to run")
+
+    applied = 0
+    failed = 0
     for port in closed_ports:
         for label, source in allow_from:
             if fw_tool == "ufw":
-                if source:
-                    r = _run(f"sudo ufw allow from {source} to any port {port} proto tcp")
-                else:
-                    r = _run(f"sudo ufw allow {port}/tcp")
-                if r.returncode == 0:
+                rule = (f"ufw allow from {source} to any port {port} proto tcp"
+                        if source else f"ufw allow {port}/tcp")
+                if root_prefix is None:
+                    manual.append(f"sudo {rule}")
+                    continue
+                rc, err = _fw_run(rule, prefix=root_prefix)
+                if rc == 0:
+                    applied += 1
                     print(f"   {ok} ufw: port {port} allowed from {label}")
                 else:
-                    print(f"   {fail} ufw: failed: {r.stderr.strip()}")
+                    failed += 1
+                    print(f"   {fail} ufw: failed: {err}")
 
             elif fw_tool == "firewalld":
                 if source:
-                    r = _run(f"sudo firewall-cmd --add-rich-rule='rule family=ipv4 source address={source} port port={port} protocol=tcp accept' --permanent")
+                    rule = f"firewall-cmd --add-rich-rule='rule family=ipv4 source address={source} port port={port} protocol=tcp accept' --permanent"
                 else:
-                    r = _run(f"sudo firewall-cmd --add-port={port}/tcp --permanent")
-                _run("sudo firewall-cmd --reload")
-                if r.returncode == 0:
+                    rule = f"firewall-cmd --add-port={port}/tcp --permanent"
+                if root_prefix is None:
+                    manual.append(f"sudo {rule}")
+                    continue
+                rc, err = _fw_run(rule, prefix=root_prefix)
+                _fw_run("firewall-cmd --reload", prefix=root_prefix)
+                if rc == 0:
+                    applied += 1
                     print(f"   {ok} firewalld: port {port} allowed from {label}")
                 else:
-                    print(f"   {fail} firewalld: failed: {r.stderr.strip()}")
+                    failed += 1
+                    print(f"   {fail} firewalld: failed: {err}")
 
             elif fw_tool == "pf":
                 rule = f"pass in proto tcp from {source or 'any'} to any port {port}"
@@ -16186,25 +16776,43 @@ def cmd_firewall(args) -> None:
                 print(f"   then: sudo pfctl -f /etc/pf.conf")
 
             elif fw_tool == "windows":
-                if source:
-                    r = _run(f'netsh advfirewall firewall add rule name="hivv {port} {label}" dir=in action=allow protocol=TCP localport={port} remoteip={source}')
-                else:
-                    r = _run(f'netsh advfirewall firewall add rule name="hivv {port}" dir=in action=allow protocol=TCP localport={port}')
-                if r.returncode == 0:
+                rule = (f'netsh advfirewall firewall add rule name="hivv {port} {label}" dir=in action=allow protocol=TCP localport={port} remoteip={source}'
+                        if source else
+                        f'netsh advfirewall firewall add rule name="hivv {port}" dir=in action=allow protocol=TCP localport={port}')
+                rc, err = _fw_run(rule, prefix="")
+                if rc == 0:
+                    applied += 1
                     print(f"   {ok} Windows: port {port} allowed from {label}")
                 else:
-                    print(f"   {fail} Windows: failed: {r.stderr.strip()}")
+                    failed += 1
+                    print(f"   {fail} Windows: failed: {err}")
 
     # 8. Also handle gateway port 3011
-    if fw_tool and "3011" not in str(closed_ports):
-        pass  # already open or not needed
-    elif fw_tool == "ufw" and do_apply:
+    if fw_tool == "ufw" and do_apply:
+        gw_ok = True
         for label, source in allow_from:
-            if source:
-                _run(f"sudo ufw allow from {source} to any port 3011 proto tcp")
-            else:
-                _run(f"sudo ufw allow 3011/tcp")
-        print(f"   {ok} gateway port 3011 configured")
+            rule = (f"ufw allow from {source} to any port 3011 proto tcp"
+                    if source else "ufw allow 3011/tcp")
+            if root_prefix is None:
+                manual.append(f"sudo {rule}")
+                gw_ok = False
+                continue
+            rc, err = _fw_run(rule, prefix=root_prefix)
+            if rc != 0:
+                gw_ok = False
+                failed += 1
+                print(f"   {fail} gateway 3011: {err}")
+        if gw_ok and (applied or not manual):
+            print(f"   {ok} gateway port 3011 configured")
+
+    if manual:
+        print(f"\n   {warn} {len(manual)} rule(s) NOT applied — no root. Run these:")
+        for m in manual:
+            print(f"      {m}")
+
+    # Did ANY of it land? Only an empty manual[] AND no failures counts —
+    # a partial apply must not be reported as a configured firewall.
+    rules_ok = not manual and not failed
 
     # THE OLD LINE PRINTED "firewall configured!" — untrue whenever ufw is
     # inactive, because `--apply` never runs `ufw enable` (verified: there is
@@ -16215,7 +16823,16 @@ def cmd_firewall(args) -> None:
     # actually happened, and hand over the sequence that really activates
     # protection, with `allow 22` FIRST: a host that SSHes in from the
     # internet locks itself out the instant default-deny lands without it.
-    if fw_tool == "ufw" and _firewall_active() is False:
+    if not rules_ok:
+        # Nothing (or not everything) was enforced. Do NOT fall through to
+        # "firewall configured!" — that is the lie this section exists to
+        # kill. manual[] = could not get root; failed[] = root but the
+        # command itself rejected the rule.
+        if manual:
+            print(f"   {fail} firewall NOT configured — the rules above still need root")
+        else:
+            print(f"   {fail} firewall NOT fully configured — some rules failed (see above)")
+    elif fw_tool == "ufw" and _firewall_active() is False:
         print(f"\n   {warn} allow-rules written, but ufw is still INACTIVE — nothing is enforced yet.")
         print(f"   to actually turn protection on (allow 22 FIRST):")
         print(f"      sudo ufw allow 22/tcp")
@@ -16229,6 +16846,13 @@ def cmd_firewall(args) -> None:
             print(f"   your LLMs are only reachable via Tailscale VPN")
             print(f"   other hivv nodes need Tailscale installed to reach you")
     print(f"   restart llama.cpp for changes to take effect (if binding to specific IPs)")
+
+    # Whatever just happened, hand the user the NEXT step — this is the
+    # "remind me after each step" surface for the mode they just ran.
+    # Steps 1-3 are provable from here; step 4 only if the rules above
+    # actually landed (rules_ok is False when they did not).
+    if do_apply and mode == "tailscale":
+        _print_tailscale_ladder([True, True, True, rules_ok])
 
 def cmd_up(args) -> None:
     """Quick 3-line status check — the "you good?" command."""
@@ -18729,6 +19353,15 @@ def _llm_diagnose(log_text: str) -> list:
             if needle in low]
 
 
+# The smallest slot that can hold a real AGENT session (an OpenCode prompt:
+# system prompt + the full tool catalog). Measured 4702 tokens on yalla
+# 2026-11-27, rounded up. hivv's own toolkit is smaller (~2.9k), and a
+# floor that only knew about hivv's own tools called a 1024-token slot
+# "fine" -- which is exactly how every OpenCode request on that box died
+# with HTTP 400 while the doctor said everything was fine.
+_AGENT_TOOLKIT_FLOOR = 5000
+
+
 def cmd_llm_doctor(args) -> None:
     """Diagnose the local LLM: binary → model → serving → stale pid → log
     autopsy → disk. --fix corrects what is SAFE to correct (relaunch a dead
@@ -18820,25 +19453,51 @@ def cmd_llm_doctor(args) -> None:
                                  if _tl else 1500)
                 except Exception:
                     _tool_cost = 3000   # conservative when we cannot measure
-                _floor = max(512, _tool_cost)
+                # The floor is the BIGGEST toolkit that will land on this
+                # server, not just hivv's own. hivv's tools cost ~2.9k
+                # tokens; an OpenCode session (system prompt + the full tool
+                # catalog) measured 4702 on yalla 2026-11-27 -- and the 2.9k
+                # floor called a 1024-token slot "fine" while every OpenCode
+                # request died with HTTP 400.
+                _floor = max(512, _tool_cost, _AGENT_TOOLKIT_FLOOR)
                 if _nc and _nc < _floor:
-                    _np_now = max(1, round(_eff / _nc)) if _nc else 1
                     print(f"  ✗ slots: {_ns} × n_ctx_slot {_nc} — TOO SMALL for the "
-                          f"toolkit (need ~{_floor}) — tool requests WILL 400!")
+                          f"toolkit (need ~{_floor}: hivv's own ~{_tool_cost}, "
+                          f"an agent session ~{_AGENT_TOOLKIT_FLOOR}) — "
+                          f"tool requests WILL 400!")
                     problems.append(
                         f"slot context {_nc} < {_floor} — {APP} llm config --set np=1 "
-                        f"(→ {_eff}/slot) or --set ctx={max(_eff, _floor * _np_now)} "
-                        f"&& {APP} restart llm")
+                        f"--set ctx={max(_eff, _floor)} && {APP} restart llm "
+                        f"(np=1 gives the slot the WHOLE context; keeping "
+                        f"np={_ns} would need ctx>={_floor * max(1, _ns)})")
                 else:
                     print(f"  ✓ slots: {_ns} × n_ctx_slot {_nc}   (hivv config ctx: -c{_eff})")
             else:
                 print(f"  · slots: {len(_slots) if isinstance(_slots, list) else 0} slot(s), no n_ctx exposed")
         except Exception as e:
             print(f"  · slots: unavailable ({str(e)[:60]})")
-        _reply, _rp = _local_ask("Reply with exactly: OK", max_tokens=8, timeout=25)
+        _why: dict = {}
+        _reply, _rp = _local_ask("Reply with exactly: OK", max_tokens=8,
+                                 timeout=25, why=_why)
         if not _reply.strip():
-            print(f"  ✗ round-trip: empty/no reply from :{_rp}")
-            problems.append("round-trip returns nothing — see log; try: " + APP + " restart llm")
+            _port = _rp or _why.get("port") or 0
+            _reason = _why.get("reason") or "no answer"
+            _kind = _why.get("kind") or "unknown"
+            print(f"  ✗ round-trip: {_reason} (:{_port})")
+            if _kind == "timeout":
+                # A BUSY server is not a DEAD server. Reporting the first as
+                # the second sent the operator to restart a healthy box
+                # (yalla 2026-11-27): the one slot was busy with a 4.7k-token
+                # prompt and the 25s probe timed out behind it.
+                print("    the server is BUSY, not broken — one slot, and a long "
+                      "prompt was in front of the probe")
+                problems.append(
+                    "round-trip timed out — the server is busy (one slot), not "
+                    "dead; it answers once the request in front of it finishes")
+            else:
+                problems.append(
+                    f"round-trip returns nothing ({_reason}) — see log; try: "
+                    f"{APP} restart llm")
         elif _stream_error_hint(_reply) and not re.search(r"([^\n]{2,14}?)\1{4,}", _reply):
             print(f"  ✗ round-trip: backend error, not an answer: {_reply.strip()[:80]}")
             problems.append(_stream_error_hint(_reply))
@@ -19508,6 +20167,13 @@ _BUILD_TOOL_HINTS = {
     "brew":   "brew install git cmake",
 }
 
+# Homebrew's installer, printed as a HINT for a human to copy-paste — the CLI
+# never fetches it. Held at module level for the same reason FALLBACK_RAW_BASE
+# is: the flood law reserves a githubusercontent literal inside a FUNCTION for
+# _fallback_url alone (tests/test_fallback.py::TestFloodLaw), so no other
+# function body may name GitHub — not even to print an address.
+_BREW_INSTALL_URL = "https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh"
+
 _BUILD_TOOL_LABELS = {"cxx": "c++ compiler"}
 
 
@@ -19678,6 +20344,29 @@ def _ensure_build_tools(tools: list) -> bool:
 
     # Could not auto-install — print the EXACT command (never a traceback).
     hint = _BUILD_TOOL_HINTS.get(pm, "")
+    if not hint and sys.platform == "darwin":
+        # A Mac with no Homebrew has NO package manager to name, so the Linux
+        # line below ("with your package manager") is a dead end — and it
+        # lists git, a C++ compiler and make, three things this Mac ALREADY
+        # has (Xcode Command Line Tools). It was asking for the wrong tools:
+        # only cmake was missing, and a Mac has no way to get it without
+        # Homebrew. Say that, then offer the path that needs neither.
+        print(file=sys.stderr)
+        print(f"  \033[1;31m✗\033[0m missing build tool(s): {', '.join(names)}",
+              file=sys.stderr)
+        print(f"  \033[1m→\033[0m this Mac needs cmake — git, your C++ compiler "
+              f"and make are already installed", file=sys.stderr)
+        print(file=sys.stderr)
+        print("      install Homebrew, then cmake:", file=sys.stderr)
+        print(f'        /bin/bash -c "$(curl -fsSL {_BREW_INSTALL_URL})"',
+              file=sys.stderr)
+        print("        brew install cmake", file=sys.stderr)
+        print(file=sys.stderr)
+        print(f"      \033[1mor skip the build entirely\033[0m — llama.cpp ships "
+              f"prebuilt macOS binaries (no Homebrew):", file=sys.stderr)
+        print(f"        {APP} llm install-llama --auto", file=sys.stderr)
+        print()
+        return False
     if not hint:
         hint = ("install git, cmake, a C++ compiler and make with your package "
                 f"manager, then re-run `{APP} llm install-llama --auto`")
@@ -19688,6 +20377,168 @@ def _ensure_build_tools(tools: list) -> bool:
     print(f"      {APP} llm install-llama --auto", file=sys.stderr)
     print()
     return False
+
+
+# ── PREBUILT llama.cpp — no git, no cmake, no compiler, no Homebrew ──────────
+#
+# THE PROBLEM (a MacBook Air, 2026-11-28): `hivv install llm` wanted to COMPILE
+# llama.cpp, so it demanded cmake first. On a Mac with no Homebrew there is no
+# package manager to name, so the hint fell back to the Linux line — "install
+# git, cmake, a C++ compiler and make with your package manager" — listing
+# three tools the Mac already had, and naming no way to get the one it lacked.
+#
+# llama.cpp SHIPS prebuilt macOS binaries (16.9 MB arm64 / 12.7 MB x64) that
+# need none of it: download, unpack into ~/llama.cpp/build/bin, done. That is
+# exactly where _llama_tree_state looks for llama-server, so a later run reads
+# "built" and never asks for a compiler again.
+#
+# Verified on b12823:
+#   · LC_RPATH is @loader_path — RELATIVE, so the binary and its dylibs move
+#     together (no absolute build path is baked in).
+#   · the arm64 build bundles libggml-metal.dylib → GPU offload works;
+#   · the x64 build does NOT → CPU only. That is a FEATURE for Intel Macs:
+#     `-ngl 99` on a Radeon Vega is the documented "garbage tokens" case, and
+#     a CPU-only build cannot reproduce it.
+#
+# One GitHub request, only on a path a HUMAN asked for (`hivv install llm`) —
+# never in the 5-minute auto-update loop.
+
+_LLAMA_RELEASES_API = "https://api.github.com/repos/ggerganov/llama.cpp/releases?per_page=10"
+
+
+def _llama_prebuilt_arch() -> str:
+    """'macos-arm64' / 'macos-x64', or '' when we ship no prebuilt for this box."""
+    if sys.platform != "darwin":
+        return ""                       # macOS is the platform we ship these for
+    m = (platform.machine() or "").lower()
+    if m in ("arm64", "arm64e"):
+        return "macos-arm64"
+    if m in ("x86_64", "amd64"):
+        return "macos-x64"
+    return ""                           # an arch llama.cpp does not publish
+
+
+def _llama_prebuilt_asset():
+    """(tag, download_url) of the NEWEST prebuilt for this Mac, or (None, None).
+
+    The release list is queried instead of hard-coding a tag: a pinned build
+    goes stale the day llama.cpp ships a fix, and stale is the one thing an
+    installer must not be.
+    """
+    arch = _llama_prebuilt_arch()
+    if not arch:
+        return None, None
+    try:
+        req = urllib.request.Request(_LLAMA_RELEASES_API,
+                                     headers={"User-Agent": f"{APP}/{VERSION}"})
+        with urllib.request.urlopen(req, timeout=20) as r:
+            rels = json.loads(r.read().decode("utf-8", "replace"))
+    except Exception:
+        return None, None               # offline / rate-limited → source build
+    if not isinstance(rels, list):
+        return None, None
+    for rel in rels:
+        if not isinstance(rel, dict):
+            continue
+        tag = str(rel.get("tag_name") or "")
+        if not tag:
+            continue
+        want = f"llama-{tag}-bin-{arch}.tar.gz"
+        for a in (rel.get("assets") or []):
+            if isinstance(a, dict) and str(a.get("name") or "") == want \
+                    and a.get("browser_download_url"):
+                return tag, str(a["browser_download_url"])
+    return None, None
+
+
+def _llama_prebuilt_install() -> bool:
+    """Unpack the official prebuilt into _LLAMA_CPP_BIN. True when it works.
+
+    Never raises: a dead network, an odd archive or an unreadable dir all
+    return False so the caller can fall back to the source build — a prebuilt
+    that cannot be fetched must not be a dead end, just a slower path.
+    """
+    state = _llama_tree_state(_LLAMA_CPP_DIR)
+    if state == "built":
+        print(f"  \033[32m✓\033[0m llama.cpp already installed: "
+              f"{os.path.join(_LLAMA_CPP_BIN, 'llama-server')}")
+        return True
+    if state == "occupied":
+        return False                    # never touch it — the caller names it
+
+    tag, url = _llama_prebuilt_asset()
+    if not url:
+        return False
+    arch = _llama_prebuilt_arch()
+    print(f"  \033[1m→\033[0m prebuilt llama.cpp {tag} ({arch}) — "
+          f"no compiler needed (~17 MB)")
+
+    import subprocess as _sp
+    tmp = tempfile.mkdtemp(prefix="hivv-llama-bin-")
+    try:
+        tgz = os.path.join(tmp, "llama.tar.gz")
+        if shutil.which("curl"):
+            get = ["curl", "-fL", "--retry", "3", "--connect-timeout", "20",
+                   "-o", tgz, url]
+        elif shutil.which("wget"):
+            get = ["wget", "-q", "--tries=3", "-O", tgz, url]
+        else:
+            return False
+        try:
+            if _sp.call(get) != 0:
+                return False
+            if _sp.call(["tar", "-xzf", tgz, "-C", tmp]) != 0:
+                return False
+        except OSError:
+            return False
+
+        # The archive is llama-bNNNNN/<binaries> — find that one directory.
+        inner = [d for d in os.listdir(tmp)
+                 if os.path.isdir(os.path.join(tmp, d))]
+        if not inner:
+            return False
+        src = os.path.join(tmp, inner[0])
+        if not os.path.isfile(os.path.join(src, "llama-server")):
+            return False                # not a llama.cpp release layout
+
+        # Into ~/llama.cpp/build/bin — precisely where _llama_tree_state and
+        # every serve path already look, so nothing else has to learn this.
+        os.makedirs(_LLAMA_CPP_BIN, exist_ok=True)
+        for fn in os.listdir(src):
+            s, d = os.path.join(src, fn), os.path.join(_LLAMA_CPP_BIN, fn)
+            if os.path.isdir(s):
+                continue
+            if os.path.exists(d):
+                os.remove(d)            # a stale build must not shadow this
+            shutil.copy2(s, d)
+
+        bin_path = os.path.join(_LLAMA_CPP_BIN, "llama-server")
+        os.chmod(bin_path, os.stat(bin_path).st_mode | 0o755)
+
+        # PROVE IT RUNS, not merely that it is executable: a wrong-arch
+        # download is executable and still fails at exec time. An OSError here
+        # is ENOEXEC/EINVAL — the binary never started. A non-zero EXIT from
+        # `--help` still proves it started, so only OSError counts as failure.
+        try:
+            _sp.call([bin_path, "--help"],
+                     stdout=_sp.DEVNULL, stderr=_sp.DEVNULL, timeout=60)
+        except (OSError, _sp.SubprocessError):
+            return False
+
+        _llm_hand_back(_LLAMA_CPP_DIR)  # a sudo run hands it to the user
+        print(f"  \033[32m✓\033[0m llama-server ready: {bin_path}")
+        metal = os.path.isfile(os.path.join(_LLAMA_CPP_BIN, "libggml-metal.dylib"))
+        if metal:
+            print("     \033[32m✓\033[0m Metal GPU offload available (-ngl 99)")
+        else:
+            print("     \033[2m·\033[0m this build has no Metal — CPU only "
+                  "(correct for Intel Macs, where -ngl 99 is the documented "
+                  "garbage-token case)")
+        return True
+    except Exception:
+        return False                    # any surprise → fall back, never crash
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def _llama_tree_state(path: str) -> str:
@@ -19818,8 +20669,13 @@ def cmd_llm_install_llama(args):
     build_cmd = ["cmake", "-B", "build", "-DCMAKE_BUILD_TYPE=Release", "-DLLAMA_SERVER_VERBOSE=ON"]
     compile_cmd = ["cmake", "--build", "build", "--config", "Release", "-j", str(os.cpu_count() or 4)]
 
-    print(f"\033[1m{APP} llm install-llama\033[0m — build llama.cpp from source")
-    print(f"  git  : {git_url}")
+    _prebuilt_arch = _llama_prebuilt_arch()
+    print(f"\033[1m{APP} llm install-llama\033[0m — install llama.cpp")
+    if _prebuilt_arch:
+        print(f"  prebuilt: available for this Mac ({_prebuilt_arch}) — "
+              f"\033[1mno compiler, no cmake, no Homebrew needed\033[0m")
+    else:
+        print(f"  source  : {git_url}")
     print(f"  dir  : {_LLAMA_CPP_DIR}")
     if _LLM_HOME_OWNER:
         print(f"  \033[33mvia sudo — installing for {_LLM_HOME_OWNER} ({_LLM_HOME}), not root\033[0m")
@@ -19858,7 +20714,26 @@ def cmd_llm_install_llama(args):
         return
 
     # --auto path
-    # Preflight FIRST: without git/cmake the build dies one line later with a
+    #
+    # PREBUILT FIRST — and deliberately BEFORE the build-tool preflight. On a
+    # Mac that preflight is the exact wall this fixes: it demands cmake, and a
+    # Mac with no Homebrew has nothing to install it with, so the install died
+    # before it ever looked at llama.cpp (a MacBook Air, 2026-11-28). A
+    # prebuilt needs none of those tools, so asking for them first would be
+    # asking the wrong question.
+    if not getattr(args, "no_prebuilt", False):
+        if _llama_prebuilt_install():
+            print()
+            print(f"  \033[1mnext:\033[0m {APP} llm pull-gguf gemma-4:e2b   "
+                  f"\033[2m(~2.9 GB)\033[0m")
+            print(f"        {APP} llm serve-llama gemma-4:e2b")
+            return
+        if _llama_prebuilt_arch():
+            # Say WHY we are about to compile — silence here reads as a hang.
+            print("  \033[33m…\033[0m no prebuilt for this machine — "
+                  "building from source instead")
+
+    # Preflight: without git/cmake the build dies one line later with a
     # raw FileNotFoundError traceback (asher@wahi 2026-11-21). Check BEFORE
     # printing "[1/3] cloning…" so the user sees the real blocker.
     if not _ensure_build_tools(["git", "cmake", "cxx", "make"]):
@@ -21530,6 +22405,56 @@ def _dial_pid(port: int | None = None) -> int | None:
         return None
 
 
+def _pin_from_argv(argv: list) -> str:
+    """The --pin in an argv list ("" = none). Pure: no process, no I/O."""
+    for i, x in enumerate(argv or []):
+        if x == "--pin" and i + 1 < len(argv):
+            return str(argv[i + 1])
+        if str(x).startswith("--pin="):
+            return str(x).split("=", 1)[1]
+    return ""
+
+
+def _dial_process_argv(pid: int) -> list:
+    """The argv of a running process. Linux reads /proc; macOS has no /proc,
+    so it asks ps. Empty when neither says (never raises)."""
+    try:
+        raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+        argv = [x for x in raw.decode("utf-8", "replace").split(chr(0)) if x]
+        if argv:
+            return argv
+    except OSError:
+        pass
+    if shutil.which("ps"):
+        try:
+            r = subprocess.run(["ps", "-p", str(pid), "-o", "args="],
+                               capture_output=True, text=True, timeout=5)
+            line = (r.stdout or "").strip()
+            if r.returncode == 0 and line:
+                import shlex
+                return shlex.split(line)
+        except Exception:
+            return []
+    return []
+
+
+def _dial_running_pin(port: int | None = None) -> str:
+    """The --pin the RUNNING shim was started with ("" = none).
+
+    The live process argv is the only honest source: the unit file can be
+    rewritten while the old process keeps serving, and 'dial status' must
+    report what is actually answering, not what is written down.
+
+    A macOS box has no /proc, so the argv comes from ps instead -- reading
+    /proc only and returning "" made every pin look absent on macOS, which
+    is what the CI caught (unit tests (macos-latest) red on this branch).
+    """
+    pid = _dial_pid(port)
+    if not pid:
+        return ""
+    return _pin_from_argv(_dial_process_argv(pid))
+
+
 def _dial_install_service(port: int, hub: str | None = None,
                           pin: str = "") -> str | None:
     """Install + enable auto-start for the shim. Returns 'systemd'|
@@ -21578,8 +22503,25 @@ def _dial_ensure(port: int | None = None, hub: str | None = None,
             "service": None, "error": None, "endpoint": _dial_url(port)}
     h = _dial_health(port)
     if h:
-        info.update(running=True, how="already", pid=h.get("pid"))
-        return info
+        # A PIN IS A REQUEST, NOT A WISH.
+        # 'hivv dial on --pin yalla' answered "already running" and changed
+        # NOTHING: the shim kept serving whatever bee it had already picked,
+        # the --pin was dropped on the floor, and the command printed success.
+        # The unit file still had no --pin in it, and the operator had no way
+        # to tell (yalla 2026-11-27).
+        running_pin = _dial_running_pin(port)
+        if pin and running_pin != pin:
+            # Stop it WITHOUT the opt-out marker: it is about to be started
+            # again, this time with the pin it was asked for.
+            _dial_stop(port, service=True, marker=False)
+            # SIGTERM is asynchronous — wait for the port to go quiet.
+            deadline = time.time() + 5.0
+            while _dial_health(port) is not None and time.time() < deadline:
+                time.sleep(0.2)
+            info["pin_replaced"] = running_pin
+        else:
+            info.update(running=True, how="already", pid=h.get("pid"))
+            return info
     if _dial_disabled():
         info["how"] = "disabled"
         info["error"] = "opted out (hivv dial off / HIVV_DIAL_OFF)"
@@ -21598,7 +22540,15 @@ def _dial_ensure(port: int | None = None, hub: str | None = None,
         info.update(running=True, how="service", pid=_dial_pid(port))
         return info
     pid = _dial_spawn(port, hub, pin)
-    if _dial_wait(port, seconds=3.0):
+    # The spawned shim is THIS file (27k lines) — it has to be imported,
+    # bind the port and answer /healthz before we may call it running.
+    # 3.0s was enough on an idle box and NOT enough on a loaded one: the
+    # deploy gate runs the whole suite while other suites are running, and
+    # at load avg 9-14 this reported "could not start" over a shim that
+    # simply had not finished starting — which failed the gate and
+    # ROLLED BACK a good deploy (2026-11-28). Waiting longer costs only
+    # the genuinely-dead case; giving up early costs a real deploy.
+    if _dial_wait(port, seconds=8.0):
         info.update(running=True, how="spawned", pid=pid)
         return info
     info["how"] = "failed"
@@ -21606,10 +22556,15 @@ def _dial_ensure(port: int | None = None, hub: str | None = None,
     return info
 
 
-def _dial_stop(port: int | None = None, service: bool = True) -> dict:
+def _dial_stop(port: int | None = None, service: bool = True,
+               marker: bool = True) -> dict:
     """Stop the shim: disable auto-start FIRST (so Restart=always doesn't
     fight us), then SIGTERM any survivor. Leaves the dial.off marker so
-    setup won't auto-start it again. Returns {stopped, running, port}."""
+    setup won't auto-start it again.
+
+    marker=False leaves the opt-out marker alone -- used when the shim is
+    being stopped only to be started again with a different pin, where
+    "opted out" would be a lie. Returns {stopped, running, port}."""
     port = port or _dial_port()
     stopped = []
     if service and shutil.which("systemctl") and _service_state("hivv-dial.service"):
@@ -21634,12 +22589,13 @@ def _dial_stop(port: int | None = None, service: bool = True) -> dict:
         except (OSError, PermissionError):
             pass
         time.sleep(0.4)
-    try:
-        STATE_DIR.mkdir(parents=True, exist_ok=True)
-        _dial_off_marker().write_text(
-            f"off at {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
-    except OSError:
-        pass
+    if marker:
+        try:
+            STATE_DIR.mkdir(parents=True, exist_ok=True)
+            _dial_off_marker().write_text(
+                f"off at {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+        except OSError:
+            pass
     return {"stopped": stopped, "running": _dial_health(port) is not None,
             "port": port}
 
@@ -22498,6 +23454,10 @@ def _dial_manage(what: str, port: int, hub: str, pin: str = "") -> None:
             print(f"{APP} dial: {how} on 127.0.0.1:{port} "
                   f"(pid {info.get('pid') or '?'})")
             print(f"  endpoint: {info['endpoint']}")
+            if "pin_replaced" in info:
+                was = info["pin_replaced"] or "(none)"
+                print(f"  pin: {was} -> {pin} "
+                      f"(the shim was restarted with the pin)")
             if info.get("service") == "systemd":
                 print("  auto-start: hivv-dial.service (survives reboot)")
             elif info.get("service") == "launchd":
@@ -23645,8 +24605,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp_sv.add_argument("--port", type=int, default=11434)
 
     # llama.cpp native commands
-    sp_il = sp_llm.add_parser("install-llama", help="build llama.cpp from source (git clone + cmake)")
-    sp_il.add_argument("--auto", action="store_true", help="actually run the build steps")
+    sp_il = sp_llm.add_parser("install-llama", help="install llama.cpp (prebuilt on macOS, else git clone + cmake)")
+    sp_il.add_argument("--auto", action="store_true", help="actually run the install steps")
+    sp_il.add_argument("--no-prebuilt", action="store_true",
+                       help="skip the prebuilt download and compile from source (needs git/cmake/C++/make)")
 
     sp_pg = sp_llm.add_parser("pull-gguf", help="download a GGUF model from HuggingFace")
     sp_pg.add_argument("model", help="model key, e.g. gemma4:e2b  |  available: " +
@@ -25537,10 +26499,25 @@ def _cmd_fleet_deploy(args) -> None:
         except Exception:
             pass
     if not tree:
-        # No probe answer: fall back to asking for it directly.
+        # No probe answer: derive the tree from the remote's OWN hivv —
+        # `hivv status` prints "client: <path> (source tree)" — then fall back
+        # to common clone locations. The old list hard-coded the production
+        # vhost, which tests/test_location_independence.py forbids: shipped
+        # code that names where the repo lives stops working the day it moves,
+        # and that is exactly the day this fallback earns its keep.
+        #
+        # _pretty_path shortens $HOME to ~, and a tilde inside a variable
+        # never expands on its own — the case arm puts it back.
         rc, out = _fleet_ssh(
-            host, "for d in /var/www/vhosts/hivv.org ~/work/hivv ~/hivv; do "
-                  "[ -d \"$d/.git\" ] && echo \"$d\" && break; done", timeout=40)
+            host,
+            'p=$(hivv status 2>/dev/null | sed -n "s/^ *client: *//p" | head -1); '
+            'p=${p% (source tree)}; '
+            'case "$p" in "~/"*) p="$HOME/${p:2}";; esac; '
+            'if [ -n "$p" ]; then d=$(dirname "$(dirname "$p")"); '
+            '[ -e "$d/.git" ] && { echo "$d"; exit 0; }; fi; '
+            'for d in ~/work/hivv ~/hivv; do '
+            '[ -e "$d/.git" ] && { echo "$d"; exit 0; }; done',
+            timeout=40)
         tree = (out or "").strip().splitlines()[0] if out.strip() else ""
     if not tree:
         die(f"could not find the source tree on {host} — is it a centre?")
@@ -25604,8 +26581,8 @@ def _cmd_fleet_deploy(args) -> None:
 
 # ── hivv fleet preview ──────────────────────────────────────────────────────
 # The hardest part of this system is that the only place to SEE a change is
-# production. /var/www/vhosts/hivv.org is simultaneously the deploy target
-# and a working tree; deploy.sh refuses to touch a dirty or non-main tree,
+# production. The production tree is simultaneously the deploy target and a
+# working tree; deploy.sh refuses to touch a dirty or non-main tree,
 # so the only ways to see a change are to edit production directly (which
 # the rules forbid) or to deploy it (which is the thing you wanted to
 # preview first). The loop closes, and people end up editing production
@@ -25699,8 +26676,16 @@ def _preview_tree() -> Path | None:
     cands = []
     if here.get("path"):
         cands.append(Path(here["path"]))
-    cands += [Path("/var/www/vhosts/hivv.org"),
-              Path.home() / "work" / "hivv",
+    # The checkout THIS CLI is running from: if the client lives inside a git
+    # tree, that IS the tree — wherever it was cloned. The old first candidate
+    # hard-coded the production vhost, which tests/test_location_independence.py
+    # forbids: shipped code that names where the repo lives stops working the
+    # day it moves, and that is exactly the day this fallback is needed.
+    try:
+        cands.append(Path(__file__).resolve().parent.parent)
+    except OSError:
+        pass
+    cands += [Path.home() / "work" / "hivv",
               Path.home() / "hivv"]
     for cand in cands:
         if cand and (cand / ".git").exists():
@@ -26493,6 +27478,98 @@ COMMANDS = _resolve_cmds({
     "llm config":        "cmd_llm_config",
 })
 
+# Words that are greetings rather than typos — they go to the hive, visibly.
+_CHAT_WORDS = {"hello", "hi", "hey", "yo", "sup", "thanks", "thank"}
+
+
+def _is_stray_command_word(argv) -> bool:
+    """True when argv looks like a TYPO, not a question → fail loud, NO LLM call.
+
+    LOUD, not silent (2026-11-23): `hivv if` / `hivv when` looked like they
+    were "taking commands" — they were silently chatting, and one even spent a
+    call that hit a context overflow. An exceptional path that does something
+    clever in silence is worse than a crash.
+
+    QUOTED QUESTIONS ARE SENTENCES, NOT STRAY WORDS (2026-11-28). The first
+    version tested `len(argv) == 1` — but argv counts ARGUMENTS, not words,
+    and the shell folds a quoted phrase into ONE element. So the natural thing
+    to type —
+
+        hivv "whats up in pakistan"
+
+    — was rejected with "isn't an hivv command", while the SAME words unquoted
+    (`hivv whats up in pakistan`, four elements) chatted fine. Quoting broke
+    it; not quoting worked. A SPACE means someone typed a SENTENCE: send it.
+
+    So a stray word is: exactly one argument, no space, no question mark, not
+    a greeting. `hivv frobnicate` still never spends a call — and now
+    `hivv "whats up"` reaches the hive, which is the whole point of quoting.
+    """
+    if len(argv) != 1:
+        return False                       # several words → a sentence
+    cmd = str(argv[0])
+    if " " in cmd or "?" in cmd:
+        return False                       # a phrase, or an explicit question
+    return cmd.lower() not in _CHAT_WORDS  # a lone greeting still chats
+
+def _run_install_tailscale(extra: list[str]) -> None:
+    """Install Tailscale via public_html/install-tailscale.sh.
+
+    Why our own script instead of running tailscale.com's installer
+    directly: theirs cases only on ID= from /etc/os-release and exits 1
+    on any distro it does not know (ID=boss -> "Couldn't determine what
+    kind of Linux is running."), installing NOTHING, and it has no env
+    override to opt out of detection. Ours tries three tiers:
+      1. the official installer (right answer wherever it works)
+      2. apt — uses an already-configured repo, else adds one, but only
+         with a suite pkgs.tailscale.com actually serves (probed, never
+         guessed: VERSION_CODENAME=pragya is not a Debian codename)
+      3. the static tarball + a systemd unit — needs no distro knowledge
+    and it never prompts for a sudo password nobody can answer.
+
+    The script lives beside this file in a clone; an installed CLI fetches
+    it from the hub into a temp file first (a download is written to a
+    FILE, never piped into a shell — the repo's fast-scan calls that
+    critical, and it is right to).
+    """
+    local = _THIS_DIR / "install-tailscale.sh"
+    script = local
+    if not local.is_file():
+        try:
+            data = _http_get_bytes(f"{HUB}/install-tailscale.sh")
+        except Exception as e:
+            print(f"  could not fetch install-tailscale.sh: {e}")
+            print(f"  run it by hand: sudo sh {HUB}/install-tailscale.sh")
+            return
+        fd, name = tempfile.mkstemp(prefix="hivv-ts-", suffix=".sh")
+        try:
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(data)
+        except Exception:
+            os.close(fd)
+            return
+        script = Path(name)
+
+    print(f"\n\033[1m{APP} install tailscale\033[0m — three tiers: official -> apt -> static")
+    print(f"  script: {script}")
+    try:
+        rc = subprocess.call(["sh", str(script), *extra])
+    except Exception as e:
+        print(f"  could not run the installer: {e}")
+        rc = 1
+    finally:
+        # a downloaded copy is ours to remove; a clone's sibling is not
+        if script != local:
+            try:
+                script.unlink()
+            except OSError:
+                pass
+    if rc != 0:
+        print(f"\n  installer exited {rc}")
+        if "--dry-run" not in extra:
+            print("  manual fallback (static binaries):")
+            print("      https://pkgs.tailscale.com/stable/#static")
+
 def main(argv: list[str]) -> None:
     global HUB
     # Internal: invoked by `hivv start` to fork the agent
@@ -26606,12 +27683,24 @@ def main(argv: list[str]) -> None:
                     rest = [a for a in rest if a.startswith("-")] + ["--model", pos[0]] + pos[1:]
             argv = ["llm", "install"] + ([] if wants_help else ["--auto"]) + rest
             cmd_name = "llm install"
+        elif len(argv) > 1 and argv[1] in ("tailscale", "vpn"):
+            # Tailscale, three tiers (2026-11-27). tailscale.com own
+            # installer cases only on ID= from /etc/os-release and exits 1
+            # on anything it does not know - ID=boss (BOSS GNU/Linux, a
+            # Debian 12 fork) got "Could not determine what kind of Linux
+            # is running." and NOTHING was installed. There is no env
+            # override in their script. Ours tries the official installer,
+            # then apt, then the static tarball, and never prompts for a
+            # sudo password nobody can answer.
+            _run_install_tailscale(argv[2:])
+            return
         else:
             print(f"\033[1m{APP} install\033[0m — what do you want to install?")
             print()
             print(f"  {APP} install llm        one-shot: build llama.cpp + download gemma + serve")
             print(f"  {APP} install ollama     step 1: install ollama only (then verify: ollama --version)")
             print(f"  {APP} install ollama qwen  step 2: install + pull — family picks small & fast for this box")
+            print(f"  {APP} install tailscale   VPN for cross-network nodes (works on distros tailscale.com refuses)")
             print(f"  {APP} llm setup --help   every option (--model, --port, --yes, --fg)")
             print(f"  {APP} itself:            curl -sSL {HUB}/install-hivv.sh | bash")
             return
@@ -26662,14 +27751,9 @@ def main(argv: list[str]) -> None:
         if len(argv) == 2 and argv[1] in ("help", "-h", "--help"):
             _help_search(cmd_name)
             return
-        # LOUD, not silent (2026-11-23): `hivv if` / `hivv when` looked like
-        # they were "taking commands" — they were silently chatting, and one
-        # even spent a call that hit a context overflow. An exceptional path
-        # that does something clever in silence is worse than a crash.
-        #   · single stray word (no ?, not a greeting) → fail loud, no LLM call
-        #   · greetings and real questions still go to the hive — visibly
-        _CHAT_WORDS = {"hello", "hi", "hey", "yo", "sup", "thanks", "thank"}
-        if len(argv) == 1 and "?" not in cmd_name and cmd_name.lower() not in _CHAT_WORDS:
+        # LOUD, not silent (2026-11-23) — and a quoted sentence still chats
+        # (2026-11-28). Rules and reasoning live in _is_stray_command_word().
+        if _is_stray_command_word(argv):
             import difflib
             _close = difflib.get_close_matches(cmd_name, list(COMMANDS), n=1, cutoff=0.7)
             _hint = f" — did you mean `{APP} {_close[0]}`?" if _close else ""
@@ -26948,6 +28032,16 @@ Tip: every subcommand accepts --help (e.g. `hivv logs --help`).
 """)
     _nag_if_update_available()
 
+# Commands the DISPATCH rewrites before argparse ever sees them, so parser
+# introspection cannot find them. Without this table `hivv help tailscale`
+# returned firewall+local and never mentioned `install tailscale` -- the very
+# command the four hints tell you to run (2026-11-28).
+DISPATCH_ONLY_HELP = (
+    ("install", "choose what to install: llm (llama.cpp) - ollama [family] - tailscale, the VPN for cross-network nodes (works on distros tailscale.com refuses)"),
+    ("install tailscale", "install Tailscale in three tiers: official - apt - static; for boxes the official installer exits 1 on"),
+)
+
+
 def _help_search(query: str) -> bool:
     """FUZZY help — `hivv help ollama`, `hivv ollama help`, `hivv --model`.
 
@@ -26999,6 +28093,8 @@ def _help_search(query: str) -> bool:
                                         flags, " ".join(pos), []))
     except Exception:
         pass  # introspection is best-effort — help must never crash
+    # ...plus the commands dispatch rewrites before argparse sees them
+    entries.extend((name, htext, [], "", []) for name, htext in DISPATCH_ONLY_HELP)
     rows = []
     for name, htext, flags, extra, subs in entries:
         hay = " ".join([name, htext,
@@ -27144,6 +28240,10 @@ def _print_sub_help(cmd: str) -> None:
         "llm bench":   "quick CPU sha256 + memory + disk benchmark",
         "llm status":  "detect + bench + suggest in one shot",
         "llm install": "print install commands for the detected OS\n  flag: --docker   print the `docker run` for ollama\n  flag: --auto     actually run the install (instead of just printing)\n  flag: --model=X  after install, run `ollama pull X`",
+        "llm install-llama": "install llama.cpp — PREBUILT on macOS (no cmake, no compiler, no Homebrew)\n"
+                             "  usage: hivv llm install-llama [--auto] [--no-prebuilt]\n"
+                             "  flag: --no-prebuilt   skip the download and compile from source instead\n"
+                             "  (a source build needs git, cmake, a C++ compiler and make)",
         "llm pull":    "ollama pull <model>\n  usage: hivv llm pull qwen3:1.7b",
         "git":        "the contribution loop, last mile, with the rails on\n  verbs: status · clone · branch · commit · push · pr · log · diff\n  usage: hivv git branch my-topic && hivv git commit -m \"fix(scope): what\" && hivv git push\n  rails: never push main · a moved file wants a MOVES.md entry · the message is type(scope): what\n  note: there is deliberately no hivv git merge — merging goes through a PR",
         "fleet":       "one command for a multi-box deployment\n  usage: hivv fleet                 → the dashboard: every box, its role, what is up, and THE NEXT STEP\n  verbs: up (make this box a bee) · check (verify, change nothing) · add · list · move\n         deploy (put main on the live site, from anywhere)\n         preview <branch> (run a branch without touching production) · stop · url\n  note: hivv fleet with no arguments needs no memory — it tells you what to type next",

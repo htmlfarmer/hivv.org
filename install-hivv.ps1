@@ -35,7 +35,7 @@ param(
 )
 
 $App = "hivv"
-$Hub = "https://hivv.org"
+$Hub = if ($env:HIVV_HUB) { $env:HIVV_HUB.TrimEnd('/') } else { "https://hivv.org" }  # env-overridable (CI tests THIS checkout, self-host)
 $TaskName = "hivv-agent"
 
 # ── brand colors ───────────────────────────────────────────────────────

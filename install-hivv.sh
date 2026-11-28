@@ -345,6 +345,61 @@ _say()  { printf '  %s✓%s %s\n' "$GRN" "$RST" "$*"; }
 _warn() { printf '  %s!%s %s\n' "$YLW" "$RST" "$*" >&2; }
 _die()  { printf '  %s✗%s %s\n' "$RED" "$RST" "$*" >&2; exit 1; }
 
+# ── the tailscale ladder ──────────────────────────────────────────────
+# Installing tailscale is FOUR steps, but this script used to print only
+# the one you had just reached — "run: sudo tailscale up" — and stop. So
+# a user who saw "Success." never learned that confirming the VPN address
+# and opening the LLM port are SEPARATE steps (the same gap the CLI fills
+# with _print_tailscale_ladder; yalla 2026-11-27).
+#
+# $1 = the next step to do (1..4); 5 means every step is finished.
+# State is derived, never assumed, so an already-configured box is told
+# it is done rather than being nagged to redo steps 1-3.
+_ts_next_step() {
+    command -v tailscale >/dev/null 2>&1 || { printf '1'; return; }
+    local ip
+    ip=$(tailscale ip -4 2>/dev/null || true)
+    [[ -n "$ip" ]] || { printf '2'; return; }
+    # installed + logged in + address seen -> only the port rule is left.
+    # Claim step 4 done ONLY when we can actually read it: an unreadable
+    # ufw must never be reported as configured (the CLI's ladder marks
+    # this case '?' for the same reason).
+    local rules=""
+    if command -v ufw >/dev/null 2>&1; then
+        rules=$(ufw status 2>/dev/null || true)
+        [[ -n "$rules" ]] || rules=$(sudo -n ufw status 2>/dev/null || true)
+    fi
+    if [[ -n "$rules" && "$rules" == *"100.64.0.0/10"* ]]; then
+        printf '5'
+    else
+        printf '4'
+    fi
+}
+
+_ts_ladder() {
+    local nxt="${1:-$(_ts_next_step)}" i=1 line
+    printf '  %stailscale setup%s — four steps, in order\n' "$BLD" "$RST"
+    while [ "$i" -le 4 ]; do
+        case "$i" in
+            1) line="hivv install tailscale" ;;
+            2) line="sudo tailscale up   (then OPEN the URL it prints)" ;;
+            3) line="tailscale ip -4     (expect a 100.x.x.x address)" ;;
+            4) line="hivv firewall --apply --mode tailscale" ;;
+        esac
+        if [ "$i" -lt "$nxt" ]; then
+            printf '    %s✓%s step %d   %s\n' "$GRN" "$RST" "$i" "$line"
+        elif [ "$i" -eq "$nxt" ]; then
+            printf '    %s→%s step %d   %s   %sdo this NEXT%s\n' "$YLW" "$RST" "$i" "$line" "$BLD" "$RST"
+        else
+            printf '    %s·%s step %d   %s\n' "$DIM" "$RST" "$i" "$line"
+        fi
+        i=$((i+1))
+    done
+    if [ "$nxt" -ge 5 ]; then
+        printf '    %s✓ all four done%s — then check from another machine: hivv reach <this-bee>\n' "$GRN" "$RST"
+    fi
+}
+
 # ── spinner (runs in foreground while $1 sleeps) ──────────────────────
 _spin() {
     local msg="$1"; shift
@@ -542,6 +597,18 @@ ensure_build_tools() {
     printf '  %s!%s missing %s(s): %s\n' "$YLW" "$RST" "$label" "${names[*]}" >&2
     if [[ -n "$hint" ]]; then
         printf '    %sinstall them:%s %s\n' "$DIM" "$RST" "$hint" >&2
+    elif [[ "$(uname -s)" == "Darwin" ]]; then
+        # A Mac with NO Homebrew has no package manager to name, so "with your
+        # package manager" below is a dead end — and it asks for git, a C++
+        # compiler and make, which this Mac already has (Xcode Command Line
+        # Tools). Only cmake was missing, and there was no way to get it.
+        # Same wall the CLI hit (2026-11-28).
+        printf '    %sthis Mac needs cmake — git, your C++ compiler and make are already installed%s\n' "$DIM" "$RST" >&2
+        printf '    %sinstall Homebrew, then cmake:%s\n' "$DIM" "$RST" >&2
+        printf '      %s/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"%s\n' "$CYN" "$RST" >&2
+        printf '      %sbrew install cmake%s\n' "$CYN" "$RST" >&2
+        printf '    %s…or skip the build entirely — llama.cpp ships prebuilt macOS binaries:%s\n' "$DIM" "$RST" >&2
+        printf '      %shivv llm install-llama --auto%s\n' "$CYN" "$RST" >&2
     else
         printf '    %sinstall %s with your package manager, then re-run this command%s\n' "$DIM" "${names[*]}" "$RST" >&2
     fi
@@ -960,16 +1027,33 @@ if ! command -v tailscale >/dev/null 2>&1; then
         fi
         if [[ "$INSTALL_TS" -eq 1 ]]; then
             if ! _can_sudo && [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
-                _warn "Tailscale needs admin rights — run manually: curl -fsSL https://tailscale.com/install.sh | sh"
+                _warn "Tailscale needs admin rights — run manually: hivv install tailscale"
             else
                 _log "installing tailscale..."
-                curl -fsSL https://tailscale.com/install.sh | sh 2>/dev/null || true
+                # Three tiers (official installer -> apt -> static tarball).
+                # tailscale.com's own installer exits 1 on any distro it does
+                # not recognize from ID= — ID=boss (BOSS GNU/Linux, a Debian 12
+                # fork) installed NOTHING. Download to a FILE, then run the
+                # file: never pipe a download into a shell.
+                TS_SCRIPT="$(mktemp 2>/dev/null || echo /tmp/hivv-ts.$$)"
+                if curl -fsSL --connect-timeout 10 --max-time 120 \
+                        "$HUB/install-tailscale.sh" -o "$TS_SCRIPT" 2>/dev/null \
+                        && [[ -s "$TS_SCRIPT" ]]; then
+                    sh "$TS_SCRIPT" 2>/dev/null || true
+                else
+                    _warn "could not fetch install-tailscale.sh from $HUB"
+                fi
+                rm -f "$TS_SCRIPT" 2>/dev/null || true
                 if command -v tailscale >/dev/null 2>&1; then
                     _say "tailscale installed"
-                    printf '  run: %ssudo tailscale up%s\n' "$CYN" "$RST"
-                    printf '  then: %shivv firewall --apply --mode tailscale%s\n\n' "$CYN" "$RST"
+                    # step 1 just finished — say what comes NEXT, not only
+                    # what to run now (the old two-liner skipped the auth URL
+                    # and the address check entirely).
+                    printf '\n'
+                    _ts_ladder 2
                 else
-                    _warn "tailscale install failed — install manually: curl -fsSL https://tailscale.com/install.sh | sh"
+                    _warn "tailscale install failed — run manually: hivv install tailscale"
+                    _warn "or the static fallback: https://pkgs.tailscale.com/stable/#static"
                 fi
             fi
         fi
@@ -979,8 +1063,12 @@ else
     TS_IP=$(tailscale ip -4 2>/dev/null || true)
     if [[ -n "$TS_IP" ]]; then
         printf '\n  %s✓ tailscale active%s — VPN IP: %s%s%s\n' "$GRN" "$RST" "$CYN" "$TS_IP" "$RST"
+        # derive what is actually left (a box that already opened the port
+        # is told it is DONE, not nagged to redo step 4)
+        _ts_ladder "$(_ts_next_step)"
     else
-        printf '\n  %s! tailscale installed but not running%s — run: %ssudo tailscale up%s\n' "$YLW" "$RST" "$CYN" "$RST"
+        printf '\n  %s! tailscale installed but not running%s\n' "$YLW" "$RST"
+        _ts_ladder 2
     fi
 fi
 

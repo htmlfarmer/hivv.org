@@ -290,66 +290,137 @@ def tool_calculate(expr):
 
 
 # ── time ────────────────────────────────────────────────────────────────────
+def _resolve_zone_via_hub(name):
+    """Ask the hub to turn a PLACE into a real IANA timezone.
+
+    zoneinfo only understands IANA names. Models - and people - reach for the
+    place: "Jinja", "Uganda", "Karachi". The hub owns that table
+    (api/lib/place-tz.js, ONE implementation for the whole hive), so ask it
+    instead of carrying a second copy of the table on every bee. Returns an
+    IANA name or None, and never raises.
+    """
+    if not name or not isinstance(name, str):
+        return None
+    try:
+        res = hub_call("timezone_convert", {"timezone": name}, timeout=8)
+    except Exception:
+        return None
+    if isinstance(res, dict) and res.get("ok"):
+        zone = (res.get("data") or {}).get("timezone")
+        if isinstance(zone, str) and zone:
+            return zone
+    return None
+
+
+def _as_zone(name):
+    """(ZoneInfo, resolved_from) for an IANA name OR a place name.
+
+    resolved_from is set when a PLACE was translated, so the answer can say
+    "Uganda -> Africa/Kampala" instead of pretending the caller named the
+    zone itself. (None, None) means the input could not be located at all.
+    """
+    try:
+        import zoneinfo
+        return zoneinfo.ZoneInfo(name), None
+    except Exception:
+        pass
+    resolved = _resolve_zone_via_hub(name)
+    if resolved:
+        try:
+            import zoneinfo
+            return zoneinfo.ZoneInfo(resolved), resolved
+        except Exception:
+            return None, None
+    return None, None
+
 def tool_time(tz=None):
     """Return the current time in several formats, optionally in a timezone."""
     now = datetime.datetime.now(datetime.timezone.utc)
-    result = {
+    base = {
         "unix": int(now.timestamp()),
         "iso": now.isoformat(),
         "utc": now.isoformat(),
         "human": now.strftime("%Y-%m-%d %H:%M:%S"),
     }
     if tz:
-        try:
-            import zoneinfo
-            local = now.astimezone(zoneinfo.ZoneInfo(tz))
-            result["timezone"] = tz
-            result["local"] = local.strftime("%Y-%m-%d %H:%M:%S %Z")
-        except Exception:
-            result["error"] = "unknown timezone: %s" % tz
-    return result
+        # A timezone we cannot honour must NOT come back as UTC with an
+        # `error` key tucked beside it. A model reads the human-readable time
+        # and ignores the rest - then labels that UTC value with the place it
+        # asked for, which is exactly how a question about Jinja, Uganda once
+        # answered three hours wrong. Refuse instead of degrading.
+        zone, resolved = _as_zone(tz)
+        if zone is None:
+            return {"error": "'%s' is not a valid IANA timezone or a place this "
+                             "hive can locate. Use a zone like 'Africa/Kampala'." % tz}
+        out = dict(base)
+        out["timezone"] = resolved or tz
+        if resolved:
+            out["resolved_from"] = tz
+        out["local"] = now.astimezone(zone).strftime("%Y-%m-%d %H:%M:%S %Z")
+        return out
+    return base
 
 
 def tool_timezone(args):
-    """Convert a moment between IANA timezones (DST-correct)."""
+    """Convert a moment between timezones (DST-correct).
+
+    Accepts an IANA name (Africa/Kampala) or a place name (Uganda, Jinja) —
+    the hub resolves places, because zoneinfo only knows zones.
+    """
     to = args.get("timezone") or args.get("to") or args.get("tz")
     if not to:
         return {"error": "a target timezone is required (e.g. Asia/Karachi)"}
     frm = args.get("from_timezone") or args.get("from")
     raw_dt = args.get("datetime")
+    # "datetime":"now" is the single most common tool-call slip - a model
+    # passing it and then relaying our refusal instead of answering. The
+    # intent is unambiguous, so honour it; everything else still gets a
+    # repair instruction.
+    _is_now = isinstance(raw_dt, str) and raw_dt.strip().lower() in ("now", "current", "present")
     try:
-        if raw_dt:
+        if raw_dt and not _is_now:
             when = datetime.datetime.fromisoformat(str(raw_dt).replace("Z", "+00:00"))
             if when.tzinfo is None:
                 when = when.replace(tzinfo=datetime.timezone.utc)
         else:
             when = datetime.datetime.now(datetime.timezone.utc)
     except Exception:
-        return {"error": "'%s' is not a parseable date-time" % raw_dt}
-    try:
-        import zoneinfo
-        target = when.astimezone(zoneinfo.ZoneInfo(to))
-    except Exception:
-        return {"error": "'%s' is not a valid IANA timezone" % to}
+        # datetime:"now" is the single most common tool-call slip. Say how to
+        # fix it, or the model apologises, invents a reason, and answers from
+        # memory - which is where a fabricated timezone name came from.
+        return {"error": "'%s' is not a parseable date-time. OMIT the datetime "
+                         "argument entirely to mean 'the current moment'; only "
+                         "pass it for a specific instant, ISO-8601 like "
+                         "2026-11-28T07:00:00Z." % raw_dt}
+    to_zone, to_resolved = _as_zone(to)
+    if to_zone is None:
+        return {"error": "'%s' is not a valid IANA timezone or a place this hive "
+                         "can locate. Use a zone like 'Africa/Kampala'." % to}
+    target = when.astimezone(to_zone)
     out = {
         "source_datetime": when.isoformat(),
-        "timezone": to,
+        "timezone": to_resolved or to,
         "local": target.strftime("%Y-%m-%d %H:%M:%S"),
         "date": target.strftime("%Y-%m-%d"),
         "time": target.strftime("%H:%M:%S"),
         "day_of_week": target.strftime("%a"),
         "utc_offset": target.strftime("%z") or None,
     }
+    if to_resolved:
+        # The PLACE the caller actually passed ("Uganda"), not the zone we
+        # translated it into — the answer should name both.
+        out["resolved_from"] = to
     if frm:
-        try:
-            origin = when.astimezone(zoneinfo.ZoneInfo(frm))
-            out["from_timezone"] = frm
+        frm_zone, frm_resolved = _as_zone(frm)
+        if frm_zone is None:
+            out["from_timezone_error"] = "'%s' is not a valid IANA timezone or a place this hive can locate" % frm
+        else:
+            origin = when.astimezone(frm_zone)
+            out["from_timezone"] = frm_resolved or frm
             out["from_local"] = origin.strftime("%Y-%m-%d %H:%M:%S")
             out["from_utc_offset"] = origin.strftime("%z") or None
             diff = (target.utcoffset() - origin.utcoffset()).total_seconds() / 3600.0
             out["difference"] = "%+.2f hours" % diff
-        except Exception:
-            out["from_timezone_error"] = "'%s' is not a valid IANA timezone" % frm
     return out
 
 
@@ -772,7 +843,13 @@ def run_tool(name, args):
     mode = next((t["mode"] for t in TOOLS if t["name"] == canon), "hub")
     if mode == "local":
         if canon == "current_time":
-            return {"tool": canon, "ok": True, "data": tool_time(args.get("timezone") or args.get("tz"))}
+            res = tool_time(args.get("timezone") or args.get("tz"))
+            # An error must never travel as ok:true with a nested `error`
+            # key - a model reads ok, answers confidently, and never notices
+            # the data underneath says it failed.
+            if "error" in res:
+                return {"tool": canon, "ok": False, "error": res["error"]}
+            return {"tool": canon, "ok": True, "data": res}
         if canon == "calculator":
             expr = args.get("expression")
             if expr is None and args.get("a") is not None and args.get("b") is not None:
