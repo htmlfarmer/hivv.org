@@ -6813,15 +6813,15 @@ def cmd_status(args) -> None:
     if ts.returncode != 0 or not ts.stdout.strip():
         issues.append("tailscale not installed — nodes on different networks cannot reach you")
 
-    # Check firewall
-    fw_active = False
-    import platform
-    if platform.system() == "Linux":
-        r = _r("ufw status 2>/dev/null")
-        if "Status: active" in r.stdout:
-            fw_active = True
-    if not fw_active and llms:
+    # Check firewall. _firewall_active() reads ufw with escalation and
+    # falls back to the systemd unit state — a non-root `ufw status` has
+    # an EMPTY stdout, and the old test read that as "no firewall" on a
+    # box whose ufw was on (yalla 2026-11-27).
+    fw_active = _firewall_active() if platform.system() == "Linux" else None
+    if fw_active is False and llms:
         issues.append("no firewall — your LLMs are open to the internet")
+    elif fw_active is None and llms and shutil.which("ufw"):
+        issues.append("ufw installed but its state needs root — run: sudo ufw status")
 
     if issues:
         print(f"\n  \033[1m⚠ {len(issues)} issue(s) detected:\033[0m")
@@ -9118,15 +9118,15 @@ def _run_health_checks():
             _r(f"sudo systemctl start {svc}")
             print(f"  \033[32m✓\033[0m started: {svc}")
 
-    # Check Tailscale
+    # Check Tailscale — then show the WHOLE ladder. The old three lines
+    # stopped dead after "install", so a user who had just installed it
+    # had no idea what came next (yalla 2026-11-27).
     ts = _r("tailscale ip -4 2>/dev/null")
     if ts.returncode != 0 or not ts.stdout.strip():
-        print(f"  \033[33m!\033[0m tailscale not installed")
-        print(f"     install: {APP} install tailscale")
-        print(f"     then:    sudo tailscale up")
-        print(f"     secure:  {APP} firewall --apply --mode tailscale")
+        print(f"  \033[33m!\033[0m tailscale not up — nodes on different networks cannot reach you")
     else:
         print(f"  \033[32m✓\033[0m tailscale active: {ts.stdout.strip()}")
+    _print_tailscale_ladder(indent="     ")
 
     # Helpful sudo reminders
     print(f"\n\033[1msudo commands you may need\033[0m")
@@ -14477,12 +14477,117 @@ def _listening_ports() -> list:
     return out
 
 
+def _ufw_status_text(*, allow_prompt: bool = False) -> str | None:
+    """`ufw status` output, or None when it cannot be read from here.
+
+    A normal user's `ufw status` prints "ERROR: You need to be root" on
+    STDERR and leaves stdout EMPTY — and every reader in this file looks
+    at stdout, so empty read as "no firewall, no rules". That is how
+    `hivv firewall --apply --mode tailscale` came to promise rules it
+    never wrote (yalla 2026-11-27).
+
+    Escalation ladder: plain -> `sudo -n` -> `sudo`, the last only when a
+    human is at the terminal AND the caller opted in — a status REPORT
+    must never stop and ask for a password.
+    """
+    def _try(argv):
+        try:
+            r = subprocess.run(argv, capture_output=True, text=True, timeout=8)
+        except Exception:
+            return None
+        out = r.stdout or ""
+        return out if "Status:" in out else None
+
+    got = _try(["ufw", "status"])
+    if got is not None:
+        return got
+    if not shutil.which("sudo"):
+        return None
+    got = _try(["sudo", "-n", "ufw", "status"])
+    if got is not None:
+        return got
+    if allow_prompt and _can_prompt_sudo():
+        return _try(["sudo", "ufw", "status"])
+    return None
+
+
+def _ufw_port_open(status_text: str, port) -> bool:
+    """True when `port` really has a rule in `ufw status` output.
+
+    The old check was `f"{port}" in text` — a SUBSTRING test, so port 80
+    matched the rule for 8080 and a closed port was reported open. Anchor
+    on `port/tcp` with a digit boundary instead.
+    """
+    try:
+        return bool(re.search(rf"(?<![\d.]){int(port)}/tcp\b", status_text or ""))
+    except (TypeError, ValueError):
+        return False
+
+
+def _fw_root_prefix(*, allow_prompt: bool = True) -> str | None:
+    """How to run a firewall command as root on THIS box.
+
+    ""         we ARE root
+    "sudo -n " passwordless sudo (servers, CI, docker)
+    "sudo "    a human is at the terminal and can type the password
+    None       no way to get root — the caller prints the exact commands
+               for a human to run instead of pretending it applied them
+    """
+    if (os.geteuid() == 0) if hasattr(os, "geteuid") else False:
+        return ""
+    if not shutil.which("sudo"):
+        return None
+    if _sudo_passwordless():
+        return "sudo -n "
+    if allow_prompt and _can_prompt_sudo():
+        return "sudo "
+    return None
+
+
+def _fw_run(cmd: str, *, prefix: str | None, timeout: float = 30.0):
+    """Run one firewall command as root. Returns (rc, stderr_text).
+
+    A prompting sudo needs FAR longer than a plain command: the password
+    prompt sits on the tty while a human types, and the generic 10s _run
+    lambda killed it mid-prompt (found live on yalla 2026-11-27 — the
+    traceback was subprocess.TimeoutExpired inside cmd_firewall). So this
+    uses its own budget and turns a timeout into a normal failure line
+    instead of a traceback that aborts the whole report.
+    """
+    if prefix is None:
+        return 1, "no root available"
+    full = f"{prefix}{cmd}"
+    # a human typing a password gets a real budget; passwordless does not
+    budget = 90.0 if prefix.strip() == "sudo" else timeout
+    try:
+        r = subprocess.run(full, shell=True, capture_output=True,
+                           text=True, timeout=budget)
+    except subprocess.TimeoutExpired:
+        return 1, f"timed out after {int(budget)}s (password prompt not answered?)"
+    except Exception as e:                      # noqa: BLE001
+        return 1, str(e)
+    return r.returncode, (r.stderr or r.stdout or "").strip()
+
+
 def _firewall_active():
     """True/False when detectable, None = unknown tooling/OS."""
     try:
         if shutil.which("ufw"):
-            r = subprocess.run(["ufw", "status"], capture_output=True, text=True, timeout=8)
-            return "active" in (r.stdout or "").lower()
+            out = _ufw_status_text()
+            if out is not None:
+                return "active" in out.lower()
+            # Reading the RULES needs root; the ufw SERVICE state does not,
+            # and that is exactly what "is the firewall on" means. Without
+            # this, every non-root run reported an ACTIVE ufw as off.
+            if shutil.which("systemctl"):
+                r = subprocess.run(["systemctl", "show", "ufw",
+                                    "-p", "LoadState", "--value"],
+                                   capture_output=True, text=True, timeout=8)
+                if (r.stdout or "").strip() == "loaded":
+                    r = subprocess.run(["systemctl", "is-active", "ufw"],
+                                       capture_output=True, text=True, timeout=8)
+                    return (r.stdout or "").strip() == "active"
+            return None
         if shutil.which("firewall-cmd"):
             r = subprocess.run(["firewall-cmd", "--state"], capture_output=True, text=True, timeout=8)
             return "running" in (r.stdout or "").lower()
@@ -15957,27 +16062,42 @@ def cmd_doctor(args) -> None:
         except Exception:
             print(f"  vpn:    {_ok(f'tailscale active ({ts_ip.stdout.strip()})')}")
     else:
-        print(f"  vpn:    {_warn('tailscale not running')}   install: {APP} install tailscale")
+        print(f"  vpn:    {_warn('tailscale not up')}")
+        # The report stays one line; the STEPS live underneath it, so the
+        # reader gets the reminder without the table turning into a wall.
+        _print_tailscale_ladder(indent="          ")
 
     # Firewall — `platform` is module-level; do NOT shadow it here (see the
     # resilience section above: a later local import breaks earlier uses).
+    #
+    # Read the rules through _ufw_status_text(), which escalates: a
+    # non-root `ufw status` leaves stdout EMPTY, and the old code read
+    # that as "no firewall — LLMs open to internet" on a box whose ufw
+    # was on and enforcing (yalla 2026-11-27). Never report a firewall
+    # as absent just because we could not read it.
     fw_ok = False
     if platform.system() == "Linux":
-        r = _r("ufw status 2>/dev/null")
-        if "Status: active" in r.stdout:
-            # Check if LLM ports are allowed
-            blocked = []
-            for port in (llm_ports if llms else []):
-                if f"{port}" not in r.stdout:
-                    blocked.append(port)
+        rules = _ufw_status_text()
+        if rules is not None and "Status: active" in rules:
+            blocked = [p for p in (llm_ports if llms else [])
+                       if not _ufw_port_open(rules, p)]
             if blocked:
                 bp = ", ".join(str(p) for p in blocked)
                 print(f"  fw:     {_warn(f'ufw active but port {bp} blocked')}   run `{APP} firewall --apply`")
             else:
                 print(f"  fw:     {_ok('ufw active, LLM ports open')}")
                 fw_ok = True
-        elif "Status: inactive" in r.stdout:
+        elif rules is not None:
             print(f"  fw:     {_warn('ufw inactive — LLMs open to internet')}   run `{APP} firewall --apply --mode lan`")
+        elif shutil.which("ufw"):
+            # Installed, but reading the rules needs root we did not take.
+            # _firewall_active() falls back to the systemd unit state, so
+            # we can still say whether it is ON without lying either way.
+            if _firewall_active() is True:
+                print(f"  fw:     {_ok('ufw active (rules need root to read)')}   sudo ufw status")
+                fw_ok = True
+            else:
+                print(f"  fw:     {_warn('ufw present — cannot read rules from here')}   sudo ufw status")
         else:
             r2 = _r("firewall-cmd --state 2>/dev/null")
             if "running" in r2.stdout:
@@ -16187,6 +16307,124 @@ WantedBy=default.target
     else:
         print(f"\n  to auto-fix all issues: {APP} doctor --fix")
 
+# ---------------------------------------------------------------------------
+# The tailscale ladder — remind the user what comes AFTER each step.
+
+# Installing tailscale is a SEQUENCE, but every hint in this file printed
+# ONE line of it. So a user who had just run `sudo tailscale up` and seen
+# "Success." had no idea the VPN address still had to be confirmed, or
+# that the firewall rule is a SEPARATE step (yalla 2026-11-27: tailscale
+# was up, `hivv firewall --apply --mode tailscale` crashed on a NameError,
+# and nothing on screen said what to do next).
+
+# One ordered ladder. Every site that mentions a step prints the WHOLE
+# ladder with a marker on the next thing to do, so a finished step can
+# never strand the user.
+# Step 1 names `hivv install tailscale`, NOT the raw tailscale.com curl:
+# that installer cases only on ID= from /etc/os-release and exits 1 on any
+# distro it has never heard of (BOSS GNU/Linux, ID=boss — found live on
+# ashy 2026-11-27). Our door runs three tiers, so it works where theirs
+# refuses. Never point a user at a command that cannot work on their box.
+_TAILSCALE_STEPS = (
+    ("install the client",
+     "hivv install tailscale"),
+    ("start it and log in",
+     "sudo tailscale up   (then OPEN the URL it prints)"),
+    ("confirm your VPN address",
+     "tailscale ip -4     (expect a 100.x.x.x address)"),
+    ("open your LLMs to the tailnet",
+     "hivv firewall --apply --mode tailscale"),
+)
+
+# The LAST thing to do, and the only one this box can never check for
+# itself — it has to be run from somewhere else. Kept out of the progress
+# count on purpose: a step that can never read True would pin the ladder
+# at N-1 forever and cry wolf after every run.
+_TAILSCALE_FINAL = ("check it from another machine",
+                    "hivv reach <this-bee>   (or: curl http://<100.x>:8080/health)")
+
+
+def _tailscale_progress() -> list:
+    """How far through _TAILSCALE_STEPS this box is.
+
+    Returns a list of True (done) / False (not done) / None (cannot tell
+    from here). None is NOT False: the firewall rule needs root to read,
+    and an unknown must never be shown as "not done" — that is what made
+    the old output keep nagging a user who had already finished.
+    """
+    out = [False] * len(_TAILSCALE_STEPS)
+    have = bool(shutil.which("tailscale"))
+    out[0] = have
+    if not have:
+        return out
+    running = False
+    ip = ""
+    try:
+        r = subprocess.run(["tailscale", "status", "--json"],
+                           capture_output=True, text=True, timeout=8)
+        if r.returncode == 0 and r.stdout:
+            try:
+                d = json.loads(r.stdout)
+                running = d.get("BackendState") == "Running"
+            except Exception:
+                pass
+    except Exception:
+        pass
+    try:
+        r = subprocess.run(["tailscale", "ip", "-4"],
+                           capture_output=True, text=True, timeout=8)
+        if r.returncode == 0:
+            ip = (r.stdout or "").strip().splitlines()[:1]
+            ip = ip[0].strip() if ip else ""
+    except Exception:
+        pass
+    out[1] = running
+    # step 3 (confirm the address) is really "did you look at it" — once
+    # we hold an address AND are logged in, the user has what they were
+    # told to confirm.
+    out[2] = bool(ip) and running
+    # step 4 needs root to verify; ask, never guess.
+    rules = _ufw_status_text()
+    if rules is None and shutil.which("ufw"):
+        out[3] = None
+    elif rules is not None:
+        out[3] = "100.64.0.0/10" in rules
+    else:
+        # no ufw at all — nothing to open, so the step is vacuously done
+        out[3] = True
+    return out
+
+
+def _print_tailscale_ladder(progress=None, *, indent="   ") -> None:
+    """Print the whole ladder, then say what to do NEXT — and after that.
+
+    This is the "remind me what comes after each step" surface. Every
+    caller that used to print one line of advice prints this instead, so
+    a finished step can never strand the user at a dead end: the first
+    unfinished step is marked and named, and once every step is done the
+    final cross-machine check is named too.
+    """
+    st = list(progress) if progress is not None else _tailscale_progress()
+    if len(st) < len(_TAILSCALE_STEPS):
+        st = st + [None] * (len(_TAILSCALE_STEPS) - len(st))
+    marks = {True: "\033[32mdone\033[0m", False: "\033[2m\u00b7\033[0m",
+             None: "\033[33m?\033[0m"}
+    nxt = next((i for i, v in enumerate(st) if v is not True), None)
+    print(f"{indent}\033[1mtailscale setup \u2014 {sum(1 for v in st if v is True)}"
+          f"/{len(_TAILSCALE_STEPS)} steps\033[0m")
+    for i, (label, cmd) in enumerate(_TAILSCALE_STEPS):
+        arrow = "\033[1;33m\u2192\033[0m" if i == nxt else " "
+        print(f"{indent} {arrow} {i + 1}. {label:<30} {marks[st[i]]}")
+        print(f"{indent}      {cmd}")
+    if nxt is None:
+        print(f"{indent} \033[32mthen\033[0m {_TAILSCALE_FINAL[1]}")
+    else:
+        print(f"{indent} \033[1;33mnext:\033[0m {_TAILSCALE_STEPS[nxt][1]}")
+        if st[nxt] is None:
+            print(f"{indent}   (needs root to confirm \u2014 run it if you have not)")
+        if nxt == len(_TAILSCALE_STEPS) - 1:
+            print(f"{indent} \033[2mafter that:\033[0m {_TAILSCALE_FINAL[1]}")
+
 def cmd_firewall(args) -> None:
     """Detect local LLM servers and configure firewall to let other hivv nodes reach them.
     Supports: LAN-only (default), Tailscale VPN, or manual rules.
@@ -16293,8 +16531,9 @@ def cmd_firewall(args) -> None:
 
     print(f"\n  to auto-fix all issues: {APP} doctor --fix")
 
-    # 3. Check for Tailscale
-    # 3. Check for Tailscale
+    # 3. Check for Tailscale — then show the WHOLE ladder, so a finished
+    # step always names the next one (yalla 2026-11-27: tailscale was up,
+    # and nothing on screen said the firewall rule was still outstanding).
     tailscale_ip = None
     tailscale_ok = False
     try:
@@ -16319,9 +16558,8 @@ def cmd_firewall(args) -> None:
 
     if not tailscale_ok:
         print(f"\n\033[1mtailscale\033[0m")
-        print(f"   {warn} not installed — nodes on different networks won't reach you")
-        print(f"   install: {APP} install tailscale")
-        print(f"   then:    sudo tailscale up")
+        print(f"   {warn} not up — nodes on different networks won't reach you")
+    _print_tailscale_ladder()
 
     # 3. Detect LAN subnet
     lan_ip = ""
@@ -16350,30 +16588,43 @@ def cmd_firewall(args) -> None:
         print(f"   {ok} LAN IP: {lan_ip}")
         print(f"   {ok} subnet: {lan_subnet}")
 
-    # 4. Check current firewall status
+    # 4. Check current firewall status.
+    # `ufw status` needs ROOT. A normal user's run leaves stdout EMPTY
+    # (the ERROR goes to stderr), and the old code read that emptiness as
+    # "no firewall detected" — then, because fw_tool stayed None, step 5
+    # found no ports needing rules and printed "All LLM ports already have
+    # firewall rules" over rules nobody had written. Say UNKNOWN instead.
     print(f"\n\033[1mfirewall status\033[0m")
 
     fw_tool = None
+    fw_rules = None          # ufw status text when we could read it
+    fw_unreadable = False    # tool present, rules need root to read
     if system == "Linux":
-        r = _run("ufw status 2>/dev/null")
-        if "Status: active" in r.stdout:
-            print(f"   {ok} ufw active")
+        if shutil.which("ufw"):
             fw_tool = "ufw"
-        elif "Status: inactive" in r.stdout:
-            print(f"   {warn} ufw installed but inactive")
-            fw_tool = "ufw"
-        else:
+            fw_rules = _ufw_status_text()
+            if fw_rules is None:
+                fw_unreadable = True
+                print(f"   {warn} ufw installed — rules need root to read")
+                print(f"      read them: sudo ufw status")
+            elif "Status: active" in fw_rules:
+                print(f"   {ok} ufw active")
+            else:
+                print(f"   {warn} ufw installed but inactive")
+        elif shutil.which("firewall-cmd"):
             r2 = _run("firewall-cmd --state 2>/dev/null")
             if "running" in r2.stdout:
                 print(f"   {ok} firewalld active")
                 fw_tool = "firewalld"
             else:
-                r3 = _run("iptables -L INPUT -n 2>/dev/null")
-                if r3.returncode == 0:
-                    print(f"   {warn} iptables active (no ufw/firewalld)")
-                    fw_tool = "iptables"
-                else:
-                    print(f"   {warn} no firewall detected — ports may be open to everyone")
+                fw_tool = None
+        if fw_tool is None:
+            r3 = _run("iptables -L INPUT -n 2>/dev/null")
+            if r3.returncode == 0:
+                print(f"   {warn} iptables active (no ufw/firewalld)")
+                fw_tool = "iptables"
+            else:
+                print(f"   {warn} no firewall detected — ports may be open to everyone")
     elif system == "Darwin":
         r = _run("pfctl -s info 2>/dev/null")
         if "Enabled" in r.stdout:
@@ -16391,12 +16642,19 @@ def cmd_firewall(args) -> None:
             print(f"   {warn} Windows Firewall inactive")
             fw_tool = "windows"
 
-    # 5. Determine which ports need rules
+    # 5. Determine which ports need rules.
+    # When the rules could not be READ, closed_ports stays empty — and an
+    # empty list used to print "All LLM ports already have firewall rules."
+    # That is the exact opposite of what we know. Track it explicitly.
     closed_ports = []
-    if fw_tool == "ufw":
-        r = _run("ufw status numbered 2>/dev/null")
+    if fw_tool == "ufw" and fw_unreadable:
+        # Unknown, not empty: assume none are open so --apply re-writes
+        # them (ufw allow is idempotent — a duplicate is a no-op).
+        closed_ports = list(ports)
+        print(f"\n   {warn} cannot read ufw rules without root — assuming none are set")
+    elif fw_tool == "ufw":
         for port in ports:
-            if f"{port}" not in r.stdout:
+            if not _ufw_port_open(fw_rules or "", port):
                 closed_ports.append(port)
     elif fw_tool == "firewalld":
         for port in ports:
@@ -16414,7 +16672,9 @@ def cmd_firewall(args) -> None:
             if "hivv" not in r.stdout.lower():
                 closed_ports.append(port)
 
-    if not closed_ports:
+    if fw_tool is None:
+        print(f"\n   {warn} no firewall tool found — nothing to apply rules to")
+    elif not closed_ports:
         print(f"\n{ok} All LLM ports already have firewall rules.")
     else:
         print(f"\n   ports needing rules: {', '.join(str(p) for p in closed_ports)}")
@@ -16456,32 +16716,59 @@ def cmd_firewall(args) -> None:
     if not allow_from:
         print(f"   {fail} no valid source for mode '{mode}'")
         if mode == "tailscale" and not tailscale_ip:
-            print(f"   install tailscale first: {APP} install tailscale")
-            print(f"   then:                       sudo tailscale up")
+            # The ladder, not one line: installing the client is only
+            # step 1 of 5, and nothing here used to say what follows.
+            _print_tailscale_ladder()
         return
 
+    if fw_tool is None:
+        print(f"\n   {fail} no firewall tool to apply rules to")
+        return
+
+    # Writing rules needs ROOT. Decide that ONCE, before the loop, so we
+    # never print a per-port "✓" for a command that silently failed:
+    # `sudo ufw allow` with no tty answers "a terminal is required to
+    # read the password", and the old code reported each port as allowed
+    # anyway because it never checked the exit code against a real root.
+    root_prefix = _fw_root_prefix(allow_prompt=True)
+    manual: list[str] = []
+    if root_prefix is None:
+        print(f"\n   {warn} cannot get root from here — printing the rules for you to run")
+
+    applied = 0
+    failed = 0
     for port in closed_ports:
         for label, source in allow_from:
             if fw_tool == "ufw":
-                if source:
-                    r = _run(f"sudo ufw allow from {source} to any port {port} proto tcp")
-                else:
-                    r = _run(f"sudo ufw allow {port}/tcp")
-                if r.returncode == 0:
+                rule = (f"ufw allow from {source} to any port {port} proto tcp"
+                        if source else f"ufw allow {port}/tcp")
+                if root_prefix is None:
+                    manual.append(f"sudo {rule}")
+                    continue
+                rc, err = _fw_run(rule, prefix=root_prefix)
+                if rc == 0:
+                    applied += 1
                     print(f"   {ok} ufw: port {port} allowed from {label}")
                 else:
-                    print(f"   {fail} ufw: failed: {r.stderr.strip()}")
+                    failed += 1
+                    print(f"   {fail} ufw: failed: {err}")
 
             elif fw_tool == "firewalld":
                 if source:
-                    r = _run(f"sudo firewall-cmd --add-rich-rule='rule family=ipv4 source address={source} port port={port} protocol=tcp accept' --permanent")
+                    rule = f"firewall-cmd --add-rich-rule='rule family=ipv4 source address={source} port port={port} protocol=tcp accept' --permanent"
                 else:
-                    r = _run(f"sudo firewall-cmd --add-port={port}/tcp --permanent")
-                _run("sudo firewall-cmd --reload")
-                if r.returncode == 0:
+                    rule = f"firewall-cmd --add-port={port}/tcp --permanent"
+                if root_prefix is None:
+                    manual.append(f"sudo {rule}")
+                    continue
+                rc, err = _fw_run(rule, prefix=root_prefix)
+                _fw_run("firewall-cmd --reload", prefix=root_prefix)
+                if rc == 0:
+                    applied += 1
                     print(f"   {ok} firewalld: port {port} allowed from {label}")
                 else:
-                    print(f"   {fail} firewalld: failed: {r.stderr.strip()}")
+                    failed += 1
+                    print(f"   {fail} firewalld: failed: {err}")
 
             elif fw_tool == "pf":
                 rule = f"pass in proto tcp from {source or 'any'} to any port {port}"
@@ -16489,25 +16776,43 @@ def cmd_firewall(args) -> None:
                 print(f"   then: sudo pfctl -f /etc/pf.conf")
 
             elif fw_tool == "windows":
-                if source:
-                    r = _run(f'netsh advfirewall firewall add rule name="hivv {port} {label}" dir=in action=allow protocol=TCP localport={port} remoteip={source}')
-                else:
-                    r = _run(f'netsh advfirewall firewall add rule name="hivv {port}" dir=in action=allow protocol=TCP localport={port}')
-                if r.returncode == 0:
+                rule = (f'netsh advfirewall firewall add rule name="hivv {port} {label}" dir=in action=allow protocol=TCP localport={port} remoteip={source}'
+                        if source else
+                        f'netsh advfirewall firewall add rule name="hivv {port}" dir=in action=allow protocol=TCP localport={port}')
+                rc, err = _fw_run(rule, prefix="")
+                if rc == 0:
+                    applied += 1
                     print(f"   {ok} Windows: port {port} allowed from {label}")
                 else:
-                    print(f"   {fail} Windows: failed: {r.stderr.strip()}")
+                    failed += 1
+                    print(f"   {fail} Windows: failed: {err}")
 
     # 8. Also handle gateway port 3011
-    if fw_tool and "3011" not in str(closed_ports):
-        pass  # already open or not needed
-    elif fw_tool == "ufw" and do_apply:
+    if fw_tool == "ufw" and do_apply:
+        gw_ok = True
         for label, source in allow_from:
-            if source:
-                _run(f"sudo ufw allow from {source} to any port 3011 proto tcp")
-            else:
-                _run(f"sudo ufw allow 3011/tcp")
-        print(f"   {ok} gateway port 3011 configured")
+            rule = (f"ufw allow from {source} to any port 3011 proto tcp"
+                    if source else "ufw allow 3011/tcp")
+            if root_prefix is None:
+                manual.append(f"sudo {rule}")
+                gw_ok = False
+                continue
+            rc, err = _fw_run(rule, prefix=root_prefix)
+            if rc != 0:
+                gw_ok = False
+                failed += 1
+                print(f"   {fail} gateway 3011: {err}")
+        if gw_ok and (applied or not manual):
+            print(f"   {ok} gateway port 3011 configured")
+
+    if manual:
+        print(f"\n   {warn} {len(manual)} rule(s) NOT applied — no root. Run these:")
+        for m in manual:
+            print(f"      {m}")
+
+    # Did ANY of it land? Only an empty manual[] AND no failures counts —
+    # a partial apply must not be reported as a configured firewall.
+    rules_ok = not manual and not failed
 
     # THE OLD LINE PRINTED "firewall configured!" — untrue whenever ufw is
     # inactive, because `--apply` never runs `ufw enable` (verified: there is
@@ -16518,7 +16823,16 @@ def cmd_firewall(args) -> None:
     # actually happened, and hand over the sequence that really activates
     # protection, with `allow 22` FIRST: a host that SSHes in from the
     # internet locks itself out the instant default-deny lands without it.
-    if fw_tool == "ufw" and _firewall_active() is False:
+    if not rules_ok:
+        # Nothing (or not everything) was enforced. Do NOT fall through to
+        # "firewall configured!" — that is the lie this section exists to
+        # kill. manual[] = could not get root; failed[] = root but the
+        # command itself rejected the rule.
+        if manual:
+            print(f"   {fail} firewall NOT configured — the rules above still need root")
+        else:
+            print(f"   {fail} firewall NOT fully configured — some rules failed (see above)")
+    elif fw_tool == "ufw" and _firewall_active() is False:
         print(f"\n   {warn} allow-rules written, but ufw is still INACTIVE — nothing is enforced yet.")
         print(f"   to actually turn protection on (allow 22 FIRST):")
         print(f"      sudo ufw allow 22/tcp")
@@ -16532,6 +16846,13 @@ def cmd_firewall(args) -> None:
             print(f"   your LLMs are only reachable via Tailscale VPN")
             print(f"   other hivv nodes need Tailscale installed to reach you")
     print(f"   restart llama.cpp for changes to take effect (if binding to specific IPs)")
+
+    # Whatever just happened, hand the user the NEXT step — this is the
+    # "remind me after each step" surface for the mode they just ran.
+    # Steps 1-3 are provable from here; step 4 only if the rules above
+    # actually landed (rules_ok is False when they did not).
+    if do_apply and mode == "tailscale":
+        _print_tailscale_ladder([True, True, True, rules_ok])
 
 def cmd_up(args) -> None:
     """Quick 3-line status check — the "you good?" command."""
