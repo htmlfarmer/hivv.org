@@ -8696,6 +8696,9 @@ def cmd_donate(args) -> None:
                     ftype = fb.get("type", "?")
                     msg = fb.get("message", "")[:60]
                     print(f"    \033[2m{ts[:16]}\033[0m  [{status:>8}]  \033[33m{ftype}\033[0m  {msg}")
+                    _note = str(fb.get("review_notes") or "").strip()
+                    if _note:
+                        print(f"          \033[36m↳ reply:\033[0m {_note[:200]}")
             else:
                 print(f"  \033[1mFeedback submitted\033[0m  \033[2m(none yet — run: hivv help submit suggestion ...)\033[0m")
         else:
@@ -8851,6 +8854,12 @@ def cmd_help(args) -> None:
                 emoji = TYPEmoji.get(ftype, "💬")
                 short = msg[:70] + ("..." if len(msg) > 70 else "")
                 print(f"  {emoji} \033[1m{ts}\033[0m  [{status:>8}]  {label}")
+                # The reply. Without this the submitter sees a status move and
+                # never reads a word back — hivv.org could answer and nobody
+                # would know.
+                note = str(fb.get("review_notes") or "").strip()
+                if note:
+                    print(f"        \033[36m↳ reply:\033[0m {note[:200]}")
                 print(f"    {short}\n")
         print(f"\033[1m╰────────────────────────────────────────────────────\033[0m\033[0m\n")
         return
