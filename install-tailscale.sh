@@ -382,6 +382,35 @@ main() {
         esac
     done
 
+    if [ "$DRY" = 1 ]; then
+        # --dry-run means SHOW THE PLAN. It used to fall through the
+        # idempotent early-return below, so the output depended on whether
+        # THIS box already had tailscale: a machine that had it printed no
+        # tiers and no "dry run" line at all (surfaced 2026-11-28 by the
+        # door tests after the hub got tailscale installed). A plan is a
+        # plan either way — show the cascade, and say if it is redundant.
+        if have tailscale; then
+            say ""
+            ok "tailscale is already installed: $(tailscale version 2>/dev/null | head -1)"
+            say "  a real run changes nothing (idempotent) — the plan follows"
+        fi
+        say ""
+        say "hivv — installing Tailscale (plan)"
+        if [ -r /etc/os-release ]; then
+            # shellcheck disable=SC1091
+            . /etc/os-release 2>/dev/null
+            say "  os: $PRETTY_NAME  (id=$ID)"
+        fi
+        setup_priv
+        say ""
+        tier_official || true
+        tier_apt || true
+        tier_static || true
+        say ""
+        say "dry run — nothing was changed. Re-run without --dry-run to install."
+        return 0
+    fi
+
     if have tailscale; then
         say ""
         ok "tailscale is already installed: $(tailscale version 2>/dev/null | head -1)"
@@ -441,15 +470,8 @@ main() {
         return 1
     fi
 
-    if [ "$DRY" = 1 ]; then
-        # show the WHOLE cascade, not just the first tier
-        tier_official || true
-        tier_apt || true
-        tier_static || true
-        say ""
-        say "dry run — nothing was changed. Re-run without --dry-run to install."
-        return 0
-    fi
+    # (--dry-run returns from its own block above — it must run BEFORE the
+    # idempotent early-return, or its output depends on the host's state.)
 
     _done=0
     if tier_official; then _done=1; fi

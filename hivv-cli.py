@@ -22540,7 +22540,15 @@ def _dial_ensure(port: int | None = None, hub: str | None = None,
         info.update(running=True, how="service", pid=_dial_pid(port))
         return info
     pid = _dial_spawn(port, hub, pin)
-    if _dial_wait(port, seconds=3.0):
+    # The spawned shim is THIS file (27k lines) — it has to be imported,
+    # bind the port and answer /healthz before we may call it running.
+    # 3.0s was enough on an idle box and NOT enough on a loaded one: the
+    # deploy gate runs the whole suite while other suites are running, and
+    # at load avg 9-14 this reported "could not start" over a shim that
+    # simply had not finished starting — which failed the gate and
+    # ROLLED BACK a good deploy (2026-11-28). Waiting longer costs only
+    # the genuinely-dead case; giving up early costs a real deploy.
+    if _dial_wait(port, seconds=8.0):
         info.update(running=True, how="spawned", pid=pid)
         return info
     info["how"] = "failed"
