@@ -10044,8 +10044,12 @@ def _local_git_state() -> dict:
     st["short"] = st["sha"][:8]
     _, d = _git("status", "--porcelain")
     st["dirty"] = len([l for l in d.splitlines() if l.strip()])
-    _, r = _git("remote", "get-url", "origin")
-    st["remote"] = r.strip()
+    # Only the OUTPUT of a SUCCESSFUL call: _git returns stdout+stderr,
+    # so a checkout with no origin would otherwise report the string
+    # "error: No such remote origin" as the remote — which is truthy,
+    # and every caller that asks "is there an origin?" would say yes.
+    rc_r, r = _git("remote", "get-url", "origin")
+    st["remote"] = r.strip() if rc_r == 0 else ""
     _, ab = _git("rev-list", "--left-right", "--count", "origin/main...HEAD")
     parts = ab.split()
     if len(parts) == 2:
@@ -23183,6 +23187,22 @@ def build_parser() -> argparse.ArgumentParser:
     sp_lo = sub.add_parser("local", help="manage a LOCAL self-hosted HIVV gateway")
     sp_lo.add_argument("what", nargs="?", default="status",
                        choices=["status", "start", "stop", "info"])
+    sp_git = sub.add_parser("git", help="the contribution loop's last mile, with the rails on")
+    sp_git.add_argument("git_verb", nargs="?", default="status",
+                        choices=["status", "clone", "branch", "commit", "push", "pr", "log", "diff"],
+                        help="what to do")
+    sp_git.add_argument("name", nargs="?", default=None,
+                        help="branch name (branch), destination (clone)")
+    sp_git.add_argument("-m", "--message", dest="message", default=None,
+                        help="commit message (commit)")
+    sp_git.add_argument("-a", "--all", dest="all", action="store_true",
+                        help="stage everything before committing (commit)")
+    sp_git.add_argument("--title", dest="title", default=None, help="PR title (pr)")
+    sp_git.add_argument("--body", dest="body", default=None, help="PR body (pr)")
+    sp_git.add_argument("-n", "--number", dest="number", default=None,
+                        help="how many commits (log)")
+    sp_git.add_argument("--staged", dest="staged", action="store_true",
+                        help="the staged diff (diff)")
     sp_oc = sub.add_parser("opencode", help="the recommended interface — detect, explain, install, wire up")
     sp_oc.add_argument("--json", dest="json_output", action="store_true", help="output raw JSON")
     sp_oc.add_argument("--wire", action="store_true", help="write the hivv provider into opencode.jsonc")
@@ -24385,6 +24405,332 @@ def cmd_contribute(args) -> None:
     print()
     print(f"  details: CONTRIBUTING.md  ·  /ai.txt  ·  {HUB}/ai.txt")
 
+# ── hivv git ──────────────────────────────────────────────────────────────
+# The CLI already owns the WORKFLOW: clone → branch → change → test →
+# propose (see cmd_contribute). What it did not own was the last mile — the
+# verbs a contributor reaches for after "make the change": commit, push, PR.
+# Those fell back to raw git, which means the rails this repository already
+# states were only enforced by whoever remembered them:
+#
+#   * never push to main
+#   * a moved or renamed file needs a MOVES.md entry in the SAME commit
+#   * the commit message is type(scope): what changed
+#
+# This is deliberately NOT a one-for-one mirror of git:
+#
+#   * `hivv git merge` is NOT offered. The repository merges through a pull
+#     request, and a verb called "merge" invites exactly the thing the rails
+#     forbid. `hivv git pr` is the way through.
+#   * the group is named `hivv git`, not a dozen top-level commands. The
+#     top-level namespace already carries ~90 commands, and a wrapper that
+#     looks like git but is not git belongs in one obvious place.
+#   * every verb adds a RAIL. None of them is a rename of a git command.
+
+def _git_note(s: str) -> str:
+    """A dim informational line — this CLI has _ok/_warn/_fail, no _info."""
+    return f"\033[2m\u2192\033[0m {s}"
+
+
+_GIT_MSG_TYPES = ("feat", "fix", "docs", "chore", "refactor", "test", "perf",
+                   "build", "ci", "merge", "revert", "style")
+
+
+def _git_rewrites() -> list[str]:
+    """Global url.<base>.insteadOf rewrites.
+
+    They change the TRANSPORT of every clone on this machine, silently.
+
+    Found on a real box: `url.git@github.com:.insteadOf https://github.com/`
+    turned every plain-HTTPS clone into an SSH clone, which then needed a
+    passphrase-protected key — and with BatchMode it failed as "Permission
+    denied (publickey)" while the clone HUNG instead of erroring. The symptom
+    reads as "my key is broken"; the cause is a git config nobody remembers.
+    """
+    rc, out = _git("config", "--global", "--get-regexp", r"url\..*\.insteadof")
+    if rc != 0:
+        return []
+    return [ln for ln in out.splitlines() if ln.strip()]
+
+
+def _git_ssh_ok() -> bool:
+    """Can this box authenticate to github over SSH without a prompt?"""
+    try:
+        r = subprocess.run(
+            ["ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new",
+             "-o", "IdentitiesOnly=yes", "-T", "git@github.com"],
+            capture_output=True, text=True, timeout=25)
+    except Exception:
+        return False
+    return "successfully authenticated" in ((r.stdout or "") + (r.stderr or ""))
+
+
+def _git_repo_root() -> str | None:
+    rc, out = _git("rev-parse", "--show-toplevel")
+    return out.strip() if rc == 0 and out.strip() else None
+
+
+def _git_moved_paths(staged: bool = True) -> list[str]:
+    """Paths that this change RENAMES or MOVES.
+
+    A rename shows as R100 old new; a move across a delete+add shows as D
+    old plus A new. Both are "the file moved", which is what MOVES.md is
+    about.
+    """
+    args = ["diff", "--cached", "--name-status", "-M"] if staged else \
+            ["diff", "HEAD", "--name-status", "-M"]
+    rc, out = _git(*args)
+    if rc != 0:
+        return []
+    deleted, added, moved = set(), set(), []
+    for line in out.splitlines():
+        parts = line.split("\t")
+        if len(parts) < 2:
+            continue
+        code = parts[0][0]
+        if code == "R" and len(parts) >= 3:
+            moved.append(parts[2])
+        elif code == "D" and len(parts) >= 2:
+            deleted.add(parts[1])
+        elif code == "A" and len(parts) >= 2:
+            added.add(parts[1])
+    for a in sorted(added):
+        base = a.rsplit("/", 1)[-1]
+        for d in sorted(deleted):
+            if d.rsplit("/", 1)[-1] == base:
+                moved.append(a)
+                break
+    return sorted(set(moved))
+
+
+def _git_moves_entry_present(staged: bool = True) -> bool:
+    """Is MOVES.md itself part of this change?"""
+    args = ["diff", "--cached", "--name-only"] if staged else \
+            ["diff", "HEAD", "--name-only"]
+    rc, out = _git(*args)
+    if rc != 0:
+        return False
+    return any(ln.strip().endswith("MOVES.md") for ln in out.splitlines())
+
+
+def _git_msg_ok(msg: str) -> bool:
+    """type(scope): what changed — the shape CONTRIBUTING.md states."""
+    m = (msg or "").strip()
+    if ":" not in m:
+        return False
+    head = m.split(":", 1)[0].strip()
+    if not head:
+        return False
+    kind = head.split("(", 1)[0].strip().lower()
+    return kind in _GIT_MSG_TYPES and bool(m.split(":", 1)[1].strip())
+
+
+def _git_subject() -> str:
+    rc, out = _git("log", "-1", "--format=%s")
+    return (out or "").strip()
+
+
+def _cmd_git_status(args) -> None:
+    """hivv git status — what this checkout looks like right now."""
+    st = _local_git_state()
+    if not st.get("is_repo"):
+        print(_warn("not a git checkout. try: hivv git clone ~/work/hivv"))
+        return
+    print(f"\033[1m{APP} git status\033[0m")
+    print(f"  branch:   {st.get('branch') or ''}")
+    print(f"  commit:   {st.get('short') or ''}")
+    print(f"  remote:   {st.get('remote') or ''}")
+    print(f"  dirty:    {st.get('dirty', 0)} file(s)")
+    print(f"  ahead:    {st.get('ahead', 0)}   behind: {st.get('behind', 0)}")
+    _rc, out = _git("status", "--porcelain")
+    for line in (out or "").splitlines()[:20]:
+        print(f"    {line}")
+
+
+def _cmd_git_clone(args) -> None:
+    """hivv git clone — clone the canonical source."""
+    dest = Path(getattr(args, "dest", None) or "~/work/hivv").expanduser()
+    if dest.exists() and any(dest.iterdir()):
+        die(f"not empty: {dest}")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+
+    rewrites = _git_rewrites()
+    env = dict(os.environ)
+    if rewrites and not _git_ssh_ok():
+        # The rewrite turns HTTPS into SSH, and SSH cannot authenticate
+        # without a passphrase on this box — so the clone would hang.
+        # Neutralise the global config for this one command.
+        print(_warn("a global URL rewrite sends every clone to SSH, and SSH"))
+        print(_warn("cannot authenticate here without a passphrase"))
+        for ln in rewrites:
+            print(f"    {ln}")
+        print(_git_note("cloning over HTTPS instead (the repository is public)"))
+        env["GIT_CONFIG_GLOBAL"] = os.devnull
+    try:
+        r = subprocess.run(["git", "clone", _PROPOSE_CLONE, str(dest)],
+                           capture_output=True, text=True, timeout=900, env=env)
+    except Exception as e:
+        die(f"clone failed: {e}")
+    if r.returncode != 0:
+        die(f"clone failed: {(r.stderr or r.stdout).strip()[:300]}")
+    print(_ok(f"cloned {_PROPOSE_REPO} into {dest}"))
+    print(_git_note(f"next: cd {dest} && hivv git branch my-topic"))
+
+
+def _cmd_git_branch(args) -> None:
+    """hivv git branch — start a topic branch. Never main."""
+    name = (getattr(args, "name", None) or "").strip()
+    if not name:
+        rc, out = _git("branch", "--format=%(refname:short)")
+        print(_git_note("branches:"))
+        for ln in (out or "").splitlines():
+            print(f"    {ln}")
+        return
+    if name.lower() in ("main", "master"):
+        die("refusing to create a branch named main — work on a topic branch")
+    if not _git_repo_root():
+        die("not a git checkout — hivv git clone first")
+    rc, out = _git("checkout", "-b", name)
+    if rc != 0:
+        die(f"could not create the branch: {(out or '').strip()[:200]}")
+    print(_ok(f"on branch {name}"))
+
+
+def _cmd_git_commit(args) -> None:
+    """hivv git commit — commit with the conventions applied."""
+    if not _git_repo_root():
+        die("not a git checkout — hivv git clone first")
+    msg = getattr(args, "message", None) or ""
+    if not msg:
+        die("a commit needs a message: hivv git commit -m 'fix(scope): what changed'")
+    if not _git_msg_ok(msg):
+        print(_warn("the message does not look like 'type(scope): what changed'"))
+        print(_git_note("the types: " + ", ".join(_GIT_MSG_TYPES)))
+    if getattr(args, "all", False):
+        _git("add", "-A")
+    rc, out = _git("diff", "--cached", "--quiet")
+    if rc == 0:
+        die("nothing staged — nothing to commit")
+    moved = _git_moved_paths(staged=True)
+    has_moves = _git_moves_entry_present(staged=True)
+    if moved and not has_moves:
+        print(_warn("this change MOVES files, and MOVES.md is not part of it:"))
+        for p in moved[:10]:
+            print(f"    {p}")
+        print(_git_note("the repository asks for a MOVES.md entry in the same commit"))
+    rc, out = _git("commit", "-m", msg)
+    if rc != 0:
+        die(f"commit failed: {(out or '').strip()[:300]}")
+    rc2, sha = _git("rev-parse", "--short", "HEAD")
+    print(_ok(f"committed {sha.strip()}"))
+    if moved and not has_moves:
+        print(_warn("MOVES.md still has no entry for the move above"))
+    print(_git_note("next: hivv git verify  (then hivv git push)"))
+
+
+def _cmd_git_push(args) -> None:
+    """hivv git push — push the topic branch. Never main."""
+    if not _git_repo_root():
+        die("not a git checkout — hivv git clone first")
+    st = _local_git_state()
+    branch = st.get("branch") or ""
+    if branch.lower() in ("main", "master"):
+        die("refusing to push main — push a topic branch and open a PR")
+    if not branch:
+        die("detached HEAD — check out a branch first")
+    if st.get("dirty"):
+        print(_warn(f"{st['dirty']} uncommitted file(s) — they will NOT be pushed"))
+    rc, out = _git("rev-list", "--count", f"origin/{branch}..HEAD")
+    if rc == 0 and out.strip() in ("0", ""):
+        print(_git_note("nothing new to push"))
+        return
+    rc, out = _git("push", "-u", "origin", branch, timeout=300.0)
+    if rc != 0:
+        die(f"push failed: {(out or '').strip()[:300]}")
+    print(_ok(f"pushed {branch}"))
+    print(_git_note("next: hivv git pr  (or open the compare URL on github)"))
+
+
+def _cmd_git_pr(args) -> None:
+    """hivv git pr — open the pull request for this branch."""
+    st = _local_git_state()
+    branch = st.get("branch") or ""
+    if not branch or branch.lower() in ("main", "master"):
+        die("a PR needs a topic branch")
+    remote = st.get("remote") or ""
+    repo = remote
+    if repo.startswith("git@github.com:"):
+        repo = repo.split(":", 1)[1]
+        if repo.endswith(".git"):
+            repo = repo[:-4]
+    elif repo.startswith("https://github.com/"):
+        repo = repo.split("github.com/", 1)[1]
+        if repo.endswith(".git"):
+            repo = repo[:-4]
+    else:
+        repo = _PROPOSE_REPO
+    url = f"https://github.com/{repo}/compare/main...{branch}"
+    if shutil.which("gh"):
+        try:
+            r = subprocess.run(["gh", "auth", "status"], capture_output=True,
+                               text=True, timeout=30)
+            if r.returncode == 0:
+                title = getattr(args, "title", None) or _git_subject()
+                body = getattr(args, "body", None) or ""
+                cmd = ["gh", "pr", "create", "--title", title]
+                if body:
+                    cmd += ["--body", body]
+                cmd += ["--base", "main", "--head", branch]
+                p = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+                if p.returncode == 0:
+                    print(_ok("pull request opened: " + (p.stdout or "").strip()))
+                    return
+                die(f"gh could not open the PR: {(p.stderr or p.stdout).strip()[:300]}")
+        except Exception:
+            pass
+    print(_warn("gh is not authenticated — open the PR yourself:"))
+    print(f"    {url}")
+
+
+def _cmd_git_log(args) -> None:
+    """hivv git log — recent commits."""
+    n = str(getattr(args, "number", None) or "10")
+    rc, out = _git("log", f"-{n}", "--oneline", "--decorate")
+    print(out or _git_note("no commits yet"))
+
+
+def _cmd_git_diff(args) -> None:
+    """hivv git diff — the change, staged or not."""
+    dargs = ["diff", "--cached"] if getattr(args, "staged", False) else ["diff"]
+    rc, out = _git(*dargs)
+    print(out or _git_note("no diff"))
+
+
+def cmd_git(args) -> None:
+    """hivv git — the last mile of the contribution loop, with the rails on.
+
+    Not a git mirror: every verb here adds a rule this repository already
+    states — never push to main, a moved file needs a MOVES.md entry, the
+    message is type(scope): what changed — and works around the transport
+    rewrites that silently break a clone on a fresh box.
+
+    There is deliberately no `hivv git merge`: merging goes through a PR.
+    """
+    verb = getattr(args, "git_verb", "status")
+    fn = {
+        "status": _cmd_git_status,
+        "clone": _cmd_git_clone,
+        "branch": _cmd_git_branch,
+        "commit": _cmd_git_commit,
+        "push": _cmd_git_push,
+        "pr": _cmd_git_pr,
+        "log": _cmd_git_log,
+        "diff": _cmd_git_diff,
+    }.get(verb)
+    if fn is None:
+        die(f"unknown: hivv git {verb}")
+    fn(args)
+
+
 COMMANDS = _resolve_cmds({
     "_agent":          None,  # internal
     "start":           "cmd_start",
@@ -24394,6 +24740,7 @@ COMMANDS = _resolve_cmds({
     "boot":            "cmd_boot",
     "sync":            "cmd_sync",    "propose":         "cmd_propose",
     "contribute":      "cmd_contribute",
+    "git":              "cmd_git",
     "contributors":    "cmd_contributors",
     "review-diff":     "cmd_review_diff",
     "logs":            "cmd_logs",
@@ -25159,6 +25506,7 @@ def _print_sub_help(cmd: str) -> None:
         "llm status":  "detect + bench + suggest in one shot",
         "llm install": "print install commands for the detected OS\n  flag: --docker   print the `docker run` for ollama\n  flag: --auto     actually run the install (instead of just printing)\n  flag: --model=X  after install, run `ollama pull X`",
         "llm pull":    "ollama pull <model>\n  usage: hivv llm pull qwen3:1.7b",
+        "git":        "the contribution loop, last mile, with the rails on\n  verbs: status · clone · branch · commit · push · pr · log · diff\n  usage: hivv git branch my-topic && hivv git commit -m \"fix(scope): what\" && hivv git push\n  rails: never push main · a moved file wants a MOVES.md entry · the message is type(scope): what\n  note: there is deliberately no hivv git merge — merging goes through a PR",
         "llm serve":   "ollama serve in the foreground\n  args: [model]   preload a model on startup\n  flag: --port=N  listen on port N (default 11434)",
     }
     desc = table.get(cmd, "(no help yet)")
