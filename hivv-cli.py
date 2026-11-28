@@ -3843,6 +3843,33 @@ def _detect_local_ai() -> list[dict]:
     return results
 
 
+_EMBED_NAME_HINTS = ("embed", "bge-", "all-minilm", "sentence-transformers",
+                     "gte-")
+
+
+def _is_embed_model(name) -> bool:
+    """True when `name` looks like an EMBEDDING model — vectors, not chat.
+
+    THE BUG THIS CLOSES (ashy, 2026-11-28): the direct chat loop offered
+    `nomic-embed-text:latest` as a chat candidate. The server correctly
+    answered HTTP 400 "does not support chat" — and the hint under it blamed
+    slot/context config, so the user was sent to `hivv llm config --set np=1`
+    on a Mac with no llama.cpp installed at all.
+
+    An embedder can never answer a chat: it turns text into vectors. So it is
+    not a CANDIDATE, and we should never spend a request finding that out.
+
+    Matched on the name only, and only against families that are embedders by
+    construction — no chat model ships with "embed" in its tag, so this cannot
+    take a real answer away. Returns False for an empty/unknown name: a model
+    we cannot identify stays eligible rather than silently vanishing.
+    """
+    n = str(name or "").strip().lower()
+    if not n:
+        return False
+    return any(h in n for h in _EMBED_NAME_HINTS)
+
+
 def _real_model(target: str, timeout: float = 2.0) -> str:
     """REAL model name for an OpenAI-compatible endpoint.
 
@@ -3858,10 +3885,21 @@ def _real_model(target: str, timeout: float = 2.0) -> str:
         req = urllib.request.Request(f"{o.scheme}://{o.netloc}/api/tags",
                                      headers={"User-Agent": f"{APP}/{VERSION}"})
         with urllib.request.urlopen(req, timeout=timeout) as r:
-            names = [m.get("name") for m in
+            names = [str(m.get("name") or "") for m in
                      (json.loads(r.read().decode("utf-8", "replace")).get("models") or [])]
-        if names and names[0]:
-            return str(names[0])
+        names = [n for n in names if n]
+        if names:
+            # Prefer a CHAT model: ollama lists models in pull order, and
+            # nomic-embed-text was first on ashy — so every path that reads
+            # this (_chat_local_only, `hivv ask`, relay jobs, the test probe)
+            # was handed an embedder. If the box only HAS embedders, keep the
+            # old answer: naming the real model gives the server's honest
+            # 400 ("does not support chat") instead of a baffling
+            # `model 'local' not found` 404.
+            for n in names:
+                if not _is_embed_model(n):
+                    return n
+            return names[0]
     except Exception:
         pass
     return "local"
@@ -13679,11 +13717,40 @@ def _http_err_hint(code: int, body: str = "") -> str:
     (repetition loop)': that mislabel sends users hunting for a bad model when
     it's slot/context config (Stuarts-iMac, 2026-11-18)."""
     if code == 400:
+        # READ THE BODY FIRST. The slot advice below is right often enough to
+        # have become the ONLY 400 answer — so a completely different refusal
+        # ("nomic-embed-text:latest does not support chat", ashy 2026-11-28)
+        # was reported as "the slot is too small", sending the user to
+        # `hivv llm config --set np=1` for a problem that has nothing to do
+        # with context. Followed literally it is also advice they CANNOT take:
+        # the Mac that reported it had no llama.cpp installed at all.
+        low = (body or "").lower()
+        # Refusal language is REQUIRED, so a body that merely mentions
+        # embeddings ("available: chat, embedding") can never land here.
+        if ("does not support chat" in low
+                or "not a chat model" in low
+                or ("embed" in low and ("does not support" in low
+                                        or "unsupported" in low))):
+            return ("→ that model is an EMBEDDER, not a chat model — it turns "
+                    "text into vectors and cannot answer. Pick a chat model: "
+                    "hivv models (an embed model's name usually says so: "
+                    "*embed*, bge-*, all-minilm)")
         # THE OLD HINT DID NOT FIX ANYTHING. `np=2` halves the slot: with
         # ctx=4096 that yields 2048 tokens/slot, still under the ~2100-token
         # auto-attached toolkit, so following the printed advice kept 400ing.
         # np=1 hands every slot the WHOLE context (llama-server only divides
         # -c by -np when -np is given explicitly).
+        if "exceed_context_size" in low or "n_ctx" in low or "context" in low:
+            return ("→ context/slot config — the slot is too small for the "
+                    "prompt/toolkit; run: hivv llm doctor (check n_ctx_slot) · "
+                    "fix: hivv llm config --set np=1 && hivv restart llm "
+                    "(np=2 still halves ctx and keeps 400ing)")
+        # A 400 we cannot classify: say THAT, honestly, instead of asserting
+        # a slot diagnosis the body never mentioned.
+        if low:
+            return "→ the server refused this request — see the message above"
+        # Bodyless 400 (older servers swallow the reason): the slot/size
+        # case is by far the most common, so keep the classic advice.
         return ("→ context/slot config — the slot is too small for the "
                 "prompt/toolkit; run: hivv llm doctor (check n_ctx_slot) · "
                 "fix: hivv llm config --set np=1 && hivv restart llm "
@@ -13708,7 +13775,11 @@ def _stream_error_hint(text: str) -> str:
     if not low or len(low) < 25:
         return ""
     if "exceeds the available context" in low or "bad request" in low:
-        return _http_err_hint(400)
+        # Pass the TEXT as the body: without it every streamed 400 got the
+        # slot advice, so a refusal smuggled into content ("does not support
+        # chat") was diagnosed as context too — the same lie as the direct
+        # path, from the other direction.
+        return _http_err_hint(400, text)
     if "unauthorized" in low or "api-key" in low or "api key" in low:
         return _http_err_hint(401)
     if "loading model" in low or "unavailable_error" in low:
@@ -14804,6 +14875,15 @@ def _do_chat(msg: str, stream: bool = True, mode: str | None = None,
 
                 # Find a usable port
                 for m in models:
+                    # An embedder can never answer a chat — do not spend a
+                    # request proving it (ashy's nomic-embed-text:latest,
+                    # 2026-11-28: HTTP 400 "does not support chat", then a
+                    # hint blaming slot config for a model that has no slot).
+                    # Skipped BEFORE the TCP probe, so a bee whose only model
+                    # is an embedder is never marked FAILED — it simply has
+                    # nothing to offer here and the next bee is tried.
+                    if _is_embed_model(m.get("model") or m.get("name")):
+                        continue
                     port = m.get("port", 8080)
                     if not _tcp_ok(ip, port):
                         direct_fails[name.lower()] = time.time()
@@ -26070,6 +26150,41 @@ COMMANDS = _resolve_cmds({
     "llm config":        "cmd_llm_config",
 })
 
+# Words that are greetings rather than typos — they go to the hive, visibly.
+_CHAT_WORDS = {"hello", "hi", "hey", "yo", "sup", "thanks", "thank"}
+
+
+def _is_stray_command_word(argv) -> bool:
+    """True when argv looks like a TYPO, not a question → fail loud, NO LLM call.
+
+    LOUD, not silent (2026-11-23): `hivv if` / `hivv when` looked like they
+    were "taking commands" — they were silently chatting, and one even spent a
+    call that hit a context overflow. An exceptional path that does something
+    clever in silence is worse than a crash.
+
+    QUOTED QUESTIONS ARE SENTENCES, NOT STRAY WORDS (2026-11-28). The first
+    version tested `len(argv) == 1` — but argv counts ARGUMENTS, not words,
+    and the shell folds a quoted phrase into ONE element. So the natural thing
+    to type —
+
+        hivv "whats up in pakistan"
+
+    — was rejected with "isn't an hivv command", while the SAME words unquoted
+    (`hivv whats up in pakistan`, four elements) chatted fine. Quoting broke
+    it; not quoting worked. A SPACE means someone typed a SENTENCE: send it.
+
+    So a stray word is: exactly one argument, no space, no question mark, not
+    a greeting. `hivv frobnicate` still never spends a call — and now
+    `hivv "whats up"` reaches the hive, which is the whole point of quoting.
+    """
+    if len(argv) != 1:
+        return False                       # several words → a sentence
+    cmd = str(argv[0])
+    if " " in cmd or "?" in cmd:
+        return False                       # a phrase, or an explicit question
+    return cmd.lower() not in _CHAT_WORDS  # a lone greeting still chats
+
+
 def main(argv: list[str]) -> None:
     global HUB
     # Internal: invoked by `hivv start` to fork the agent
@@ -26239,14 +26354,9 @@ def main(argv: list[str]) -> None:
         if len(argv) == 2 and argv[1] in ("help", "-h", "--help"):
             _help_search(cmd_name)
             return
-        # LOUD, not silent (2026-11-23): `hivv if` / `hivv when` looked like
-        # they were "taking commands" — they were silently chatting, and one
-        # even spent a call that hit a context overflow. An exceptional path
-        # that does something clever in silence is worse than a crash.
-        #   · single stray word (no ?, not a greeting) → fail loud, no LLM call
-        #   · greetings and real questions still go to the hive — visibly
-        _CHAT_WORDS = {"hello", "hi", "hey", "yo", "sup", "thanks", "thank"}
-        if len(argv) == 1 and "?" not in cmd_name and cmd_name.lower() not in _CHAT_WORDS:
+        # LOUD, not silent (2026-11-23) — and a quoted sentence still chats
+        # (2026-11-28). Rules and reasoning live in _is_stray_command_word().
+        if _is_stray_command_word(argv):
             import difflib
             _close = difflib.get_close_matches(cmd_name, list(COMMANDS), n=1, cutoff=0.7)
             _hint = f" — did you mean `{APP} {_close[0]}`?" if _close else ""
