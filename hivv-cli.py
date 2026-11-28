@@ -23222,7 +23222,8 @@ def build_parser() -> argparse.ArgumentParser:
                        choices=["status", "start", "stop", "info"])
     sp_fl = sub.add_parser("fleet", help="one command for a multi-box deployment: the dashboard, and the setup")
     sp_fl.add_argument("fleet_what", nargs="?", default="dashboard",
-                        choices=["dashboard", "up", "check", "add", "list", "move", "report"],
+                        choices=["dashboard", "up", "check", "add", "list", "move", "report",
+                                 "deploy", "preview"],
                         help="what to do (default: the dashboard)")
     sp_fl.add_argument("name", nargs="?", default=None, help="box name (add)")
     sp_fl.add_argument("host", nargs="?", default=None, help="box host (add)")
@@ -23235,6 +23236,12 @@ def build_parser() -> argparse.ArgumentParser:
                         help="machine-readable output")
     sp_fl.add_argument("--report", dest="report", action="store_true",
                         help="this box's status as JSON (what the fleet probe asks for)")
+    sp_fl.add_argument("--dry-run", dest="dry_run", action="store_true",
+                        help="show the plan, deploy nothing (deploy)")
+    sp_fl.add_argument("--box", dest="box", default=None,
+                        help="which centre to deploy to (default: the registered centre)")
+    sp_fl.add_argument("--url", dest="url", default=None,
+                        help="the public URL to health-check after the deploy")
     sp_git = sub.add_parser("git", help="the contribution loop's last mile, with the rails on")
     sp_git.add_argument("git_verb", nargs="?", default="status",
                         choices=["status", "clone", "branch", "commit", "push", "pr", "log", "diff"],
@@ -25474,6 +25481,372 @@ def _cmd_fleet_list(args) -> None:
         print(f"  {name:<14} {info.get('host', name):<16} {info.get('role', '?')}")
 
 
+
+def _fleet_centre_name(explicit: str = "") -> str:
+    """Which box is the centre? The registry says; --box overrides."""
+    if explicit:
+        return explicit
+    reg = _fleet_load()
+    boxes = reg.get("boxes", {}) if isinstance(reg.get("boxes"), dict) else {}
+    centres = [n for n, i in sorted(boxes.items())
+               if (i or {}).get("role") == "centre"]
+    if not centres:
+        # no registry entry: the box that RUNS a gateway is the centre.
+        if _fleet_pm2_gateway():
+            return _hostname()
+        return ""
+    return centres[0]
+
+
+def _cmd_fleet_deploy(args) -> None:
+    """hivv fleet deploy — put main on the LIVE site, from any box.
+
+    The deploy has to happen ON THE CENTRE: it fast-forwards the
+    production tree, applies the new migrations, restarts pm2 and polls the
+    health endpoint — all of which live there. This command does the
+    remembering for you: it finds the centre, checks the tree is in a
+    deployable state, shows the plan, and then does it.
+
+    It refuses for the same reasons deploy.sh refuses, and it says them
+    before you wait for the remote to refuse them for you.
+    """
+    dry = bool(getattr(args, "dry_run", False))
+    box = _fleet_centre_name(getattr(args, "box", None) or "")
+    if not box:
+        die("no centre box is registered — hivv fleet add <name> <host> --role centre")
+    host = _fleet_box_host(box)
+    print(f"\033[1m{APP} fleet deploy\033[0m — centre {box} ({host})"
+          f"{'  (dry run)' if dry else ''}\n")
+
+    # ── 1. can we even reach the centre? ────────────────────────────────
+    rc, out = _fleet_ssh(host, "echo ok", timeout=25)
+    if rc != 0 or "ok" not in out:
+        die(f"{host} is not reachable over ssh (key auth?): {out[:200]}")
+
+    # ── 2. the centre's tree, and whether it can be deployed ───────────
+    rc, probe = _fleet_ssh(host, "python3 ~/.local/share/hivv/fleet-probe.py 2>/dev/null", timeout=60)
+    tree = ""
+    branch = ""
+    dirty = 0
+    if rc == 0 and probe.strip().startswith("{"):
+        try:
+            g = (json.loads(probe).get("git") or {})
+            tree = g.get("path") or ""
+            branch = g.get("branch") or ""
+            dirty = int(g.get("dirty") or 0)
+        except Exception:
+            pass
+    if not tree:
+        # No probe answer: fall back to asking for it directly.
+        rc, out = _fleet_ssh(
+            host, "for d in /var/www/vhosts/hivv.org ~/work/hivv ~/hivv; do "
+                  "[ -d \"$d/.git\" ] && echo \"$d\" && break; done", timeout=40)
+        tree = (out or "").strip().splitlines()[0] if out.strip() else ""
+    if not tree:
+        die(f"could not find the source tree on {host} — is it a centre?")
+    print(f"  tree: {tree}")
+
+    if branch and branch not in ("main", "master"):
+        die(f"the production tree is on '{branch}' — deploy.sh deploys from main only.\n"
+            f"  on {host}: cd {tree} && git checkout main && git pull")
+    if dirty:
+        die(f"the production tree has {dirty} uncommitted change(s) — "
+            f"deploy.sh refuses a dirty tree.\n"
+            f"  on {host}: cd {tree} && git status")
+
+    # ── 3. is there anything to deploy? ────────────────────────────────
+    rc, out = _fleet_ssh(
+        host, f"cd {tree} && git fetch origin -q && "
+              f"git rev-list --count HEAD..origin/main", timeout=120)
+    behind = (out or "").strip().splitlines()[0] if out.strip() else "?"
+    if behind == "0":
+        print(f"  the centre is already at origin/main — nothing to deploy")
+    else:
+        print(f"  {behind} commit(s) behind origin/main")
+
+    # ── 4. the plan, from deploy.sh itself ──────────────────────────────
+    print("\n  \033[1mthe plan (deploy.sh --dry-run on the centre)\033[0m")
+    rc, out = _fleet_ssh(host, f"cd {tree} && bash scripts/deploy.sh --dry-run", timeout=300)
+    print(out)
+    if rc != 0:
+        die(f"the centre refused the dry run (exit {rc}) — see above")
+    if dry:
+        print("\n  dry run only. nothing was deployed.")
+        print("  to actually deploy: hivv fleet deploy")
+        return
+
+    # ── 5. do it ────────────────────────────────────────────────────────
+    print("\n  \033[1mdeploying\033[0m")
+    rc, out = _fleet_ssh(host, f"cd {tree} && bash scripts/deploy.sh", timeout=1800)
+    print(out)
+    if rc != 0:
+        die(f"the deploy failed on {host} (exit {rc}) — see above. "
+            f"deploy.sh rolls back by itself when the health check fails.")
+
+    # ── 6. the website projection ───────────────────────────────────────
+    print("\n  \033[1mrefreshing the website projection\033[0m")
+    rc, out = _fleet_ssh(host, f"cd {tree} && bash scripts/sync-mirrors.sh", timeout=900)
+    for line in (out or "").splitlines()[-6:]:
+        print(f"    {line}")
+
+    # ── 7. does the site answer? ────────────────────────────────────────
+    url = getattr(args, "url", None) or os.environ.get("HIVV_PUBLIC_URL") \
+        or "https://hivv.org"
+    try:
+        code, body, _ = http("GET", "/api/health", base_url=url)
+        if code == 200:
+            print(f"\n  \033[32m{url} is answering.\033[0m")
+        else:
+            print(f"\n  \033[33m{url} returned {code}.\033[0m")
+    except Exception as e:
+        print(f"\n  \033[33m{url} did not answer: {e}\033[0m")
+
+
+# ── hivv fleet preview ──────────────────────────────────────────────────────
+# The hardest part of this system is that the only place to SEE a change is
+# production. /var/www/vhosts/hivv.org is simultaneously the deploy target
+# and a working tree; deploy.sh refuses to touch a dirty or non-main tree,
+# so the only ways to see a change are to edit production directly (which
+# the rules forbid) or to deploy it (which is the thing you wanted to
+# preview first). The loop closes, and people end up editing production
+# anyway.
+#
+# A preview breaks that loop: a real gateway running the BRANCH's code, with
+# its OWN data, on a spare port, leaving production untouched.
+#
+# It is deliberately a LOCAL-FIRST gateway (no database): a preview that
+# needed a database would need a second database, and then two centres were
+# already halfway to the real dual-centre problem.
+
+_PREVIEW_DIR = ".local/share/hivv/preview"
+_PREVIEW_DATA = ".local/share/hivv/preview-data"
+
+
+def _preview_root() -> Path:
+    return Path.home() / _PREVIEW_DIR
+
+
+def _preview_data(branch: str) -> Path:
+    return Path.home() / _PREVIEW_DATA / _safe_name(branch)
+
+
+def _safe_name(s: str) -> str:
+    return "".join(c if c.isalnum() or c in "-_." else "_" for c in s)[:60]
+
+
+def _preview_port() -> int:
+    """A free port for the preview, above the gateway's own range."""
+    import socket as _s
+    for port in range(3011, 3011 + 60):
+        with _s.socket() as s:
+            try:
+                s.bind(("0.0.0.0", port))
+                return port
+            except OSError:
+                continue
+    return 3011
+
+
+def _preview_running() -> dict | None:
+    """Is a preview running? Its state lives in a small json file."""
+    state = _preview_root() / "state.json"
+    try:
+        data = json.loads(state.read_text())
+    except Exception:
+        return None
+    port = data.get("port")
+    if not port:
+        return None
+    if not _fleet_port_open(int(port)):
+        return None
+    data["port"] = int(port)
+    return data
+
+
+def _preview_kill(data: dict) -> None:
+    pid = data.get("pid")
+    if not pid:
+        return
+    try:
+        os.kill(int(pid), 15)
+        time.sleep(2)
+        os.kill(int(pid), 9)
+    except Exception:
+        pass
+
+
+def _preview_remove_worktree(tree: Path, branch: str) -> None:
+    """Drop the preview's worktree from the production checkout.
+
+    A worktree leaves the production checkout's FILES untouched but leaves a
+    line in .git/worktrees, which later confuses anyone reading the tree.
+    """
+    try:
+        subprocess.run(["git", "-C", str(tree), "worktree", "remove",
+                        "--force", str(_preview_root() / _safe_name(branch))],
+                       capture_output=True, text=True, timeout=120)
+        subprocess.run(["git", "-C", str(tree), "worktree", "prune"],
+                       capture_output=True, text=True, timeout=60)
+    except Exception:
+        pass
+
+
+def _preview_tree() -> Path | None:
+    """The production checkout on this box, or the first one we can find."""
+    reg = _fleet_load()
+    boxes = reg.get("boxes", {}) if isinstance(reg.get("boxes"), dict) else {}
+    here = boxes.get(_hostname()) or {}
+    cands = []
+    if here.get("path"):
+        cands.append(Path(here["path"]))
+    cands += [Path("/var/www/vhosts/hivv.org"),
+              Path.home() / "work" / "hivv",
+              Path.home() / "hivv"]
+    for cand in cands:
+        if cand and (cand / ".git").exists():
+            return cand
+    return None
+
+def _cmd_fleet_preview(args) -> None:
+    """hivv fleet preview — run a branch code without touching production."""
+    # The sub-verbs come from the positional: 'hivv fleet preview stop'.
+    # preview_what only exists for the flags, and it defaults to "status".
+    branch = (getattr(args, "name", None) or "").strip()
+    what = (getattr(args, "preview_what", None) or branch or "status").lower()
+    if what in ("stop", "url", "status", "off", "down"):
+        branch = ""
+
+    if what in ("stop", "off", "down"):
+        data = _preview_running()
+        if not data:
+            print(_git_note("no preview is running"))
+            return
+        _preview_kill(data)
+        tree = _preview_tree()
+        if tree:
+            _preview_remove_worktree(tree, data.get("branch", ""))
+        try:
+            (_preview_root() / "state.json").unlink()
+        except Exception:
+            pass
+        print(_ok("stopped the preview on port " + str(data.get("port"))))
+        return
+
+    if what == "url":
+        data = _preview_running()
+        if not data:
+            die("no preview is running — hivv fleet preview <branch>")
+        host = _fleet_lan_ip() or "127.0.0.1"
+        print("http://" + host + ":" + str(data["port"]))
+        return
+
+    if what == "status":
+        data = _preview_running()
+        if not data:
+            print(_git_note("no preview is running"))
+            print(_git_note("start one: hivv fleet preview <branch>"))
+            return
+        host = _fleet_lan_ip() or "127.0.0.1"
+        print("  branch   " + str(data.get("branch")))
+        print("  port     " + str(data.get("port")))
+        print("  url      http://" + host + ":" + str(data.get("port")))
+        print("  started  " + str(data.get("started", "")))
+        return
+
+    if not branch:
+        die("which branch? hivv fleet preview <branch>")
+
+    tree = _preview_tree()
+    if not tree:
+        die("no source tree on this box — clone hivv first")
+
+    running = _preview_running()
+    if running:
+        _preview_kill(running)
+        _preview_remove_worktree(tree, running.get("branch", ""))
+
+    checkout = _preview_root() / _safe_name(branch)
+    if checkout.exists():
+        try:
+            subprocess.run(["git", "-C", str(tree), "worktree", "remove",
+                            "--force", str(checkout)],
+                           capture_output=True, text=True, timeout=120)
+        except Exception:
+            pass
+
+    print("")
+    print("\033[1m" + APP + " fleet preview\033[0m — " + branch)
+    print("")
+    print(_git_note("fetching the branch (no files in production change)"))
+    # _git() runs in the CURRENT directory — which is not necessarily the
+    # production checkout. The fetch has to happen there, or it fails with
+    # "not a git repository" and the preview then silently checks out an
+    # STALE ref that the fetch never brought in.
+    r = subprocess.run(["git", "-C", str(tree), "fetch", "origin", branch],
+                       capture_output=True, text=True, timeout=300)
+    rc, out = r.returncode, (r.stdout or "") + (r.stderr or "")
+    if rc != 0:
+        print(_warn("could not fetch " + branch + ": " + out[:200]))
+
+    _preview_root().mkdir(parents=True, exist_ok=True)
+    checkout.parent.mkdir(parents=True, exist_ok=True)
+    # FETCH_HEAD, not the branch name: `git fetch origin <branch>` leaves the
+    # ref in FETCH_HEAD, and `worktree add <branch>` needs a real local ref.
+    # Using FETCH_HEAD also avoids creating a local branch in the production
+    # checkout, which would be a branch nobody asked for.
+    r = subprocess.run(
+        ["git", "-C", str(tree), "worktree", "add", "--detach", str(checkout),
+         "FETCH_HEAD"],
+        capture_output=True, text=True, timeout=300)
+    if r.returncode != 0:
+        die("could not check out " + branch + ": " + (r.stderr or r.stdout)[:300])
+    print(_ok("checked out " + branch + " — production untouched"))
+
+    # The preview reuses the production tree node_modules: a fresh
+    # `npm ci` per preview is minutes of work for a look.
+    api = checkout / "api"
+    prod_api = tree / "api"
+    if not (api / "node_modules").exists() and (prod_api / "node_modules").exists():
+        try:
+            (api / "node_modules").symlink_to(prod_api / "node_modules")
+            print(_git_note("reusing the production tree node_modules"))
+        except Exception as e:
+            print(_warn("could not link node_modules: " + str(e)))
+
+    data_dir = _preview_data(branch)
+    data_dir.mkdir(parents=True, exist_ok=True)
+    port = _preview_port()
+    log = _preview_root() / "preview.log"
+    env = dict(os.environ)
+    env["HIVV_DATA_DIR"] = str(data_dir)
+    env["HIVV_PORT"] = str(port)
+    # LOCAL-FIRST, and that is the whole point: a preview that needed a
+    # database password would either use production's (and a preview that
+    # can write to production's data is not a preview) or need its own.
+    # HIVV_DB_REQUIRED=0 says "offline install" — no database at all.
+    env["HIVV_DB_REQUIRED"] = "0"
+    lan = _fleet_lan_ip() or "127.0.0.1"
+    env["HIVV_PUBLIC_URL"] = "http://" + lan + ":" + str(port)
+
+    with open(log, "ab") as fh:
+        proc = subprocess.Popen(
+            ["node", "server.js"], cwd=str(api), stdout=fh, stderr=fh, env=env,
+            start_new_session=True)
+
+    state_file = _preview_root() / "state.json"
+    state_file.write_text(json.dumps({
+        "branch": branch, "port": port, "pid": proc.pid, "tree": str(checkout),
+        "data_dir": str(data_dir), "started": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }, indent=2))
+
+    print(_ok("gateway started on port " + str(port)))
+    print(_git_note("its data lives in " + str(data_dir)))
+    print("")
+    print("  wait a few seconds, then:")
+    print("    curl http://127.0.0.1:" + str(port) + "/api/health")
+    print("")
+    print("  to stop it:  hivv fleet preview --stop")
+    print("  the URL:     hivv fleet preview --url")
 def cmd_fleet(args) -> None:
     """hivv fleet — one command for a multi-box deployment."""
     # --report is what one box asks another for: its status, as JSON.
@@ -25493,6 +25866,10 @@ def cmd_fleet(args) -> None:
         _cmd_fleet_check(args)
     elif what == "up":
         _cmd_fleet_up(args)
+    elif what == "preview":
+        _cmd_fleet_preview(args)
+    elif what == "deploy":
+        _cmd_fleet_deploy(args)
     elif what == "move":
         _cmd_fleet_move(args)
     else:
@@ -25862,11 +26239,24 @@ def _fleet_box_host(name: str) -> str:
 
 
 def _fleet_ssh(host: str, cmd: str, timeout: int = 60) -> tuple[int, str]:
-    """Run a command on another box. BatchMode only — never prompt."""
+    """Run a command on another box. BatchMode only — never prompt.
+
+    The command runs under a LOGIN shell, and that matters more than it
+    sounds: a non-interactive ssh gets a minimal PATH, so pm2 — which lives
+    in the user's npm directory — was not on it. The probe then found no
+    gateway, no production tree, and the deploy check quietly saw a clean
+    tree that was not clean.
+
+    Quoting: the remote shell parses the command string, so the command
+    has to be single-quoted for the login shell, and any single quote
+    inside it has to be closed, escaped, and reopened.
+    """
+    quoted = cmd.replace("'", "'\\''")
     try:
         r = subprocess.run(
             ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8",
-             "-o", "StrictHostKeyChecking=accept-new", host, cmd],
+             "-o", "StrictHostKeyChecking=accept-new", host,
+             f"bash -lc '{quoted}'"],
             capture_output=True, text=True, timeout=timeout)
         return r.returncode, ((r.stdout or "") + (r.stderr or "")).strip()
     except Exception as e:
@@ -26756,7 +27146,7 @@ def _print_sub_help(cmd: str) -> None:
         "llm install": "print install commands for the detected OS\n  flag: --docker   print the `docker run` for ollama\n  flag: --auto     actually run the install (instead of just printing)\n  flag: --model=X  after install, run `ollama pull X`",
         "llm pull":    "ollama pull <model>\n  usage: hivv llm pull qwen3:1.7b",
         "git":        "the contribution loop, last mile, with the rails on\n  verbs: status · clone · branch · commit · push · pr · log · diff\n  usage: hivv git branch my-topic && hivv git commit -m \"fix(scope): what\" && hivv git push\n  rails: never push main · a moved file wants a MOVES.md entry · the message is type(scope): what\n  note: there is deliberately no hivv git merge — merging goes through a PR",
-        "fleet":       "one command for a multi-box deployment\n  usage: hivv fleet            → the dashboard: every box, its role, what is up, and THE NEXT STEP\n  verbs: up (make this box a bee) · check (verify, change nothing) · add · list · move\n  note: hivv fleet with no arguments needs no memory — it tells you what to type next",
+        "fleet":       "one command for a multi-box deployment\n  usage: hivv fleet                 → the dashboard: every box, its role, what is up, and THE NEXT STEP\n  verbs: up (make this box a bee) · check (verify, change nothing) · add · list · move\n         deploy (put main on the live site, from anywhere)\n         preview <branch> (run a branch without touching production) · stop · url\n  note: hivv fleet with no arguments needs no memory — it tells you what to type next",
         "llm serve":   "ollama serve in the foreground\n  args: [model]   preload a model on startup\n  flag: --port=N  listen on port N (default 11434)",
     }
     desc = table.get(cmd, "(no help yet)")
