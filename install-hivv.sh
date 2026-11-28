@@ -960,16 +960,30 @@ if ! command -v tailscale >/dev/null 2>&1; then
         fi
         if [[ "$INSTALL_TS" -eq 1 ]]; then
             if ! _can_sudo && [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
-                _warn "Tailscale needs admin rights — run manually: curl -fsSL https://tailscale.com/install.sh | sh"
+                _warn "Tailscale needs admin rights — run manually: hivv install tailscale"
             else
                 _log "installing tailscale..."
-                curl -fsSL https://tailscale.com/install.sh | sh 2>/dev/null || true
+                # Three tiers (official installer -> apt -> static tarball).
+                # tailscale.com's own installer exits 1 on any distro it does
+                # not recognize from ID= — ID=boss (BOSS GNU/Linux, a Debian 12
+                # fork) installed NOTHING. Download to a FILE, then run the
+                # file: never pipe a download into a shell.
+                TS_SCRIPT="$(mktemp 2>/dev/null || echo /tmp/hivv-ts.$$)"
+                if curl -fsSL --connect-timeout 10 --max-time 120 \
+                        "$HUB/install-tailscale.sh" -o "$TS_SCRIPT" 2>/dev/null \
+                        && [[ -s "$TS_SCRIPT" ]]; then
+                    sh "$TS_SCRIPT" 2>/dev/null || true
+                else
+                    _warn "could not fetch install-tailscale.sh from $HUB"
+                fi
+                rm -f "$TS_SCRIPT" 2>/dev/null || true
                 if command -v tailscale >/dev/null 2>&1; then
                     _say "tailscale installed"
                     printf '  run: %ssudo tailscale up%s\n' "$CYN" "$RST"
                     printf '  then: %shivv firewall --apply --mode tailscale%s\n\n' "$CYN" "$RST"
                 else
-                    _warn "tailscale install failed — install manually: curl -fsSL https://tailscale.com/install.sh | sh"
+                    _warn "tailscale install failed — run manually: hivv install tailscale"
+                    _warn "or the static fallback: https://pkgs.tailscale.com/stable/#static"
                 fi
             fi
         fi
