@@ -44,6 +44,7 @@ import hashlib
 import hmac
 import http.client as http_client
 import http.server as http_server
+import socketserver
 import json
 import math
 import os
@@ -3775,6 +3776,33 @@ def _clean_model_name(raw: str) -> str:
         return f"model:{last[:8]}"
     return last
 
+def _llama_slot_ctx(port: int) -> tuple[int, int]:
+    """(n_ctx_slot, n_slots) of a llama.cpp server on this port.
+
+    THE NUMBER NOBODY ELSE CAN GUESS. A llama.cpp server divides its context
+    across its parallel slots: "-c 4096 -np 4" is FOUR slots of 1024 tokens
+    each, and the MODEL NAME says nothing about that -- two boxes serving the
+    same "gemma-4-E2B" can hold 1024 tokens or 131072. The hub used to guess
+    from the name (gemma-4 -> 32768) and routed a 5k-token OpenCode prompt
+    into a 1024-token slot, which answered HTTP 400 "request (4702 tokens)
+    exceeds the available context size (1024 tokens)" (yalla 2026-11-27).
+
+    It reads the SAME endpoint _ctx_size already reads (and already caches
+    for five minutes): one probe path, one cache, no second copy to drift.
+
+    Returns (0, 0) when the server does not say (not llama.cpp, no /props).
+    0 means UNKNOWN, and an unknown window is never published as a number.
+    """
+    _info: dict = {}
+    _ctx = _ctx_size("127.0.0.1", port, margin=0, info=_info)
+    if not _info.get("ok"):
+        return (0, 0)
+    try:
+        return (int(_ctx or 0), int(_info.get("slots") or 0))
+    except (TypeError, ValueError):
+        return (0, 0)
+
+
 def _detect_local_ai() -> list[dict]:
     """Detect running local AI servers (llama.cpp, lm-studio, ollama) and
     return model info.
@@ -3800,11 +3828,17 @@ def _detect_local_ai() -> list[dict]:
             for m in (data.get("data") or []):
                 raw_id = m.get("id", "unknown")
                 clean = _clean_model_name(raw_id)
+                # The REAL window of THIS server, published so the router can
+                # route around a slot that cannot hold the prompt. The model
+                # name is the same on every box; the window is not.
+                ctx_slot, slots = _llama_slot_ctx(port)
                 results.append({
                     "provider": label,
                     "model": clean,
                     "loaded": True,
-                    "port": port
+                    "port": port,
+                    "ctx_slot": ctx_slot,
+                    "slots": slots
                 })
         except urllib.error.HTTPError as e:
             # Distinguish "our LLM demands a key" from "some web app 401s":
@@ -8733,6 +8767,9 @@ def cmd_donate(args) -> None:
                     ftype = fb.get("type", "?")
                     msg = fb.get("message", "")[:60]
                     print(f"    \033[2m{ts[:16]}\033[0m  [{status:>8}]  \033[33m{ftype}\033[0m  {msg}")
+                    _note = str(fb.get("review_notes") or "").strip()
+                    if _note:
+                        print(f"          \033[36m↳ reply:\033[0m {_note[:200]}")
             else:
                 print(f"  \033[1mFeedback submitted\033[0m  \033[2m(none yet — run: hivv help submit suggestion ...)\033[0m")
         else:
@@ -8888,6 +8925,12 @@ def cmd_help(args) -> None:
                 emoji = TYPEmoji.get(ftype, "💬")
                 short = msg[:70] + ("..." if len(msg) > 70 else "")
                 print(f"  {emoji} \033[1m{ts}\033[0m  [{status:>8}]  {label}")
+                # The reply. Without this the submitter sees a status move and
+                # never reads a word back — hivv.org could answer and nobody
+                # would know.
+                note = str(fb.get("review_notes") or "").strip()
+                if note:
+                    print(f"        \033[36m↳ reply:\033[0m {note[:200]}")
                 print(f"    {short}\n")
         print(f"\033[1m╰────────────────────────────────────────────────────\033[0m\033[0m\n")
         return
@@ -13789,11 +13832,24 @@ def _stream_error_hint(text: str) -> str:
     return ""
 
 
-def _local_ask(prompt: str, max_tokens: int = 256, timeout: float = 60.0) -> tuple[str, int]:
+def _local_ask(prompt: str, max_tokens: int = 256, timeout: float = 60.0,
+               why: dict | None = None) -> tuple[str, int]:
     """One bounded, non-stream question to THIS machine's LLM → (reply, port).
-    ('', 0) when nothing local answers — never raises."""
+    ('', 0) when nothing local answers — never raises.
+
+    The 'why' dict (optional) is FILLED IN when nothing answered:
+    {'port': int, 'reason': str, 'kind': 'timeout'|'refused'|'http'|'empty'}.
+
+    WHY THIS EXISTS: ('', 0) cannot tell "the server is dead" from "the
+    server was busy for 25s". The doctor reported the second as the first
+    ("round-trip: empty/no reply from :0") and told the operator to restart
+    a perfectly healthy server, because the single slot was busy with a
+    4.7k-token prompt (yalla 2026-11-27). A caller that wants to say
+    something true needs the reason and the port."""
+    tried: list = []
     for port in _local_llm_ports():
         if not _tcp_ok("127.0.0.1", port, timeout=0.4):
+            tried.append((port, "refused", "nothing is listening"))
             continue
         body = {"model": _real_model(f"http://127.0.0.1:{port}"),
                 "messages": [{"role": "user", "content": prompt}],
@@ -13813,6 +13869,8 @@ def _local_ask(prompt: str, max_tokens: int = 256, timeout: float = 60.0) -> tup
                            .get("message", {}).get("reasoning_content") or "")
             if content.strip():
                 return content, port
+            tried.append((port, "empty",
+                          "the server answered with no text at all"))
         except urllib.error.HTTPError as e:
             _b = ""
             try:
@@ -13821,9 +13879,33 @@ def _local_ask(prompt: str, max_tokens: int = 256, timeout: float = 60.0) -> tup
                 pass
             print(f"  ✗ local LLM HTTP {e.code} on :{port}: {_b} "
                   f"{_http_err_hint(e.code, _b)}", file=sys.stderr)
+            tried.append((port, "http", f"HTTP {e.code} {_b}".strip()[:160]))
             continue
-        except Exception:
+        except TimeoutError:
+            # socket.timeout is TimeoutError since 3.10. A timeout is BUSY,
+            # not broken: one slot, and something long was in front of us.
+            tried.append((port, "timeout",
+                          f"no answer in {timeout:.0f}s (busy, or still loading)"))
             continue
+        except Exception as e:
+            tried.append((port, "error",
+                          f"{type(e).__name__}: {str(e)[:80]}"))
+            continue
+    if why is not None:
+        # Report the port that HAD a server and did not answer, not the last
+        # port we happened to try: a busy :8080 followed by a closed :1234
+        # must not be reported as "nothing is listening on :1234".
+        _pick = None
+        for _entry in tried:
+            if _entry[1] != "refused":
+                _pick = _entry
+        if _pick is None and tried:
+            _pick = tried[-1]
+        if _pick:
+            _port, _kind, _reason = _pick
+            why.update(port=_port, kind=_kind, reason=_reason)
+        else:
+            why.update(port=0, kind="none", reason="no local LLM port answered")
     return "", 0
 
 
@@ -14654,8 +14736,13 @@ def cmd_history(args) -> None:
     print(f"  \033[2mfull ledger: {APP} speeds · board: {APP} iq --board\033[0m\n")
 
 
-def _ctx_size(ip, port, margin=512):
+def _ctx_size(ip, port, margin=512, info: dict | None = None):
     """The REAL per-slot context of an endpoint, from llama-server's /props.
+
+    The 'info' dict (optional) is FILLED IN with {'ok': bool, 'slots': int}:
+    ok=False means the probe did not answer, so a caller must NOT publish a
+    number it did not read; slots is llama.cpp's parallel-slot count (a
+    "-c 4096 -np 4" server is FOUR slots of 1024).
 
     MODULE LEVEL ON PURPOSE: `_do_chat` (hivv chat) and `cmd_node_chat`
     (hivv ask) both need it, and nested copies drift apart.
@@ -14675,6 +14762,10 @@ def _ctx_size(ip, port, margin=512):
     key = (ip, port, margin)
     hit = _CTX_CACHE.get(key)
     if hit is not None and (time.time() - hit[1]) < 300:
+        if info is not None:
+            _ok = bool(hit[2]) if len(hit) > 2 else True
+            _slots = int(hit[3]) if len(hit) > 3 else 0
+            info.update(ok=_ok, slots=_slots)
         return hit[0]
     val = 8192  # safe default when the server doesn't expose ctx size
     try:
@@ -14690,12 +14781,17 @@ def _ctx_size(ip, port, margin=512):
             d = json.loads(r.read().decode("utf-8", errors="replace"))
         gen = d.get("default_generation_settings") or {}
         n_ctx = int(d.get("n_ctx") or gen.get("n_ctx") or 0)
+        slots = int(d.get("total_slots") or 0)
         if n_ctx > 0:
             val = (min(max(n_ctx - margin, 128), 32768) if margin
                    else min(n_ctx, 32768))
     except Exception:
+        if info is not None:
+            info.update(ok=False, slots=0)
         return 8192
-    _CTX_CACHE[key] = (val, time.time())
+    _CTX_CACHE[key] = (val, time.time(), True, slots)
+    if info is not None:
+        info.update(ok=True, slots=slots)
     return val
 
 
@@ -18808,6 +18904,15 @@ def _llm_diagnose(log_text: str) -> list:
             if needle in low]
 
 
+# The smallest slot that can hold a real AGENT session (an OpenCode prompt:
+# system prompt + the full tool catalog). Measured 4702 tokens on yalla
+# 2026-11-27, rounded up. hivv's own toolkit is smaller (~2.9k), and a
+# floor that only knew about hivv's own tools called a 1024-token slot
+# "fine" -- which is exactly how every OpenCode request on that box died
+# with HTTP 400 while the doctor said everything was fine.
+_AGENT_TOOLKIT_FLOOR = 5000
+
+
 def cmd_llm_doctor(args) -> None:
     """Diagnose the local LLM: binary → model → serving → stale pid → log
     autopsy → disk. --fix corrects what is SAFE to correct (relaunch a dead
@@ -18899,25 +19004,51 @@ def cmd_llm_doctor(args) -> None:
                                  if _tl else 1500)
                 except Exception:
                     _tool_cost = 3000   # conservative when we cannot measure
-                _floor = max(512, _tool_cost)
+                # The floor is the BIGGEST toolkit that will land on this
+                # server, not just hivv's own. hivv's tools cost ~2.9k
+                # tokens; an OpenCode session (system prompt + the full tool
+                # catalog) measured 4702 on yalla 2026-11-27 -- and the 2.9k
+                # floor called a 1024-token slot "fine" while every OpenCode
+                # request died with HTTP 400.
+                _floor = max(512, _tool_cost, _AGENT_TOOLKIT_FLOOR)
                 if _nc and _nc < _floor:
-                    _np_now = max(1, round(_eff / _nc)) if _nc else 1
                     print(f"  ✗ slots: {_ns} × n_ctx_slot {_nc} — TOO SMALL for the "
-                          f"toolkit (need ~{_floor}) — tool requests WILL 400!")
+                          f"toolkit (need ~{_floor}: hivv's own ~{_tool_cost}, "
+                          f"an agent session ~{_AGENT_TOOLKIT_FLOOR}) — "
+                          f"tool requests WILL 400!")
                     problems.append(
                         f"slot context {_nc} < {_floor} — {APP} llm config --set np=1 "
-                        f"(→ {_eff}/slot) or --set ctx={max(_eff, _floor * _np_now)} "
-                        f"&& {APP} restart llm")
+                        f"--set ctx={max(_eff, _floor)} && {APP} restart llm "
+                        f"(np=1 gives the slot the WHOLE context; keeping "
+                        f"np={_ns} would need ctx>={_floor * max(1, _ns)})")
                 else:
                     print(f"  ✓ slots: {_ns} × n_ctx_slot {_nc}   (hivv config ctx: -c{_eff})")
             else:
                 print(f"  · slots: {len(_slots) if isinstance(_slots, list) else 0} slot(s), no n_ctx exposed")
         except Exception as e:
             print(f"  · slots: unavailable ({str(e)[:60]})")
-        _reply, _rp = _local_ask("Reply with exactly: OK", max_tokens=8, timeout=25)
+        _why: dict = {}
+        _reply, _rp = _local_ask("Reply with exactly: OK", max_tokens=8,
+                                 timeout=25, why=_why)
         if not _reply.strip():
-            print(f"  ✗ round-trip: empty/no reply from :{_rp}")
-            problems.append("round-trip returns nothing — see log; try: " + APP + " restart llm")
+            _port = _rp or _why.get("port") or 0
+            _reason = _why.get("reason") or "no answer"
+            _kind = _why.get("kind") or "unknown"
+            print(f"  ✗ round-trip: {_reason} (:{_port})")
+            if _kind == "timeout":
+                # A BUSY server is not a DEAD server. Reporting the first as
+                # the second sent the operator to restart a healthy box
+                # (yalla 2026-11-27): the one slot was busy with a 4.7k-token
+                # prompt and the 25s probe timed out behind it.
+                print("    the server is BUSY, not broken — one slot, and a long "
+                      "prompt was in front of the probe")
+                problems.append(
+                    "round-trip timed out — the server is busy (one slot), not "
+                    "dead; it answers once the request in front of it finishes")
+            else:
+                problems.append(
+                    f"round-trip returns nothing ({_reason}) — see log; try: "
+                    f"{APP} restart llm")
         elif _stream_error_hint(_reply) and not re.search(r"([^\n]{2,14}?)\1{4,}", _reply):
             print(f"  ✗ round-trip: backend error, not an answer: {_reply.strip()[:80]}")
             problems.append(_stream_error_hint(_reply))
@@ -21609,6 +21740,56 @@ def _dial_pid(port: int | None = None) -> int | None:
         return None
 
 
+def _pin_from_argv(argv: list) -> str:
+    """The --pin in an argv list ("" = none). Pure: no process, no I/O."""
+    for i, x in enumerate(argv or []):
+        if x == "--pin" and i + 1 < len(argv):
+            return str(argv[i + 1])
+        if str(x).startswith("--pin="):
+            return str(x).split("=", 1)[1]
+    return ""
+
+
+def _dial_process_argv(pid: int) -> list:
+    """The argv of a running process. Linux reads /proc; macOS has no /proc,
+    so it asks ps. Empty when neither says (never raises)."""
+    try:
+        raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+        argv = [x for x in raw.decode("utf-8", "replace").split(chr(0)) if x]
+        if argv:
+            return argv
+    except OSError:
+        pass
+    if shutil.which("ps"):
+        try:
+            r = subprocess.run(["ps", "-p", str(pid), "-o", "args="],
+                               capture_output=True, text=True, timeout=5)
+            line = (r.stdout or "").strip()
+            if r.returncode == 0 and line:
+                import shlex
+                return shlex.split(line)
+        except Exception:
+            return []
+    return []
+
+
+def _dial_running_pin(port: int | None = None) -> str:
+    """The --pin the RUNNING shim was started with ("" = none).
+
+    The live process argv is the only honest source: the unit file can be
+    rewritten while the old process keeps serving, and 'dial status' must
+    report what is actually answering, not what is written down.
+
+    A macOS box has no /proc, so the argv comes from ps instead -- reading
+    /proc only and returning "" made every pin look absent on macOS, which
+    is what the CI caught (unit tests (macos-latest) red on this branch).
+    """
+    pid = _dial_pid(port)
+    if not pid:
+        return ""
+    return _pin_from_argv(_dial_process_argv(pid))
+
+
 def _dial_install_service(port: int, hub: str | None = None,
                           pin: str = "") -> str | None:
     """Install + enable auto-start for the shim. Returns 'systemd'|
@@ -21657,8 +21838,25 @@ def _dial_ensure(port: int | None = None, hub: str | None = None,
             "service": None, "error": None, "endpoint": _dial_url(port)}
     h = _dial_health(port)
     if h:
-        info.update(running=True, how="already", pid=h.get("pid"))
-        return info
+        # A PIN IS A REQUEST, NOT A WISH.
+        # 'hivv dial on --pin yalla' answered "already running" and changed
+        # NOTHING: the shim kept serving whatever bee it had already picked,
+        # the --pin was dropped on the floor, and the command printed success.
+        # The unit file still had no --pin in it, and the operator had no way
+        # to tell (yalla 2026-11-27).
+        running_pin = _dial_running_pin(port)
+        if pin and running_pin != pin:
+            # Stop it WITHOUT the opt-out marker: it is about to be started
+            # again, this time with the pin it was asked for.
+            _dial_stop(port, service=True, marker=False)
+            # SIGTERM is asynchronous — wait for the port to go quiet.
+            deadline = time.time() + 5.0
+            while _dial_health(port) is not None and time.time() < deadline:
+                time.sleep(0.2)
+            info["pin_replaced"] = running_pin
+        else:
+            info.update(running=True, how="already", pid=h.get("pid"))
+            return info
     if _dial_disabled():
         info["how"] = "disabled"
         info["error"] = "opted out (hivv dial off / HIVV_DIAL_OFF)"
@@ -21685,10 +21883,15 @@ def _dial_ensure(port: int | None = None, hub: str | None = None,
     return info
 
 
-def _dial_stop(port: int | None = None, service: bool = True) -> dict:
+def _dial_stop(port: int | None = None, service: bool = True,
+               marker: bool = True) -> dict:
     """Stop the shim: disable auto-start FIRST (so Restart=always doesn't
     fight us), then SIGTERM any survivor. Leaves the dial.off marker so
-    setup won't auto-start it again. Returns {stopped, running, port}."""
+    setup won't auto-start it again.
+
+    marker=False leaves the opt-out marker alone -- used when the shim is
+    being stopped only to be started again with a different pin, where
+    "opted out" would be a lie. Returns {stopped, running, port}."""
     port = port or _dial_port()
     stopped = []
     if service and shutil.which("systemctl") and _service_state("hivv-dial.service"):
@@ -21713,12 +21916,13 @@ def _dial_stop(port: int | None = None, service: bool = True) -> dict:
         except (OSError, PermissionError):
             pass
         time.sleep(0.4)
-    try:
-        STATE_DIR.mkdir(parents=True, exist_ok=True)
-        _dial_off_marker().write_text(
-            f"off at {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
-    except OSError:
-        pass
+    if marker:
+        try:
+            STATE_DIR.mkdir(parents=True, exist_ok=True)
+            _dial_off_marker().write_text(
+                f"off at {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+        except OSError:
+            pass
     return {"stopped": stopped, "running": _dial_health(port) is not None,
             "port": port}
 
@@ -22577,6 +22781,10 @@ def _dial_manage(what: str, port: int, hub: str, pin: str = "") -> None:
             print(f"{APP} dial: {how} on 127.0.0.1:{port} "
                   f"(pid {info.get('pid') or '?'})")
             print(f"  endpoint: {info['endpoint']}")
+            if "pin_replaced" in info:
+                was = info["pin_replaced"] or "(none)"
+                print(f"  pin: {was} -> {pin} "
+                      f"(the shim was restarted with the pin)")
             if info.get("service") == "systemd":
                 print("  auto-start: hivv-dial.service (survives reboot)")
             elif info.get("service") == "launchd":
@@ -22639,6 +22847,17 @@ def cmd_dial(args) -> None:
     failover). on/off = start/stop + auto-start across reboots; status =
     probe (exit 0 running, 1 not). --pin locks one bee (or a raw endpoint
     URL) with no rotation and no hub fallback."""
+    # STARTUP CANARY — printed before ANY other work in this command.
+    # A startup that hangs is indistinguishable between "stuck importing
+    # the module" and "stuck inside cmd_dial" unless something is printed
+    # first. This line bisects the two on the very next run: if it appears,
+    # main() dispatched and the hang is downstream; if it does not, the hang
+    # is in the import.
+    #
+    # It was added for exactly this and then LOST in a merge
+    # (86a0028 -> 7b0807e), which is why the macOS failure went
+    # undiagnosed for another run.
+    print(f"[{APP}] dial starting (pid {os.getpid()})", flush=True)
     what = (getattr(args, "dial_cmd", None) or "run").lower()
     port = int(getattr(args, "port", 0) or _dial_port())
     hub = (getattr(args, "hub", None) or HUB).rstrip("/")
@@ -23019,6 +23238,27 @@ def cmd_dial(args) -> None:
     class DialServer(http_server.ThreadingHTTPServer):
         daemon_threads = True
         allow_reuse_address = True
+
+        def server_bind(self):
+            # http.server.HTTPServer.server_bind does socket.getfqdn(host) —
+            # a REVERSE DNS lookup — on the bind path. On a machine whose
+            # resolver is slow, or which has no PTR record for 127.0.0.1,
+            # that lookup blocks for tens of seconds.
+            #
+            # The symptom was the macOS CI runner failing with "shim never
+            # became healthy (alive=True, log_bytes=32)": the process was
+            # running, it had printed "[hivv] dial starting", and it had
+            # not reached "dial ready" — because the bind was still waiting
+            # on DNS. The reverse lookup has nothing to do with the shim's
+            # job, and a proxy that cannot answer because the resolver is
+            # slow is worse than useless.
+            #
+            # socketserver.TCPServer.server_bind does the actual bind; we
+            # take the name from the address instead of asking DNS for it.
+            socketserver.TCPServer.server_bind(self)
+            host, port = self.server_address[:2]
+            self.server_name = host
+            self.server_port = port
 
     try:
         srv = DialServer(("127.0.0.1", port), DialHandler)
@@ -25514,7 +25754,7 @@ def _cmd_fleet_list(args) -> None:
     reg = _fleet_load()
     boxes = reg.get("boxes", {}) if isinstance(reg.get("boxes"), dict) else {}
     if not boxes:
-        print(_info("no boxes registered yet — hivv fleet add <name> [host]"))
+        print(_git_note("no boxes registered yet — hivv fleet add <name> [host]"))
         return
     for name, info in sorted(boxes.items()):
         info = info or {}

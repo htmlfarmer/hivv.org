@@ -35,7 +35,7 @@ param(
 )
 
 $App = "hivv"
-$Hub = "https://hivv.org"
+$Hub = if ($env:HIVV_HUB) { $env:HIVV_HUB.TrimEnd('/') } else { "https://hivv.org" }  # env-overridable (CI tests THIS checkout, self-host)
 $TaskName = "hivv-agent"
 
 # ── brand colors ───────────────────────────────────────────────────────
@@ -48,6 +48,10 @@ $ColorAccent    = [ConsoleColor]::Cyan
 $ColorSuccess   = [ConsoleColor]::Green
 $ColorWarn      = [ConsoleColor]::Yellow
 $ColorError     = [ConsoleColor]::Red
+
+# Best-effort UTF-8 console output — PowerShell 5.1 otherwise renders the
+# banner's emoji and em-dashes as '?' on the default OEM codepage.
+try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
 
 if ($Help) {
     Write-Host @"
@@ -279,6 +283,9 @@ if ($shouldInstallLlm) {
         } else {
             _Warn "install winget or chocolatey, or download from https://ollama.com/download"
         }
+        # winget/choco just wrote a fresh PATH to the registry — re-read it into
+        # THIS session, or Get-Command ollama misses the install it just made
+        Update-PathFromRegistry
         $haveOllama = $null -ne (Get-Command ollama -ErrorAction SilentlyContinue)
     }
 
@@ -302,7 +309,7 @@ if ($shouldInstallLlm) {
         Write-Host "  ✓ more info:  ${App} llm status" -ForegroundColor $ColorSuccess
         Write-Host ""
     } else {
-        _Warn "ollama not on PATH after install — reopen PowerShell and run ``ollama --version``"
+        _Warn "ollama installed but not visible in THIS window - open a new PowerShell and run 'ollama --version'"
     }
 }
 
@@ -340,14 +347,22 @@ $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
 $pathDirs = if ($userPath) { $userPath -split ";" } else { @() }
 $needsPath = $pathDirs -notcontains $BinDir
 
-if ($needsPath) {
-    if ($NoPath) {
-        # user said don't mention it
-    } elseif ($Yes) {
+if ($needsPath -and -not $NoPath) {
+    # ASK, don't just print instructions. The point of "iwr | iex" is that
+    # `hivv` works on the command line when this script returns — a visitor
+    # who pastes one line should not be handed two more to run by hand.
+    $addPath = [bool]$Yes
+    if (-not $addPath -and [Environment]::UserInteractive) {
+        $ans = Read-Host " Add $BinDir to your PATH so 'hivv' runs from any terminal? [Y/n]"
+        if ($ans -notmatch '^[Nn]') { $addPath = $true }
+    }
+    if ($addPath) {
         $newUserPath = if ($userPath) { "$BinDir;$userPath" } else { $BinDir }
         [Environment]::SetEnvironmentVariable("Path", $newUserPath, "User")
-        _Say "added $BinDir to user PATH"
-        Write-Host "       (restart your PowerShell window to pick up)" -ForegroundColor $ColorDim
+        # This session too: iwr | iex runs IN the visitor's window, so `hivv`
+        # must resolve the moment this script returns — no reopen required.
+        if (($env:Path -split ';') -notcontains $BinDir) { $env:Path = "$BinDir;$env:Path" }
+        _Say "added $BinDir to your PATH - hivv works right now, and in every new terminal"
     } else {
         Write-Host "  note" -ForegroundColor ($ColorWarn)
         Write-Host "    $BinDir is not on your PATH" -ForegroundColor $ColorWarn
