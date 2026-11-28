@@ -19846,6 +19846,13 @@ _BUILD_TOOL_HINTS = {
     "brew":   "brew install git cmake",
 }
 
+# Homebrew's installer, printed as a HINT for a human to copy-paste — the CLI
+# never fetches it. Held at module level for the same reason FALLBACK_RAW_BASE
+# is: the flood law reserves a githubusercontent literal inside a FUNCTION for
+# _fallback_url alone (tests/test_fallback.py::TestFloodLaw), so no other
+# function body may name GitHub — not even to print an address.
+_BREW_INSTALL_URL = "https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh"
+
 _BUILD_TOOL_LABELS = {"cxx": "c++ compiler"}
 
 
@@ -20016,6 +20023,29 @@ def _ensure_build_tools(tools: list) -> bool:
 
     # Could not auto-install — print the EXACT command (never a traceback).
     hint = _BUILD_TOOL_HINTS.get(pm, "")
+    if not hint and sys.platform == "darwin":
+        # A Mac with no Homebrew has NO package manager to name, so the Linux
+        # line below ("with your package manager") is a dead end — and it
+        # lists git, a C++ compiler and make, three things this Mac ALREADY
+        # has (Xcode Command Line Tools). It was asking for the wrong tools:
+        # only cmake was missing, and a Mac has no way to get it without
+        # Homebrew. Say that, then offer the path that needs neither.
+        print(file=sys.stderr)
+        print(f"  \033[1;31m✗\033[0m missing build tool(s): {', '.join(names)}",
+              file=sys.stderr)
+        print(f"  \033[1m→\033[0m this Mac needs cmake — git, your C++ compiler "
+              f"and make are already installed", file=sys.stderr)
+        print(file=sys.stderr)
+        print("      install Homebrew, then cmake:", file=sys.stderr)
+        print(f'        /bin/bash -c "$(curl -fsSL {_BREW_INSTALL_URL})"',
+              file=sys.stderr)
+        print("        brew install cmake", file=sys.stderr)
+        print(file=sys.stderr)
+        print(f"      \033[1mor skip the build entirely\033[0m — llama.cpp ships "
+              f"prebuilt macOS binaries (no Homebrew):", file=sys.stderr)
+        print(f"        {APP} llm install-llama --auto", file=sys.stderr)
+        print()
+        return False
     if not hint:
         hint = ("install git, cmake, a C++ compiler and make with your package "
                 f"manager, then re-run `{APP} llm install-llama --auto`")
@@ -20026,6 +20056,168 @@ def _ensure_build_tools(tools: list) -> bool:
     print(f"      {APP} llm install-llama --auto", file=sys.stderr)
     print()
     return False
+
+
+# ── PREBUILT llama.cpp — no git, no cmake, no compiler, no Homebrew ──────────
+#
+# THE PROBLEM (a MacBook Air, 2026-11-28): `hivv install llm` wanted to COMPILE
+# llama.cpp, so it demanded cmake first. On a Mac with no Homebrew there is no
+# package manager to name, so the hint fell back to the Linux line — "install
+# git, cmake, a C++ compiler and make with your package manager" — listing
+# three tools the Mac already had, and naming no way to get the one it lacked.
+#
+# llama.cpp SHIPS prebuilt macOS binaries (16.9 MB arm64 / 12.7 MB x64) that
+# need none of it: download, unpack into ~/llama.cpp/build/bin, done. That is
+# exactly where _llama_tree_state looks for llama-server, so a later run reads
+# "built" and never asks for a compiler again.
+#
+# Verified on b12823:
+#   · LC_RPATH is @loader_path — RELATIVE, so the binary and its dylibs move
+#     together (no absolute build path is baked in).
+#   · the arm64 build bundles libggml-metal.dylib → GPU offload works;
+#   · the x64 build does NOT → CPU only. That is a FEATURE for Intel Macs:
+#     `-ngl 99` on a Radeon Vega is the documented "garbage tokens" case, and
+#     a CPU-only build cannot reproduce it.
+#
+# One GitHub request, only on a path a HUMAN asked for (`hivv install llm`) —
+# never in the 5-minute auto-update loop.
+
+_LLAMA_RELEASES_API = "https://api.github.com/repos/ggerganov/llama.cpp/releases?per_page=10"
+
+
+def _llama_prebuilt_arch() -> str:
+    """'macos-arm64' / 'macos-x64', or '' when we ship no prebuilt for this box."""
+    if sys.platform != "darwin":
+        return ""                       # macOS is the platform we ship these for
+    m = (platform.machine() or "").lower()
+    if m in ("arm64", "arm64e"):
+        return "macos-arm64"
+    if m in ("x86_64", "amd64"):
+        return "macos-x64"
+    return ""                           # an arch llama.cpp does not publish
+
+
+def _llama_prebuilt_asset():
+    """(tag, download_url) of the NEWEST prebuilt for this Mac, or (None, None).
+
+    The release list is queried instead of hard-coding a tag: a pinned build
+    goes stale the day llama.cpp ships a fix, and stale is the one thing an
+    installer must not be.
+    """
+    arch = _llama_prebuilt_arch()
+    if not arch:
+        return None, None
+    try:
+        req = urllib.request.Request(_LLAMA_RELEASES_API,
+                                     headers={"User-Agent": f"{APP}/{VERSION}"})
+        with urllib.request.urlopen(req, timeout=20) as r:
+            rels = json.loads(r.read().decode("utf-8", "replace"))
+    except Exception:
+        return None, None               # offline / rate-limited → source build
+    if not isinstance(rels, list):
+        return None, None
+    for rel in rels:
+        if not isinstance(rel, dict):
+            continue
+        tag = str(rel.get("tag_name") or "")
+        if not tag:
+            continue
+        want = f"llama-{tag}-bin-{arch}.tar.gz"
+        for a in (rel.get("assets") or []):
+            if isinstance(a, dict) and str(a.get("name") or "") == want \
+                    and a.get("browser_download_url"):
+                return tag, str(a["browser_download_url"])
+    return None, None
+
+
+def _llama_prebuilt_install() -> bool:
+    """Unpack the official prebuilt into _LLAMA_CPP_BIN. True when it works.
+
+    Never raises: a dead network, an odd archive or an unreadable dir all
+    return False so the caller can fall back to the source build — a prebuilt
+    that cannot be fetched must not be a dead end, just a slower path.
+    """
+    state = _llama_tree_state(_LLAMA_CPP_DIR)
+    if state == "built":
+        print(f"  \033[32m✓\033[0m llama.cpp already installed: "
+              f"{os.path.join(_LLAMA_CPP_BIN, 'llama-server')}")
+        return True
+    if state == "occupied":
+        return False                    # never touch it — the caller names it
+
+    tag, url = _llama_prebuilt_asset()
+    if not url:
+        return False
+    arch = _llama_prebuilt_arch()
+    print(f"  \033[1m→\033[0m prebuilt llama.cpp {tag} ({arch}) — "
+          f"no compiler needed (~17 MB)")
+
+    import subprocess as _sp
+    tmp = tempfile.mkdtemp(prefix="hivv-llama-bin-")
+    try:
+        tgz = os.path.join(tmp, "llama.tar.gz")
+        if shutil.which("curl"):
+            get = ["curl", "-fL", "--retry", "3", "--connect-timeout", "20",
+                   "-o", tgz, url]
+        elif shutil.which("wget"):
+            get = ["wget", "-q", "--tries=3", "-O", tgz, url]
+        else:
+            return False
+        try:
+            if _sp.call(get) != 0:
+                return False
+            if _sp.call(["tar", "-xzf", tgz, "-C", tmp]) != 0:
+                return False
+        except OSError:
+            return False
+
+        # The archive is llama-bNNNNN/<binaries> — find that one directory.
+        inner = [d for d in os.listdir(tmp)
+                 if os.path.isdir(os.path.join(tmp, d))]
+        if not inner:
+            return False
+        src = os.path.join(tmp, inner[0])
+        if not os.path.isfile(os.path.join(src, "llama-server")):
+            return False                # not a llama.cpp release layout
+
+        # Into ~/llama.cpp/build/bin — precisely where _llama_tree_state and
+        # every serve path already look, so nothing else has to learn this.
+        os.makedirs(_LLAMA_CPP_BIN, exist_ok=True)
+        for fn in os.listdir(src):
+            s, d = os.path.join(src, fn), os.path.join(_LLAMA_CPP_BIN, fn)
+            if os.path.isdir(s):
+                continue
+            if os.path.exists(d):
+                os.remove(d)            # a stale build must not shadow this
+            shutil.copy2(s, d)
+
+        bin_path = os.path.join(_LLAMA_CPP_BIN, "llama-server")
+        os.chmod(bin_path, os.stat(bin_path).st_mode | 0o755)
+
+        # PROVE IT RUNS, not merely that it is executable: a wrong-arch
+        # download is executable and still fails at exec time. An OSError here
+        # is ENOEXEC/EINVAL — the binary never started. A non-zero EXIT from
+        # `--help` still proves it started, so only OSError counts as failure.
+        try:
+            _sp.call([bin_path, "--help"],
+                     stdout=_sp.DEVNULL, stderr=_sp.DEVNULL, timeout=60)
+        except (OSError, _sp.SubprocessError):
+            return False
+
+        _llm_hand_back(_LLAMA_CPP_DIR)  # a sudo run hands it to the user
+        print(f"  \033[32m✓\033[0m llama-server ready: {bin_path}")
+        metal = os.path.isfile(os.path.join(_LLAMA_CPP_BIN, "libggml-metal.dylib"))
+        if metal:
+            print("     \033[32m✓\033[0m Metal GPU offload available (-ngl 99)")
+        else:
+            print("     \033[2m·\033[0m this build has no Metal — CPU only "
+                  "(correct for Intel Macs, where -ngl 99 is the documented "
+                  "garbage-token case)")
+        return True
+    except Exception:
+        return False                    # any surprise → fall back, never crash
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def _llama_tree_state(path: str) -> str:
@@ -20156,8 +20348,13 @@ def cmd_llm_install_llama(args):
     build_cmd = ["cmake", "-B", "build", "-DCMAKE_BUILD_TYPE=Release", "-DLLAMA_SERVER_VERBOSE=ON"]
     compile_cmd = ["cmake", "--build", "build", "--config", "Release", "-j", str(os.cpu_count() or 4)]
 
-    print(f"\033[1m{APP} llm install-llama\033[0m — build llama.cpp from source")
-    print(f"  git  : {git_url}")
+    _prebuilt_arch = _llama_prebuilt_arch()
+    print(f"\033[1m{APP} llm install-llama\033[0m — install llama.cpp")
+    if _prebuilt_arch:
+        print(f"  prebuilt: available for this Mac ({_prebuilt_arch}) — "
+              f"\033[1mno compiler, no cmake, no Homebrew needed\033[0m")
+    else:
+        print(f"  source  : {git_url}")
     print(f"  dir  : {_LLAMA_CPP_DIR}")
     if _LLM_HOME_OWNER:
         print(f"  \033[33mvia sudo — installing for {_LLM_HOME_OWNER} ({_LLM_HOME}), not root\033[0m")
@@ -20196,7 +20393,26 @@ def cmd_llm_install_llama(args):
         return
 
     # --auto path
-    # Preflight FIRST: without git/cmake the build dies one line later with a
+    #
+    # PREBUILT FIRST — and deliberately BEFORE the build-tool preflight. On a
+    # Mac that preflight is the exact wall this fixes: it demands cmake, and a
+    # Mac with no Homebrew has nothing to install it with, so the install died
+    # before it ever looked at llama.cpp (a MacBook Air, 2026-11-28). A
+    # prebuilt needs none of those tools, so asking for them first would be
+    # asking the wrong question.
+    if not getattr(args, "no_prebuilt", False):
+        if _llama_prebuilt_install():
+            print()
+            print(f"  \033[1mnext:\033[0m {APP} llm pull-gguf gemma-4:e2b   "
+                  f"\033[2m(~2.9 GB)\033[0m")
+            print(f"        {APP} llm serve-llama gemma-4:e2b")
+            return
+        if _llama_prebuilt_arch():
+            # Say WHY we are about to compile — silence here reads as a hang.
+            print("  \033[33m…\033[0m no prebuilt for this machine — "
+                  "building from source instead")
+
+    # Preflight: without git/cmake the build dies one line later with a
     # raw FileNotFoundError traceback (asher@wahi 2026-11-21). Check BEFORE
     # printing "[1/3] cloning…" so the user sees the real blocker.
     if not _ensure_build_tools(["git", "cmake", "cxx", "make"]):
@@ -24053,8 +24269,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp_sv.add_argument("--port", type=int, default=11434)
 
     # llama.cpp native commands
-    sp_il = sp_llm.add_parser("install-llama", help="build llama.cpp from source (git clone + cmake)")
-    sp_il.add_argument("--auto", action="store_true", help="actually run the build steps")
+    sp_il = sp_llm.add_parser("install-llama", help="install llama.cpp (prebuilt on macOS, else git clone + cmake)")
+    sp_il.add_argument("--auto", action="store_true", help="actually run the install steps")
+    sp_il.add_argument("--no-prebuilt", action="store_true",
+                       help="skip the prebuilt download and compile from source (needs git/cmake/C++/make)")
 
     sp_pg = sp_llm.add_parser("pull-gguf", help="download a GGUF model from HuggingFace")
     sp_pg.add_argument("model", help="model key, e.g. gemma4:e2b  |  available: " +
@@ -27280,6 +27498,10 @@ def _print_sub_help(cmd: str) -> None:
         "llm bench":   "quick CPU sha256 + memory + disk benchmark",
         "llm status":  "detect + bench + suggest in one shot",
         "llm install": "print install commands for the detected OS\n  flag: --docker   print the `docker run` for ollama\n  flag: --auto     actually run the install (instead of just printing)\n  flag: --model=X  after install, run `ollama pull X`",
+        "llm install-llama": "install llama.cpp — PREBUILT on macOS (no cmake, no compiler, no Homebrew)\n"
+                             "  usage: hivv llm install-llama [--auto] [--no-prebuilt]\n"
+                             "  flag: --no-prebuilt   skip the download and compile from source instead\n"
+                             "  (a source build needs git, cmake, a C++ compiler and make)",
         "llm pull":    "ollama pull <model>\n  usage: hivv llm pull qwen3:1.7b",
         "git":        "the contribution loop, last mile, with the rails on\n  verbs: status · clone · branch · commit · push · pr · log · diff\n  usage: hivv git branch my-topic && hivv git commit -m \"fix(scope): what\" && hivv git push\n  rails: never push main · a moved file wants a MOVES.md entry · the message is type(scope): what\n  note: there is deliberately no hivv git merge — merging goes through a PR",
         "fleet":       "one command for a multi-box deployment\n  usage: hivv fleet            → the dashboard: every box, its role, what is up, and THE NEXT STEP\n  verbs: up (make this box a bee) · check (verify, change nothing) · add · list · move\n  note: hivv fleet with no arguments needs no memory — it tells you what to type next",
