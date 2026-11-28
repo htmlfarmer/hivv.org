@@ -110,16 +110,16 @@ NO_THINK = False
 # (name, description, {param: (type, description)}, required-params)
 _FALLBACK_TOOL_DEFS = [
     ("current_time",
-     "Today's date and time: unix, ISO-8601, day of week, UTC offset. Pass an IANA timezone (e.g. Asia/Karachi).",
-     {"timezone": ("string", "IANA timezone name (e.g. Europe/Paris)")}, []),
+     "Today's date and time: unix, ISO-8601, day of week, UTC offset. Pass an IANA timezone (Asia/Karachi) OR a place name (Uganda, Jinja, Karachi).",
+     {"timezone": ("string", "IANA timezone name (e.g. Europe/Paris), or a place name (Uganda, Jinja)")}, []),
     ("calculator",
      "Accurate arithmetic: + - * / % ^, parentheses, pi, e, and functions (sqrt, log, sin, abs, min, max, factorial…). Never compute by hand.",
      {"expression": ("string", "The expression to evaluate, e.g. (12 + 8) * 3 / 7")}, ["expression"]),
     ("timezone_convert",
-     "Convert a moment between IANA timezones (DST-correct), or ask for the time in a zone.",
-     {"timezone": ("string", "Target IANA timezone, e.g. America/New_York"),
+     "Convert a moment between timezones (DST-correct), or ask for the time in a zone or a place — IANA names and place names both work.",
+     {"timezone": ("string", "Target IANA timezone, e.g. America/New_York — or a place name like Uganda"),
       "from_timezone": ("string", "Source IANA timezone, when converting between two zones"),
-      "datetime": ("string", "The moment to convert (ISO-8601). Omit for now")}, ["timezone"]),
+      "datetime": ("string", "The moment to convert (ISO-8601). OMIT for the current moment")}, ["timezone"]),
     ("text_parser",
      "Parse JSON, CSV, XML or YAML into structure. operation: parse, pretty, validate, extract (urls/emails/dates).",
      {"input": ("string", "The text to parse"),
@@ -13471,6 +13471,81 @@ def _bee_chat_with_tools(url: str, messages: list, tools: list | None, max_tok: 
     return answer
 
 
+# The direct-to-bee path sends NO system message at all — just the user's
+# message. That is how "what time is it now in jinja uganda" once came back as
+# a UTC value labelled "Uganda", three hours wrong: with no ground truth in the
+# prompt, the model stamped the place the user named onto whatever it produced.
+#
+# The hub owns the place → IANA zone table (api/lib/place-tz.js), so we ask it
+# for a ready-made clock line — exactly as we already ask it for the tool
+# catalog. ONLY questions that look about time are sent: ordinary chat must not
+# start shipping its text down a path that is meant to bypass the hub.
+_TIME_RE = re.compile(
+    r"\b(?:time|times|hour|hours|minute|minutes|clock|watch|timezone|time\s+zone|tz|"
+    r"midnight|noon|o\s*clock|today|tomorrow|yesterday|tonight|date|dates|"
+    r"dst|daylight|utc|gmt|am|pm|sunrise|sunset|weekday|weekdays|"
+    r"day\s+of\s+(?:the\s+)?week|calendar|elapsed|duration)\b",
+    re.IGNORECASE)
+
+
+def _utc_clock_line() -> str:
+    """The offline fallback: a measured UTC clock plus the rule that stops the lie."""
+    now = time.gmtime()
+    stamp = time.strftime("%Y-%m-%d %H:%M:%S", now)
+    weekday = time.strftime("%A", now)
+    return (
+        "MEASURED CLOCK — trust this over your own memory; it comes from the hub's clock, not a guess. "
+        f"now (UTC): {stamp} ({weekday}). "
+        "If this question names a place, answer with THAT place's local time — resolve it to its IANA "
+        'zone first. UTC is not an answer to "what time is it in X", and an IANA zone must never be '
+        'invented: real ones look like "Africa/Kampala".'
+    )
+
+
+def _time_context_system(msg: str):
+    """A system message carrying the measured clock, for questions about time.
+
+    Returns None for anything that is not about time, so ordinary chat keeps
+    its prompt byte-for-byte as it was — and never sends its text to the hub.
+    Falls back to a locally measured UTC line when the hub is unreachable: an
+    honest partial answer beats silence.
+    """
+    if not _TIME_RE.search(msg or ""):
+        return None
+    try:
+        code, resp = http("POST", "/api/tools/time-context",
+                          body={"text": msg}, timeout=6, sign=False)
+        if code == 200 and isinstance(resp, dict) and resp.get("system"):
+            return resp["system"]
+    except Exception:
+        pass
+    return _utc_clock_line()
+
+
+# The hub's catalog carries the tool schemas AND the briefing that tells a
+# model WHEN to reach for them. Cached briefly so one chat does not fetch the
+# same document twice (schemas + briefing are wanted together on the direct
+# path, and `hivv tools list` fetches it again a moment later).
+_CATALOG_CACHE = {"at": 0.0, "resp": None}
+
+
+def _fetch_catalog(timeout=6):
+    """GET /api/tools/catalog, cached for 60s. None when the hub is away."""
+    now = time.time()
+    cached = _CATALOG_CACHE["resp"]
+    if cached is not None and (now - _CATALOG_CACHE["at"]) < 60:
+        return cached
+    try:
+        code, resp = http("GET", "/api/tools/catalog", timeout=timeout, sign=False)
+        if code == 200 and isinstance(resp, dict) and resp.get("tools"):
+            _CATALOG_CACHE["resp"] = resp
+            _CATALOG_CACHE["at"] = now
+            return resp
+    except Exception:
+        pass
+    return cached
+
+
 def _tool_schemas() -> list:
     """The tool schemas to send with a chat request.
 
@@ -13478,27 +13553,36 @@ def _tool_schemas() -> list:
     schemas instead of keeping a second copy here that could drift. The
     static list below is only the offline fallback.
     """
-    try:
-        code, resp = http("GET", "/api/tools/catalog", timeout=6, sign=False)
-        if code == 200 and isinstance(resp, dict):
-            tools = resp.get("tools") or []
-            out = []
-            for t in tools:
-                if not t.get("advertised", True):
-                    continue
-                out.append({
-                    "type": "function",
-                    "function": {
-                        "name": t.get("name"),
-                        "description": t.get("description", ""),
-                        "parameters": t.get("parameters") or {"type": "object", "properties": {}},
-                    },
-                })
-            if out:
-                return out
-    except Exception:
-        pass
+    cat = _fetch_catalog()
+    if cat:
+        out = []
+        for t in cat.get("tools") or []:
+            if not t.get("advertised", True):
+                continue
+            out.append({
+                "type": "function",
+                "function": {
+                    "name": t.get("name"),
+                    "description": t.get("description", ""),
+                    "parameters": t.get("parameters") or {"type": "object", "properties": {}},
+                },
+            })
+        if out:
+            return out
     return TOOL_SCHEMAS
+
+
+def _tool_briefing():
+    """The hub's toolkit briefing, or None when it cannot be fetched.
+
+    The direct-to-bee path builds its prompt from scratch, so without this a
+    model is handed tool schemas and NO instruction about when to use them —
+    it improvises, which is how a time question ended up calling a tool with a
+    zone it had made up. None (offline) is better than a stale guess.
+    """
+    cat = _fetch_catalog()
+    text = (cat or {}).get("briefing")
+    return text if isinstance(text, str) and text else None
 
 
 def _ensure_tools_running() -> bool:
@@ -14952,6 +15036,10 @@ def _do_chat(msg: str, stream: bool = True, mode: str | None = None,
             # no tools attached → "I do not have access to real-time
             # information").
             _tool_schemas_list = _tool_schemas()
+            # Fetched ONCE for the whole direct attempt, not per port: a time
+            # question would otherwise hit the hub again for every candidate.
+            _briefing_line = _tool_briefing() if _tool_schemas_list else None
+            _clock_line = _time_context_system(msg)
 
             for node in online_nodes:
                 ip = node.get("lan_ip") or node.get("ip", "")
@@ -14988,12 +15076,27 @@ def _do_chat(msg: str, stream: bool = True, mode: str | None = None,
                     max_tok = _ctx_size(ip, port)
                     try:
                         url = f"http://{ip}:{port}/v1/chat/completions"
+                        # The direct path builds its prompt from scratch, so the
+                        # measured clock has to be put back by hand — without it a
+                        # model answers a time question from memory and labels the
+                        # result with the place the user named.
+                        _direct_msgs = []
+                        # The hub sends identity + briefing + clock. This path
+                        # sends NONE of them, so put back what the model needs
+                        # to answer instead of improvising: schemas with no
+                        # instruction is how a time question ended up citing a
+                        # zone nobody had ever heard of.
+                        if _briefing_line:
+                            _direct_msgs.append({"role": "system", "content": _briefing_line})
+                        if _clock_line:
+                            _direct_msgs.append({"role": "system", "content": _clock_line})
+                        _direct_msgs.append({"role": "user", "content": msg})
                         payload_dict = {
                             # REAL model from the heartbeat: ollama 404s on
                             # 'local'; llama.cpp ignores the field. No probe
                             # needed — the node already told us its model.
                             "model": m.get("model") or m.get("name") or "local",
-                            "messages": [{"role": "user", "content": msg}],
+                            "messages": _direct_msgs,
                             "stream": direct_stream,
                             # Bounded + anti-loop (the missing pair behind the
                             # 'row row row…ogas ogas' runaway on Stuarts-iMac:
@@ -15034,6 +15137,12 @@ def _do_chat(msg: str, stream: bool = True, mode: str | None = None,
                             _need = _tool_tok + (len(msg) // 4) + _max_out + 64
                             if _slot_raw and _need > _slot_raw:
                                 payload_dict.pop("tools", None)
+                                # The briefing names tools we are no longer
+                                # sending — never instruct a model to use
+                                # something it was not given.
+                                _m = payload_dict.get("messages") or []
+                                if _briefing_line and _m and _m[0].get("content") == _briefing_line:
+                                    _m.pop(0)
                                 _warn_tool_fit(name, port, _slot_raw, _need, _tool_tok)
                             else:
                                 payload_dict["tools"] = _tool_schemas_list
