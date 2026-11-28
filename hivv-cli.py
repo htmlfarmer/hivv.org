@@ -7692,7 +7692,11 @@ def _watch_start_tools_detached() -> tuple[str, str]:
     except Exception as e:
         return ("failed", f"spawn failed: {e}")
     time.sleep(1.5)
-    ok, detail = _watch_probe_tools()
+    # `_watch_probe_tools` never existed; the real prober is `_tools_probe`
+    # (catalog + a real tool call). This NameError fired on the detached
+    # tools-start path -- no systemd, no pm2 -- i.e. exactly the boxes the
+    # detached spawn exists for.
+    ok, detail = _tools_probe()
     return ("restarted" if ok else "failed",
             f"spawned {script.name}" + ("" if ok else f" — but {detail}"))
 
@@ -9118,7 +9122,7 @@ def _run_health_checks():
     ts = _r("tailscale ip -4 2>/dev/null")
     if ts.returncode != 0 or not ts.stdout.strip():
         print(f"  \033[33m!\033[0m tailscale not installed")
-        print(f"     install: curl -fsSL https://tailscale.com/install.sh | sh")
+        print(f"     install: {APP} install tailscale")
         print(f"     then:    sudo tailscale up")
         print(f"     secure:  {APP} firewall --apply --mode tailscale")
     else:
@@ -15555,6 +15559,44 @@ def _hostname() -> str:
 def _warn(s): return f"\033[33m!\033[0m {s}"
 def _fail(s): return f"\033[31m✗\033[0m {s}"
 
+def _fix_llama_script(script_path) -> bool:
+    """Fix a llama startup script -- ensure --host 0.0.0.0 is on the right lines.
+
+    MODULE LEVEL, not nested: cmd_doctor --fix calls this, but it used to be
+    defined inside cmd_firewall -- a name in one function is invisible to
+    another, so doctor --fix raised NameError exactly when a box had a broken
+    startup script to repair (yalla 2026-11-27). It also leaned on the local
+    _run lambda of cmd_firewall, so it carries its own runner now.
+    """
+    def _sh(cmd: str):
+        return subprocess.run(cmd, shell=True, capture_output=True,
+                              text=True, timeout=10)
+    if _sh(f"test -f {script_path}").returncode != 0:
+        return False
+    content = _sh(f"cat {script_path}").stdout
+    fixed = False
+    new_lines = []
+    for line in content.split("\n"):
+        stripped = line.strip()
+        # Fix broken LLAMA_BIN= line that has --host attached
+        if stripped.startswith("LLAMA_BIN=") and "--host" in stripped:
+            line = line.replace(" --host 0.0.0.0", "").replace(" --host", "")
+            fixed = True
+        # Add --host 0.0.0.0 to lines that invoke the binary (have -m or --port)
+        if ("$LLAMA_BIN" in line or "llama-server" in line) and ("-m " in line or "--port" in line) and "--host" not in line:
+            line = line.replace("llama-server ", "llama-server --host 0.0.0.0 ", 1) if "llama-server" in line else line.replace("$LLAMA_BIN ", "$LLAMA_BIN --host 0.0.0.0 ", 1)
+            fixed = True
+        new_lines.append(line)
+    if fixed:
+        import tempfile
+        tmp = tempfile.NamedTemporaryFile(mode='w', suffix='.sh', delete=False)
+        tmp.write("\n".join(new_lines))
+        tmp.close()
+        _sh(f"sudo cp {tmp.name} {script_path} && sudo chmod +x {script_path}")
+        _sh(f"rm -f {tmp.name}")
+    return fixed
+
+
 def cmd_doctor(args) -> None:
     """One-glance health report: install + hub + agent + local bee + version.
     Output is pasteable for support — pure text + ANSI colors only."""
@@ -15806,7 +15848,7 @@ def cmd_doctor(args) -> None:
         except Exception:
             print(f"  vpn:    {_ok(f'tailscale active ({ts_ip.stdout.strip()})')}")
     else:
-        print(f"  vpn:    {_warn('tailscale not running')}   install: curl -fsSL https://tailscale.com/install.sh | sh")
+        print(f"  vpn:    {_warn('tailscale not running')}   install: {APP} install tailscale")
 
     # Firewall — `platform` is module-level; do NOT shadow it here (see the
     # resilience section above: a later local import breaks earlier uses).
@@ -16061,34 +16103,6 @@ def cmd_firewall(args) -> None:
         _run(f"rm -f {tmp.name}")
         return r
 
-    # Helper: fix a broken llama startup script
-    def _fix_llama_script(script_path):
-        """Fix a llama startup script — ensure --host 0.0.0.0 is on the right lines."""
-        if _run(f"test -f {script_path}").returncode != 0:
-            return False
-        content = _run(f"cat {script_path}").stdout
-        fixed = False
-        new_lines = []
-        for line in content.split("\n"):
-            stripped = line.strip()
-            # Fix broken LLAMA_BIN= line that has --host attached
-            if stripped.startswith("LLAMA_BIN=") and "--host" in stripped:
-                line = line.replace(" --host 0.0.0.0", "").replace(" --host", "")
-                fixed = True
-            # Add --host 0.0.0.0 to lines that invoke the binary (have -m or --port)
-            if ("$LLAMA_BIN" in line or "llama-server" in line) and ("-m " in line or "--port" in line) and "--host" not in line:
-                line = line.replace("llama-server ", "llama-server --host 0.0.0.0 ", 1) if "llama-server" in line else line.replace("$LLAMA_BIN ", "$LLAMA_BIN --host 0.0.0.0 ", 1)
-                fixed = True
-            new_lines.append(line)
-        if fixed:
-            import tempfile
-            tmp = tempfile.NamedTemporaryFile(mode='w', suffix='.sh', delete=False)
-            tmp.write("\n".join(new_lines))
-            tmp.close()
-            _run(f"sudo cp {tmp.name} {script_path} && sudo chmod +x {script_path}")
-            _run(f"rm -f {tmp.name}")
-        return fixed
-
     if not models:
         print(f"\n{fail} No local LLM servers found running.")
         print(f"   Start one first: {APP} llm serve")
@@ -16156,11 +16170,15 @@ def cmd_firewall(args) -> None:
     else:
         print(f"   {ok} all LLMs bound to 0.0.0.0 — network reachable")
 
-    # Look for stopped LLMs (informational only)
+    # Look for stopped LLMs (informational only).
+    # `_r` only exists in OTHER functions (cmd_up, _run_health_checks, ...);
+    # cmd_firewall binds `_run`. Calling `_r` here raised NameError and
+    # killed `hivv firewall --apply --mode tailscale` on yalla 2026-11-27
+    # -- the one command that turns the tailscale mode on.
     import glob as _glob
     for pattern in ["/home/*/llama.cpp/servers/start-*.sh"]:
         for s in _glob.glob(pattern):
-            content = _r(f"cat {s} 2>/dev/null").stdout
+            content = _run(f"cat {s} 2>/dev/null").stdout
             if content and "llama-server" in content:
                 print(f"  {warn} startup script found: {s}")
 
@@ -16193,7 +16211,7 @@ def cmd_firewall(args) -> None:
     if not tailscale_ok:
         print(f"\n\033[1mtailscale\033[0m")
         print(f"   {warn} not installed — nodes on different networks won't reach you")
-        print(f"   install: curl -fsSL https://tailscale.com/install.sh | sh")
+        print(f"   install: {APP} install tailscale")
         print(f"   then:    sudo tailscale up")
 
     # 3. Detect LAN subnet
@@ -16329,7 +16347,8 @@ def cmd_firewall(args) -> None:
     if not allow_from:
         print(f"   {fail} no valid source for mode '{mode}'")
         if mode == "tailscale" and not tailscale_ip:
-            print(f"   install tailscale first: curl -fsSL https://tailscale.com/install.sh | sh && sudo tailscale up")
+            print(f"   install tailscale first: {APP} install tailscale")
+            print(f"   then:                       sudo tailscale up")
         return
 
     for port in closed_ports:
@@ -26424,6 +26443,63 @@ def _is_stray_command_word(argv) -> bool:
         return False                       # a phrase, or an explicit question
     return cmd.lower() not in _CHAT_WORDS  # a lone greeting still chats
 
+def _run_install_tailscale(extra: list[str]) -> None:
+    """Install Tailscale via public_html/install-tailscale.sh.
+
+    Why our own script instead of running tailscale.com's installer
+    directly: theirs cases only on ID= from /etc/os-release and exits 1
+    on any distro it does not know (ID=boss -> "Couldn't determine what
+    kind of Linux is running."), installing NOTHING, and it has no env
+    override to opt out of detection. Ours tries three tiers:
+      1. the official installer (right answer wherever it works)
+      2. apt — uses an already-configured repo, else adds one, but only
+         with a suite pkgs.tailscale.com actually serves (probed, never
+         guessed: VERSION_CODENAME=pragya is not a Debian codename)
+      3. the static tarball + a systemd unit — needs no distro knowledge
+    and it never prompts for a sudo password nobody can answer.
+
+    The script lives beside this file in a clone; an installed CLI fetches
+    it from the hub into a temp file first (a download is written to a
+    FILE, never piped into a shell — the repo's fast-scan calls that
+    critical, and it is right to).
+    """
+    local = _THIS_DIR / "install-tailscale.sh"
+    script = local
+    if not local.is_file():
+        try:
+            data = _http_get_bytes(f"{HUB}/install-tailscale.sh")
+        except Exception as e:
+            print(f"  could not fetch install-tailscale.sh: {e}")
+            print(f"  run it by hand: sudo sh {HUB}/install-tailscale.sh")
+            return
+        fd, name = tempfile.mkstemp(prefix="hivv-ts-", suffix=".sh")
+        try:
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(data)
+        except Exception:
+            os.close(fd)
+            return
+        script = Path(name)
+
+    print(f"\n\033[1m{APP} install tailscale\033[0m — three tiers: official -> apt -> static")
+    print(f"  script: {script}")
+    try:
+        rc = subprocess.call(["sh", str(script), *extra])
+    except Exception as e:
+        print(f"  could not run the installer: {e}")
+        rc = 1
+    finally:
+        # a downloaded copy is ours to remove; a clone's sibling is not
+        if script != local:
+            try:
+                script.unlink()
+            except OSError:
+                pass
+    if rc != 0:
+        print(f"\n  installer exited {rc}")
+        if "--dry-run" not in extra:
+            print("  manual fallback (static binaries):")
+            print("      https://pkgs.tailscale.com/stable/#static")
 
 def main(argv: list[str]) -> None:
     global HUB
@@ -26538,12 +26614,24 @@ def main(argv: list[str]) -> None:
                     rest = [a for a in rest if a.startswith("-")] + ["--model", pos[0]] + pos[1:]
             argv = ["llm", "install"] + ([] if wants_help else ["--auto"]) + rest
             cmd_name = "llm install"
+        elif len(argv) > 1 and argv[1] in ("tailscale", "vpn"):
+            # Tailscale, three tiers (2026-11-27). tailscale.com own
+            # installer cases only on ID= from /etc/os-release and exits 1
+            # on anything it does not know - ID=boss (BOSS GNU/Linux, a
+            # Debian 12 fork) got "Could not determine what kind of Linux
+            # is running." and NOTHING was installed. There is no env
+            # override in their script. Ours tries the official installer,
+            # then apt, then the static tarball, and never prompts for a
+            # sudo password nobody can answer.
+            _run_install_tailscale(argv[2:])
+            return
         else:
             print(f"\033[1m{APP} install\033[0m — what do you want to install?")
             print()
             print(f"  {APP} install llm        one-shot: build llama.cpp + download gemma + serve")
             print(f"  {APP} install ollama     step 1: install ollama only (then verify: ollama --version)")
             print(f"  {APP} install ollama qwen  step 2: install + pull — family picks small & fast for this box")
+            print(f"  {APP} install tailscale   VPN for cross-network nodes (works on distros tailscale.com refuses)")
             print(f"  {APP} llm setup --help   every option (--model, --port, --yes, --fg)")
             print(f"  {APP} itself:            curl -sSL {HUB}/install-hivv.sh | bash")
             return
