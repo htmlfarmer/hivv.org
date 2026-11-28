@@ -100,7 +100,7 @@ footer a{color:var(--honey-dim)}
     <button class="copy" onclick="copyCmd(this)">copy</button>
     <div class="install-label">Install <strong>+ local LLM</strong> (llama.cpp · memory-efficient) · one shot</div>
     <pre class="install-cmd" data-tab="unix">curl <span class="flag">-sSL</span> https://hivv.org/install-hivv.sh | bash <span class="flag">-s --</span> <span class="flag">--with-llm --yes</span></pre>
-    <pre class="install-cmd" data-tab="win" style="display:none">iwr <span class="flag">-useb</span> https://hivv.org/install-hivv.ps1 | iex; <span class="flag">Install-Hivv -WithLlm -Yes</span></pre>
+    <pre class="install-cmd" data-tab="win" style="display:none">&amp; <span class="flag">([scriptblock]::Create((iwr -useb https://hivv.org/install-hivv.ps1).Content)) -WithLlm -Yes</span></pre>
     <p class="install-note">Detects your hardware (CPU cores / RAM / GPU), installs llama.cpp (handles many concurrent requests, low memory), and downloads the right model:
     <code>qwen3:8b-q4</code> for NVIDIA 4–12 GB VRAM, <code>qwen3:14b</code> for ≥12 GB,
     <code>gemma4:e2b</code> for 8-core / no-GPU, <code>qwen3:1.7b</code> for 4–7 cores, <code>qwen3:0.6b</code> for tiny boxes.
@@ -243,11 +243,15 @@ hivv test        <span class="comment"># doctor + speed + a remote chat</span></
 
   <h2 id="uninstall"><span class="num">7</span>Uninstall</h2>
   <div class="examples">
-<pre><span class="comment"># remove hivv CLI and service (keeps config + logs)</span>
+<pre><span class="comment"># macOS / Linux / WSL — remove hivv CLI and service (keeps config + logs)</span>
 curl -sSL https://hivv.org/install-hivv.sh | bash -s -- --uninstall
 
+<span class="comment"># Windows PowerShell — same thing</span>
+&amp; ([scriptblock]::Create((iwr -useb https://hivv.org/install-hivv.ps1).Content)) -Uninstall
+
 <span class="comment"># also remove config and state</span>
-rm -rf ~/.config/hivv ~/.local/share/hivv</pre>
+rm -rf ~/.config/hivv ~/.local/share/hivv
+<span class="comment"># Windows:</span> Remove-Item -Recurse -Force ~\.config\hivv, ~\.local\share\hivv</pre>
   </div>
 
 </main>
@@ -263,12 +267,23 @@ document.querySelectorAll('.platform-tabs button').forEach(b=>{
     const t=b.dataset.tab;
     document.querySelectorAll('.platform-tabs button').forEach(x=>x.classList.toggle('active',x===b));
     document.querySelectorAll('.install-cmd').forEach(c=>c.style.display=(c.dataset.tab===t?'block':'none'));
+    try{localStorage.setItem('hivv-cli-platform',t);}catch(e){}
   };
 });
 function copyCmd(btn){
   const cmd=btn.parentElement.querySelector('.install-cmd:not([style*="none"])').textContent;
   navigator.clipboard.writeText(cmd).then(()=>{btn.textContent='copied!';setTimeout(()=>btn.textContent='copy',1500);});
 }
+// A Windows visitor lands on the PowerShell tab — "curl | bash" dies in
+// PowerShell with "bash: not recognized". Their choice is remembered.
+(function(){
+  let p='';
+  try{ p=(navigator.userAgentData&&navigator.userAgentData.platform)||navigator.platform||navigator.userAgent||''; }catch(e){}
+  if(!/win/i.test(p)) return;
+  try{ if(localStorage.getItem('hivv-cli-platform')==='unix') return; }catch(e){}
+  const b=document.querySelector('.platform-tabs button[data-tab="win"]');
+  if(b) b.click();
+})();
 </script>
 <!-- U0001F41D THE live numbers — one endpoint (/api/hivv/stats), one binding,
      every page. No number on this site is typed into the HTML any more. -->

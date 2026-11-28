@@ -43,6 +43,7 @@ quickstart_curl: |
 #
 # PATH B — Run a node (serves local LLMs, earns honey):
 #   1. Install:  curl -sSL https://hivv.org/install-hivv.sh | bash
+#      Windows:   iwr -useb https://hivv.org/install-hivv.ps1 | iex   (PowerShell)
 #   2. Start:    hivv start
 #   3. Serve:    hivv llm serve  (runs ollama/llama.cpp on :8080)
 #   4. Volunteer: hivv volunteer on  (accept jobs from the hive)
@@ -183,6 +184,7 @@ risk_tiers:
 # Node operator quick start
 node_quickstart:
   install: curl -sSL https://hivv.org/install-hivv.sh | bash
+  install_windows: iwr -useb https://hivv.org/install-hivv.ps1 | iex   (PowerShell)
   start: hivv start
   serve_llm: hivv llm install && hivv llm serve
   firewall_lan: hivv firewall --apply --mode lan

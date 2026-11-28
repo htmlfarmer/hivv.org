@@ -1497,18 +1497,79 @@
       <div style="flex:1;min-width:280px">
         <div style="font-size:.72rem;text-transform:uppercase;letter-spacing:.12em;color:#fbbf24;margin-bottom:6px;font-weight:700">🐝 Run hivv from your terminal</div>
         <div style="font-size:1.35rem;font-weight:700;color:#fef3c7;margin-bottom:10px;letter-spacing:-.01em">One command. Stdlib only. ~1 MB.</div>
-        <div style="display:flex;align-items:center;gap:10px;background:#0c0a09;border:1px solid #44403c;border-radius:8px;padding:10px 14px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">
-          <span style="color:#a8a29e">$</span>
-          <code id="hivv-install-cmd" style="color:#fbbf24;font-size:1rem;flex:1">curl -sSL https://hivv.org/install-hivv.sh | bash</code>
-          <button onclick="navigator.clipboard.writeText('curl -sSL https://hivv.org/install-hivv.sh | bash').then(()=>{this.textContent='✓ copied';setTimeout(()=>this.textContent='copy',1500)})" style="background:transparent;border:1px solid #d97706;color:#fbbf24;padding:4px 10px;border-radius:6px;font-size:.75rem;cursor:pointer;font-family:inherit">copy</button>
+        <div id="hivv-os-tabs" style="display:flex;gap:6px;flex-wrap:wrap;margin:0 0 8px" role="tablist" aria-label="Choose your operating system">
+          <button type="button" data-os="unix" class="hivv-os-tab active" aria-selected="true" style="background:#d97706;border:1px solid #d97706;color:#1c1917;padding:4px 12px;border-radius:999px;font-size:.78rem;font-weight:600;cursor:pointer;font-family:inherit">🐧 macOS / Linux</button>
+          <button type="button" data-os="win" class="hivv-os-tab" aria-selected="false" style="background:transparent;border:1px solid #44403c;color:#a8a29e;padding:4px 12px;border-radius:999px;font-size:.78rem;font-weight:600;cursor:pointer;font-family:inherit">🪟 Windows</button>
+          <button type="button" data-os="wsl" class="hivv-os-tab" aria-selected="false" style="background:transparent;border:1px solid #44403c;color:#a8a29e;padding:4px 12px;border-radius:999px;font-size:.78rem;font-weight:600;cursor:pointer;font-family:inherit">🐧 WSL</button>
         </div>
-        <div style="font-size:.78rem;color:#a8a29e;margin-top:8px">macOS · Linux · WSL · Windows PowerShell · Auto-updates itself · Zero deps</div>
+        <div style="display:flex;align-items:center;gap:10px;background:#0c0a09;border:1px solid #44403c;border-radius:8px;padding:10px 14px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">
+          <span id="hivv-install-prompt" style="color:#a8a29e">$</span>
+          <code id="hivv-install-cmd" style="color:#fbbf24;font-size:1rem;flex:1">curl -sSL https://hivv.org/install-hivv.sh | bash</code>
+          <button id="hivv-install-copy" type="button" style="background:transparent;border:1px solid #d97706;color:#fbbf24;padding:4px 10px;border-radius:6px;font-size:.75rem;cursor:pointer;font-family:inherit">copy</button>
+        </div>
+        <div id="hivv-install-hint" style="font-size:.78rem;color:#a8a29e;margin-top:8px">macOS · Linux · Auto-updates itself · Zero deps</div>
       </div>
       <div style="display:flex;gap:10px;flex-wrap:wrap">
         <a href="/cli.html" style="display:inline-block;padding:11px 20px;background:#d97706;color:#1c1917;border-radius:8px;font-weight:600;font-size:.92rem;text-decoration:none;transition:transform .15s" onmouseover="this.style.background='#fbbf24';this.style.color='#1c1917'" onmouseout="this.style.background='#d97706';this.style.color='#1c1917'">View CLI guide →</a>
         <a href="/openapi.yaml" download style="display:inline-block;padding:11px 20px;background:transparent;border:1px solid #d97706;color:#fbbf24;border-radius:8px;font-weight:600;font-size:.92rem;text-decoration:none" onmouseover="this.style.background='rgba(251,191,36,.1)'" onmouseout="this.style.background='transparent'">⬇ OpenAPI</a>
       </div>
     </section>
+
+    <script>
+    // Install command for EVERY OS — one visible command, three labelled tabs.
+    // The visitor's platform picks the default (a Windows visitor must never be
+    // handed "curl | bash" again — that lands in PowerShell and dies with
+    // "bash: not recognized"), the copy button always copies what is ON SCREEN,
+    // and a remembered choice wins over detection.
+    (function () {
+      var CMDS = {
+        unix: { cmd: 'curl -sSL https://hivv.org/install-hivv.sh | bash', prompt: '$',
+                hint: 'macOS · Linux · Auto-updates itself · Zero deps' },
+        win:  { cmd: 'iwr -useb https://hivv.org/install-hivv.ps1 | iex', prompt: 'PS>',
+                hint: 'Press Win+X → Windows PowerShell (or Terminal), paste, Enter · adds hivv to your PATH' },
+        wsl:  { cmd: 'curl -sSL https://hivv.org/install-hivv.sh | bash', prompt: '$',
+                hint: 'No WSL yet? run "wsl --install" in PowerShell, reboot, then paste this inside WSL' }
+      };
+      var tabs = document.getElementById('hivv-os-tabs');
+      if (!tabs) return;
+      function detect() {
+        var p = '';
+        try { p = (navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || navigator.userAgent || ''; } catch (e) {}
+        return /win/i.test(p) ? 'win' : 'unix';
+      }
+      function show(os) {
+        if (!CMDS[os]) os = 'unix';
+        var c = CMDS[os];
+        document.getElementById('hivv-install-cmd').textContent = c.cmd;
+        document.getElementById('hivv-install-prompt').textContent = c.prompt;
+        document.getElementById('hivv-install-hint').textContent = c.hint;
+        Array.prototype.forEach.call(tabs.children, function (b) {
+          var on = b.getAttribute('data-os') === os;
+          b.classList.toggle('active', on);
+          b.setAttribute('aria-selected', on ? 'true' : 'false');
+          b.style.background = on ? '#d97706' : 'transparent';
+          b.style.borderColor = on ? '#d97706' : '#44403c';
+          b.style.color = on ? '#1c1917' : '#a8a29e';
+        });
+        try { localStorage.setItem('hivv-install-os', os); } catch (e) {}
+      }
+      tabs.addEventListener('click', function (e) {
+        var b = e.target && e.target.closest ? e.target.closest('.hivv-os-tab') : null;
+        if (b) show(b.getAttribute('data-os'));
+      });
+      var saved = null;
+      try { saved = localStorage.getItem('hivv-install-os'); } catch (e) {}
+      show(saved && CMDS[saved] ? saved : detect());
+      var copyBtn = document.getElementById('hivv-install-copy');
+      if (copyBtn) copyBtn.onclick = function () {
+        var btn = this;
+        navigator.clipboard.writeText(document.getElementById('hivv-install-cmd').textContent).then(function () {
+          btn.textContent = '✓ copied';
+          setTimeout(function () { btn.textContent = 'copy'; }, 1500);
+        });
+      };
+    })();
+    </script>
 
     <!-- HERO: SIMPLIFIED - MAP + KEY STATS -->
     <section class="universe-hero">
@@ -1702,7 +1763,7 @@
         AUTH: api_key="any" (no registration needed to CONSUME)
         QUICKSTART: POST https://hivv.org/v1/chat/completions with {"model":"auto","messages":[{"role":"user","content":"hello"}]}
         JOIN AS PROVIDER: POST https://hivv.org/api/keys/donate with {"provider":"openai","api_key":"sk-..."}
-        HOST A NODE: curl -sSL https://hivv.org/install-hivv.sh | bash && hivv start
+        HOST A NODE: curl -sSL https://hivv.org/install-hivv.sh | bash && hivv start  (Windows PowerShell: iwr -useb https://hivv.org/install-hivv.ps1 | iex)
         SELF-HOSTED ENDPOINT: POST https://hivv.org/api/keys/donate with {"provider":"custom","api_key":"any","endpoint":"http://YOUR_IP:8080/v1"}
         ROUTE_MODES: balanced, quality, fast, cheap, private, trusted
         CAPABILITIES: GET https://hivv.org/api/capabilities
@@ -1900,10 +1961,14 @@
           <div style="background:#111;border:1px solid #333;border-radius:8px;padding:12px">
             <div style="color:#00ff88;font-weight:700;font-size:.82rem;margin-bottom:6px">Path C: Run a Full Node</div>
             <div style="color:#666;font-size:.72rem;margin-bottom:8px">Join the swarm. Earn honey. Serve the hive with your GPU.</div>
-            <div style="background:#080810;border:1px solid #333;border-radius:6px;padding:8px;font-family:monospace;font-size:.68rem;line-height:1.5;overflow-x:auto;white-space:pre"><span style="color:#ffd93d">curl</span> -sSL https://hivv.org/install-hivv.sh | bash
+            <div style="background:#080810;border:1px solid #333;border-radius:6px;padding:8px;font-family:monospace;font-size:.68rem;line-height:1.5;overflow-x:auto;white-space:pre"><span style="color:#666"># macOS / Linux / WSL:</span>
+<span style="color:#ffd93d">curl</span> -sSL https://hivv.org/install-hivv.sh | bash
 <span style="color:#ffd93d">hivv</span> start
 <span style="color:#ffd93d">hivv</span> llm serve
-<span style="color:#ffd93d">hivv</span> volunteer on</div>
+<span style="color:#ffd93d">hivv</span> volunteer on
+<span style="color:#666"># Windows PowerShell:</span>
+<span style="color:#ffd93d">iwr</span> -useb https://hivv.org/install-hivv.ps1 | iex
+<span style="color:#ffd93d">hivv</span> start</div>
             <div style="color:#666;font-size:.68rem;margin-top:6px">Registers with hub. Heartbeats every 60s. Accepts relay jobs. Earns honey ranks.</div>
           </div>
         </div>
@@ -1940,7 +2005,11 @@
           <div style="background:#111;border:1px solid #333;border-radius:8px;padding:12px">
             <div style="color:#00ff88;font-weight:700;font-size:.82rem;margin-bottom:6px">1. Install &amp; start</div>
             <div style="background:#080810;border:1px solid #333;border-radius:6px;padding:8px;font-family:monospace;font-size:.72rem;line-height:1.5">
+              <div style="color:#666">macOS / Linux / WSL:</div>
               <div style="color:#ffd93d">curl -sSL https://hivv.org/install-hivv.sh | bash</div>
+              <div style="color:#ffd93d">hivv start</div>
+              <div style="color:#666;margin-top:6px">Windows PowerShell:</div>
+              <div style="color:#ffd93d">iwr -useb https://hivv.org/install-hivv.ps1 | iex</div>
               <div style="color:#ffd93d">hivv start</div>
             </div>
             <div style="color:#666;font-size:.72rem;margin-top:6px">Registers your bee with the hub. Heartbeats every 60s.</div>
