@@ -26963,6 +26963,16 @@ Tip: every subcommand accepts --help (e.g. `hivv logs --help`).
 """)
     _nag_if_update_available()
 
+# Commands the DISPATCH rewrites before argparse ever sees them, so parser
+# introspection cannot find them. Without this table `hivv help tailscale`
+# returned firewall+local and never mentioned `install tailscale` -- the very
+# command the four hints tell you to run (2026-11-28).
+DISPATCH_ONLY_HELP = (
+    ("install", "choose what to install: llm (llama.cpp) - ollama [family] - tailscale, the VPN for cross-network nodes (works on distros tailscale.com refuses)"),
+    ("install tailscale", "install Tailscale in three tiers: official - apt - static; for boxes the official installer exits 1 on"),
+)
+
+
 def _help_search(query: str) -> bool:
     """FUZZY help — `hivv help ollama`, `hivv ollama help`, `hivv --model`.
 
@@ -27014,6 +27024,8 @@ def _help_search(query: str) -> bool:
                                         flags, " ".join(pos), []))
     except Exception:
         pass  # introspection is best-effort — help must never crash
+    # ...plus the commands dispatch rewrites before argparse sees them
+    entries.extend((name, htext, [], "", []) for name, htext in DISPATCH_ONLY_HELP)
     rows = []
     for name, htext, flags, extra, subs in entries:
         hay = " ".join([name, htext,
