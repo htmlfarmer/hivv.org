@@ -381,7 +381,7 @@ _ts_ladder() {
     printf '  %stailscale setup%s — four steps, in order\n' "$BLD" "$RST"
     while [ "$i" -le 4 ]; do
         case "$i" in
-            1) line="curl -fsSL https://tailscale.com/install.sh | sh" ;;
+            1) line="hivv install tailscale" ;;
             2) line="sudo tailscale up   (then OPEN the URL it prints)" ;;
             3) line="tailscale ip -4     (expect a 100.x.x.x address)" ;;
             4) line="hivv firewall --apply --mode tailscale" ;;
